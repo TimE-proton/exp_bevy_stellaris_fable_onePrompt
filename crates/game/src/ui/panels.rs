@@ -716,18 +716,33 @@ pub const BATTLE_KEYS: [(&str, &str); 16] = [
     ("W A S D", "Kamera vor, zurück, seitwärts"),
     ("E / Q", "Kamera steigen / sinken"),
     ("Rechte Maustaste halten", "Umsehen"),
-    ("M", "Umsehen ein- und ausschalten, ohne die Maustaste zu halten"),
+    (
+        "M",
+        "Umsehen ein- und ausschalten, ohne die Maustaste zu halten",
+    ),
     ("Umschalt links", "schneller fliegen"),
     ("Mausrad", "Fluggeschwindigkeit ändern"),
-    ("Ziffernblock 7 / 1 / 3", "Blick von oben / von vorn / von der Seite (mit Strg: Gegenseite)"),
+    (
+        "Ziffernblock 7 / 1 / 3",
+        "Blick von oben / von vorn / von der Seite (mit Strg: Gegenseite)",
+    ),
     ("U", "Übersicht über das ganze Feld"),
     ("G", "Zum Schwerpunkt des Gefechts"),
     ("Linksklick", "Schiff wählen (ins Leere: Auswahl aufheben)"),
-    ("F", "Gewähltes Schiff heranholen (ohne Auswahl: Gefechtsschwerpunkt)"),
+    (
+        "F",
+        "Gewähltes Schiff heranholen (ohne Auswahl: Gefechtsschwerpunkt)",
+    ),
     ("V", "Gewähltes Schiff verfolgen"),
-    ("T", "Taktische Einblendung: Flottenanker, Reichweiten, Ziellinie"),
+    (
+        "T",
+        "Taktische Einblendung: Flottenanker, Reichweiten, Ziellinie",
+    ),
     ("N", "Namen an nahen Schiffen"),
-    ("Leertaste, 1 – 6, + / −", "Pause und Geschwindigkeit wie in der Partie"),
+    (
+        "Leertaste, 1 – 6, + / −",
+        "Pause und Geschwindigkeit wie in der Partie",
+    ),
     ("Esc", "Gefechtsübung verlassen (in der Partie: Menü)"),
 ];
 

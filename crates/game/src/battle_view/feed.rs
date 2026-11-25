@@ -83,15 +83,27 @@ pub struct FeedInfo {
     pub player_side: Option<usize>,
     /// Bietet die Bilanz „Neu starten“ an?
     pub can_restart: bool,
+    /// Standbild: Das Gefecht wird nur gezeigt, nicht gerechnet.
+    pub still: bool,
 }
 
 /// Nachleuchten eines Schildtreffers an einem Schiff.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShieldFlash {
     /// Gefechtszeit, zu der der Schimmer erlischt.
     pub until: f32,
     /// Richtung in der Gefechtsebene, aus der der Treffer kam.
     pub angle: f32,
+}
+
+impl Default for ShieldFlash {
+    /// Noch nie getroffen: längst erloschen.
+    fn default() -> Self {
+        Self {
+            until: f32::MIN,
+            angle: 0.0,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -361,6 +373,7 @@ pub mod testing {
                 .collect(),
             player_side: Some(0),
             can_restart: true,
+            still: false,
         }
     }
 
@@ -397,7 +410,10 @@ mod tests {
         // Von 170° nach −170° sind es 20° über die Naht.
         let (from, to) = (170f32.to_radians(), -170f32.to_radians());
         let half = lerp_angle(from, to, 0.5);
-        assert!((half.abs() - PI).abs() < 1e-4, "Mitte liegt bei ±180°, nicht {half}");
+        assert!(
+            (half.abs() - PI).abs() < 1e-4,
+            "Mitte liegt bei ±180°, nicht {half}"
+        );
         let quarter = lerp_angle(from, to, 0.25);
         assert!((quarter - 175f32.to_radians()).abs() < 1e-4);
         let three_quarters = lerp_angle(from, to, 0.75);
@@ -461,7 +477,10 @@ mod tests {
         battle.set_orders(&data, 0, Formation::Wedge, Doctrine::Aggressive);
         feed.refresh(&battle);
         assert_eq!(feed.pose(0, 0.0), anchor);
-        assert_eq!(feed.battle().unwrap().combatants[0].formation, Formation::Wedge);
+        assert_eq!(
+            feed.battle().unwrap().combatants[0].formation,
+            Formation::Wedge
+        );
     }
 
     #[test]
@@ -509,7 +528,11 @@ mod tests {
             feed.refresh(&battle);
             for (index, beam) in battle.beams.iter().enumerate() {
                 let life = feed.beam_life(index);
-                assert!(life + 1e-5 >= beam.ttl, "Lebensdauer {life} unter Restzeit {}", beam.ttl);
+                assert!(
+                    life + 1e-5 >= beam.ttl,
+                    "Lebensdauer {life} unter Restzeit {}",
+                    beam.ttl
+                );
                 // Kein Strahl lebt länger als eine halbe Sekunde.
                 assert!(life <= 0.5);
                 beams_seen += 1;
@@ -527,8 +550,14 @@ mod tests {
                 .count();
         }
         assert!(beams_seen > 100, "nur {beams_seen} Strahlen gesehen");
-        assert!(impacts_seen > 20, "nur {impacts_seen} gealterte Einschläge gesehen");
-        assert!(flashes > 20, "Schilde wurden getroffen, also leuchten sie auf");
+        assert!(
+            impacts_seen > 20,
+            "nur {impacts_seen} gealterte Einschläge gesehen"
+        );
+        assert!(
+            flashes > 20,
+            "Schilde wurden getroffen, also leuchten sie auf"
+        );
     }
 
     #[test]
@@ -540,13 +569,23 @@ mod tests {
         carry_lives(&mut lives, &old, &new, |item| item.1, |a, b| a.0 == b.0);
         assert_eq!(lives, vec![0.3, 1.2, 0.25]);
         // Alles erloschen, nichts Neues.
-        carry_lives(&mut lives, &new, &[], |item: &(f32, f32)| item.1, |a, b| a.0 == b.0);
+        carry_lives(
+            &mut lives,
+            &new,
+            &[],
+            |item: &(f32, f32)| item.1,
+            |a, b| a.0 == b.0,
+        );
         assert!(lives.is_empty());
         // An gleicher Stelle neu entstanden (Restzeit größer): gilt als neu.
         let mut lives = vec![0.9];
-        carry_lives(&mut lives, &[(1.0f32, 0.1f32)], &[(1.0, 0.3)], |item| item.1, |a, b| {
-            a.0 == b.0
-        });
+        carry_lives(
+            &mut lives,
+            &[(1.0f32, 0.1f32)],
+            &[(1.0, 0.3)],
+            |item| item.1,
+            |a, b| a.0 == b.0,
+        );
         assert_eq!(lives, vec![0.3]);
     }
 }

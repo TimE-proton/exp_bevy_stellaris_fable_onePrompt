@@ -139,6 +139,7 @@ impl EffectPools {
     }
 
     /// Obergrenze aller Vorräte zusammen.
+    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.pools.iter().map(|pool| pool.cap).sum()
     }
@@ -161,6 +162,8 @@ impl EffectPools {
         let back = (1.0 - frame.alpha) * tick;
         let eye = frame.projector.eye;
         let pixel = frame.projector.pixel();
+        // Leuchtscheiben stehen immer quer zum Blick.
+        let facing = frame.projector.rotation();
         let thin = |at: Vec3| MIN_PIXELS * pixel * at.distance(eye);
 
         for shot in &battle.shots {
@@ -209,7 +212,7 @@ impl EffectPools {
                 let rotation = heading_rotation((beam.to - beam.from).angle());
                 let (kind, start, length, width) = match beam.kind {
                     BeamKind::Light => (BEAM_LIGHT, from, to.distance(from), 0.8),
-                    BeamKind::Heavy => (BEAM_HEAVY, from, to.distance(from), 2.4),
+                    BeamKind::Heavy => (BEAM_HEAVY, from, to.distance(from), 1.7),
                     BeamKind::PointDefense => {
                         // Leuchtspur: ein kurzes Stück, das vom Schützen zum Ziel läuft.
                         let piece = (reach * 0.4).min(55.0);
@@ -237,13 +240,14 @@ impl EffectPools {
             for (index, impact) in battle.impacts.iter().enumerate() {
                 let progress = progress(feed.impact_life(index), impact.ttl, frame.alpha, tick);
                 let position = to_world(impact.pos);
-                // Schnell aufblähen, dann langsamer weiterwachsen und verblassen.
+                // Schnell aufblähen, dann langsamer weiterwachsen und verblassen. Die
+                // Leuchtscheibe läuft weich aus und ist deshalb größer als der Einschlag.
                 let swell = 1.0 - (1.0 - progress) * (1.0 - progress);
-                let radius = (impact.size * (0.3 + 0.7 * swell)).max(thin(position) * 1.5);
+                let radius = (impact.size * (0.4 + 1.0 * swell)).max(thin(position) * 2.5);
                 let level = (progress * FLASH_LEVELS as f32) as usize;
                 self.flash_pool(level).push(Transform {
                     translation: position,
-                    rotation: Quat::IDENTITY,
+                    rotation: facing,
                     scale: Vec3::splat(radius),
                 });
             }
@@ -259,7 +263,7 @@ impl EffectPools {
                 };
                 let faded = 1.0 - (left / SHIELD_FLASH_SECONDS).clamp(0.0, 1.0);
                 let level = (faded * SHIELD_LEVELS as f32) as usize;
-                let radius = ship.radius * 1.12;
+                let radius = ship.radius * 1.05;
                 self.shield_pool(level).push(Transform {
                     translation: *position,
                     rotation: heading_rotation(flash.angle),
@@ -352,6 +356,7 @@ fn assign(
                 Mesh3d(pool.mesh.clone()),
                 MeshMaterial3d(pool.material.clone()),
                 pool.items[pool.spawned],
+                Visibility::Inherited,
             ));
             pool.spawned += 1;
         }
@@ -431,7 +436,10 @@ mod tests {
         let stores = stores(1);
         let mut pools = EffectPools::default();
         pools.rebuild(&stores.assets, &stores.sides);
-        assert_eq!(pools.pools.len(), 2 * PER_SIDE + FLASH_LEVELS + SHIELD_LEVELS);
+        assert_eq!(
+            pools.pools.len(),
+            2 * PER_SIDE + FLASH_LEVELS + SHIELD_LEVELS
+        );
 
         let (mut battle, mut feed) = stepped(&data, MIXED, 0);
         let (mut most_shots, mut most_beams, mut flashes, mut shields) = (0, 0, 0, 0);
@@ -451,7 +459,10 @@ mod tests {
                     .map(|side| pools.pools[side * PER_SIDE + kind].items.len())
                     .sum()
             };
-            assert_eq!(count(&pools, TRACER) + count(&pools, MISSILE), battle.shots.len());
+            assert_eq!(
+                count(&pools, TRACER) + count(&pools, MISSILE),
+                battle.shots.len()
+            );
             let flash_items: usize = (0..FLASH_LEVELS)
                 .map(|level| pools.flash_pool(level).items.len())
                 .sum();
@@ -466,12 +477,21 @@ mod tests {
                 for item in &pool.items {
                     assert!(item.translation.is_finite() && item.scale.is_finite());
                     assert!(item.scale.min_element() > 0.0, "Effekt ohne Ausdehnung");
-                    assert_eq!(item.translation.y, 0.0, "Effekte liegen in der Gefechtsebene");
+                    assert_eq!(
+                        item.translation.y, 0.0,
+                        "Effekte liegen in der Gefechtsebene"
+                    );
                 }
             }
         }
-        assert!(most_shots > 10 && most_beams > 5, "{most_shots} Geschosse, {most_beams} Strahlen");
-        assert!(flashes > 50 && shields > 20, "{flashes} Einschläge, {shields} Schildtreffer");
+        assert!(
+            most_shots > 10 && most_beams > 5,
+            "{most_shots} Geschosse, {most_beams} Strahlen"
+        );
+        assert!(
+            flashes > 50 && shields > 20,
+            "{flashes} Einschläge, {shields} Schildtreffer"
+        );
     }
 
     #[test]
@@ -501,7 +521,10 @@ mod tests {
                     let nose = item.rotation * Vec3::X;
                     let flight = to_world(shot.vel).normalize();
                     assert!(nose.dot(flight) > 0.999, "Leuchtspur quer zur Flugrichtung");
-                    assert!(item.scale.x > item.scale.y * 3.0, "Leuchtspur ist gestreckt");
+                    assert!(
+                        item.scale.x > item.scale.y * 3.0,
+                        "Leuchtspur ist gestreckt"
+                    );
                     checked += 1;
                 }
                 // Jeder Laserstrahl beginnt beim Schützen und reicht bis zum Endpunkt;
@@ -594,7 +617,10 @@ mod tests {
         // Über das ganze Gefecht wurden weit mehr Effekte gezeigt, als es Plätze gibt:
         // Sie werden wiederverwendet.
         assert!(frames > 100);
-        assert!(shown_total > high_water * 5, "{shown_total} Effekte auf {high_water} Plätzen");
+        assert!(
+            shown_total > high_water * 5,
+            "{shown_total} Effekte auf {high_water} Plätzen"
+        );
         assert!(high_water > 20 && high_water < 2000, "{high_water} Plätze");
 
         // Nach dem Gefecht (keine Geschosse mehr, Strahlen gelten als erloschen) ist jeder

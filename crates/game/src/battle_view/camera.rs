@@ -9,7 +9,9 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
+use bevy_egui::input::{
+    EguiWantsInput, egui_wants_any_keyboard_input, egui_wants_any_pointer_input,
+};
 use sim::battle::Battle;
 
 /// Senkrechter Bildwinkel der Schlachtkamera.
@@ -36,6 +38,8 @@ pub struct ViewOptions {
     pub labels: bool,
     /// Die Kamera wandert mit dem gewählten Schiff.
     pub follow: bool,
+    /// Bilanz nach dem Ende des Gefechts zeigen (zum Betrachten des Felds abschaltbar).
+    pub summary: bool,
 }
 
 impl Default for ViewOptions {
@@ -44,6 +48,7 @@ impl Default for ViewOptions {
             overlay: true,
             labels: false,
             follow: false,
+            summary: true,
         }
     }
 }
@@ -59,7 +64,10 @@ pub enum CameraRequest {
     FocusFight,
     FocusShip(u32),
     /// Feste Stelle und Blickpunkt (Selbsttest).
-    Place { eye: Vec3, target: Vec3 },
+    Place {
+        eye: Vec3,
+        target: Vec3,
+    },
 }
 
 /// Blick der Kamera als reine Rechnung: bildet Weltpunkte auf den Bildschirm ab und
@@ -87,6 +95,11 @@ impl Projector {
             tan_half: (fov * 0.5).tan(),
             size: size.max(Vec2::ONE),
         }
+    }
+
+    /// Ausrichtung der Kamera.
+    pub fn rotation(&self) -> Quat {
+        self.rotation
     }
 
     /// Weltgröße eines Pixels in der Entfernung 1 (längs der Blickachse).
@@ -123,11 +136,7 @@ impl Projector {
             screen.x / self.size.x * 2.0 - 1.0,
             1.0 - screen.y / self.size.y * 2.0,
         );
-        let local = Vec3::new(
-            ndc.x * self.tan_half * aspect,
-            ndc.y * self.tan_half,
-            -1.0,
-        );
+        let local = Vec3::new(ndc.x * self.tan_half * aspect, ndc.y * self.tan_half, -1.0);
         (self.eye, (self.rotation * local).normalize())
     }
 }
@@ -146,10 +155,14 @@ pub fn ray_plane(origin: Vec3, direction: Vec3) -> Option<Vec3> {
     })
 }
 
-/// Das Schiff, auf das ein Strahl zeigt. Ein Schiff gilt als getroffen, wenn der Strahl
-/// innerhalb seines Radius an ihm vorbeigeht; für weit entfernte, kleine Schiffe zählt
+/// Das Schiff, auf das ein Strahl vom Mauszeiger zeigt.
+///
+/// Zuerst zählt der Punkt, an dem der Strahl die Gefechtsebene trifft: Gewählt ist das
+/// nächste Schiff, in dessen Radius er liegt; für weit entfernte, kleine Schiffe zählt
 /// stattdessen der Umkreis ihrer Markierung (`pixel` = Weltgröße eines Pixels je Einheit
-/// Entfernung). Unter mehreren gewinnt das, dessen Mitte der Strahl am genauesten trifft.
+/// Entfernung). Liegt dort keines (bei sehr flachem Blick ragt ein Rumpf über die Stelle
+/// hinaus, an der der Strahl die Ebene erst viel weiter hinten trifft), gewinnt das
+/// Schiff, an dessen Mitte der Strahl am genauesten vorbeigeht.
 /// `ships` liefert Index, Ort und Radius der wählbaren Schiffe.
 pub fn pick_ship(
     origin: Vec3,
@@ -157,27 +170,48 @@ pub fn pick_ship(
     pixel: f32,
     ships: impl IntoIterator<Item = (u32, Vec3, f32)>,
 ) -> Option<u32> {
-    let mut best: Option<(u32, f32)> = None;
+    let on_plane = ray_plane(origin, direction);
+    let mut by_plane: Option<(u32, f32)> = None;
+    let mut by_ray: Option<(u32, f32)> = None;
     for (index, position, radius) in ships {
         let offset = position - origin;
         let along = offset.dot(direction);
         if along <= 0.0 {
             continue;
         }
-        let miss = (offset - direction * along).length();
         let reach = radius.max(PICK_PIXELS * pixel * along);
+        if let Some(point) = on_plane {
+            let score = point.distance(position) / reach;
+            if score <= 1.0 && by_plane.is_none_or(|(_, least)| score < least) {
+                by_plane = Some((index, score));
+            }
+        }
+        let miss = (offset - direction * along).length();
         let score = miss / reach;
-        if score <= 1.0 && best.is_none_or(|(_, least)| score < least) {
-            best = Some((index, score));
+        if score <= 1.0 && by_ray.is_none_or(|(_, least)| score < least) {
+            by_ray = Some((index, score));
         }
     }
-    best.map(|(index, _)| index)
+    by_plane.or(by_ray).map(|(index, _)| index)
 }
 
-/// Blick über das ganze Feld: von der Seite der ersten Partei gesehen links, schräg von
-/// oben.
+/// Blick schräg von oben auf einen Kreis mit Halbmesser `extent` um die Feldmitte. Die
+/// erste Partei steht dabei links, die zweite rechts.
 pub fn overview_transform(extent: f32) -> Transform {
-    Transform::from_xyz(0.0, extent * 0.95, extent * 1.3).looking_at(Vec3::new(0.0, 0.0, extent * 0.06), Vec3::Y)
+    Transform::from_xyz(0.0, extent * 0.95, extent * 1.3)
+        .looking_at(Vec3::new(0.0, 0.0, extent * 0.06), Vec3::Y)
+}
+
+/// Halbmesser, den die Übersicht zeigen muss, damit alle Schiffe auf dem Feld im Bild
+/// sind: so eng wie möglich, höchstens das ganze Feld.
+pub fn overview_extent(battle: &Battle, field: f32) -> f32 {
+    let reach = battle
+        .ships
+        .iter()
+        .filter(|ship| ship.status.in_play())
+        .map(|ship| ship.pos.length() + ship.radius)
+        .fold(0.0, f32::max);
+    (reach * 1.12 + 120.0).clamp(650.0_f32.min(field), field)
 }
 
 /// Kamera im Abstand `distance` vor `target`, mit Blickrichtung aus Gierwinkel und Neigung.
@@ -401,7 +435,10 @@ fn apply_requests(
         let target = match *request {
             CameraRequest::Overview => {
                 options.follow = false;
-                Some(overview_transform(data.balance.battle.exit_radius))
+                Some(overview_transform(overview_extent(
+                    battle,
+                    data.balance.battle.exit_radius,
+                )))
             }
             CameraRequest::Focus => match selected.0 {
                 Some(ship) => ship_view(ship),
@@ -492,9 +529,7 @@ fn pick_on_click(
             .iter()
             .enumerate()
             .filter(|(_, ship)| ship.status.in_play())
-            .filter_map(|(index, ship)| {
-                Some((index as u32, frame.position(index)?, ship.radius))
-            }),
+            .filter_map(|(index, ship)| Some((index as u32, frame.position(index)?, ship.radius))),
     );
     if selected.0 != picked {
         selected.0 = picked;
@@ -518,7 +553,8 @@ mod tests {
 
     fn camera() -> Projector {
         Projector::new(
-            &Transform::from_xyz(300.0, 800.0, 900.0).looking_at(Vec3::new(50.0, 0.0, -100.0), Vec3::Y),
+            &Transform::from_xyz(300.0, 800.0, 900.0)
+                .looking_at(Vec3::new(50.0, 0.0, -100.0), Vec3::Y),
             FOV,
             Vec2::new(1600.0, 900.0),
         )
@@ -547,7 +583,11 @@ mod tests {
             assert_eq!(hit.y, 0.0);
         }
         // Was hinter der Kamera liegt, hat keinen Bildschirmpunkt.
-        assert!(projector.project(Vec3::new(300.0, 1600.0, 2000.0)).is_none());
+        assert!(
+            projector
+                .project(Vec3::new(300.0, 1600.0, 2000.0))
+                .is_none()
+        );
         // Ein Pixel in der Bildmitte entspricht in der Tiefe d der Strecke d · pixel().
         let (a, _) = projector.project(Vec3::new(50.0, 0.0, -100.0)).unwrap();
         let right = projector.rotation * Vec3::X;
@@ -561,7 +601,10 @@ mod tests {
     fn rays_meet_the_plane_only_in_front_of_the_camera() {
         let down = ray_plane(Vec3::new(10.0, 50.0, 5.0), Vec3::NEG_Y).unwrap();
         assert_eq!(down, Vec3::new(10.0, 0.0, 5.0));
-        let slanted = ray_plane(Vec3::new(0.0, 100.0, 0.0), Vec3::new(1.0, -1.0, 0.0).normalize());
+        let slanted = ray_plane(
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0).normalize(),
+        );
         assert!(slanted.unwrap().distance(Vec3::new(100.0, 0.0, 0.0)) < 1e-3);
         // Nach oben oder waagerecht: kein Schnittpunkt.
         assert!(ray_plane(Vec3::new(0.0, 100.0, 0.0), Vec3::Y).is_none());
@@ -583,15 +626,23 @@ mod tests {
         for (index, position, _) in ships {
             let (screen, _) = projector.project(position).unwrap();
             let (origin, direction) = projector.ray(screen);
-            assert_eq!(pick_ship(origin, direction, projector.pixel(), ships), Some(index));
+            assert_eq!(
+                pick_ship(origin, direction, projector.pixel(), ships),
+                Some(index)
+            );
         }
         // Knapp daneben: innerhalb des Radius eines großen Schiffs trifft, außerhalb nicht.
-        let (origin, direction) = projector.ray(
-            projector.project(to_world(V2::new(20.0, 0.0))).unwrap().0,
+        let (origin, direction) =
+            projector.ray(projector.project(to_world(V2::new(20.0, 0.0))).unwrap().0);
+        assert_eq!(
+            pick_ship(origin, direction, projector.pixel(), ships),
+            Some(0)
         );
-        assert_eq!(pick_ship(origin, direction, projector.pixel(), ships), Some(0));
         let (origin, direction) = projector.ray(
-            projector.project(to_world(V2::new(-150.0, -300.0))).unwrap().0,
+            projector
+                .project(to_world(V2::new(-150.0, -300.0)))
+                .unwrap()
+                .0,
         );
         assert_eq!(pick_ship(origin, direction, projector.pixel(), ships), None);
         // Ein Jäger (Radius 3) ist aus der Ferne nur über seine Markierung zu treffen:
@@ -603,7 +654,33 @@ mod tests {
         assert_eq!(pick_ship(far.0, far.1, projector.pixel(), ships), None);
         // Schiffe hinter der Kamera werden nie gewählt.
         let behind = [(7u32, projector.eye - direction * 50.0, 500.0f32)];
-        assert_eq!(pick_ship(origin, direction, projector.pixel(), behind), None);
+        assert_eq!(
+            pick_ship(origin, direction, projector.pixel(), behind),
+            None
+        );
+    }
+
+    #[test]
+    fn picking_prefers_the_plane_and_falls_back_to_the_ray() {
+        // Zwei Schiffe hintereinander, die Kamera blickt flach über das vordere hinweg.
+        let near = (0u32, Vec3::new(0.0, 0.0, 0.0), 30.0f32);
+        let far = (1u32, Vec3::new(10.0, 0.0, -400.0), 30.0f32);
+        let eye = Vec3::new(0.0, 40.0, 300.0);
+        // Der Strahl trifft die Ebene mitten im hinteren Schiff, geht aber in zehn
+        // Einheiten Höhe auch über das vordere: Es zählt der Punkt in der Ebene.
+        let direction = (far.1 - eye).normalize();
+        assert_eq!(pick_ship(eye, direction, 0.0, [near, far]), Some(1));
+        // Waagerechter Blick knapp über die Ebene: Der Strahl trifft sie nie. Dann zählt,
+        // an wessen Mitte er am genauesten vorbeigeht.
+        let level = Vec3::new(0.0, 0.0, -1.0);
+        let low = Vec3::new(4.0, 6.0, 300.0);
+        assert_eq!(ray_plane(low, level), None);
+        assert_eq!(pick_ship(low, level, 0.0, [near, far]), Some(0));
+        // Weit daneben trifft auch der Strahl nichts.
+        assert_eq!(
+            pick_ship(low + Vec3::X * 80.0, level, 0.0, [near, far]),
+            None
+        );
     }
 
     #[test]
@@ -619,9 +696,41 @@ mod tests {
             V2::new(0.0, -1300.0),
         ] {
             let (screen, _) = projector.project(to_world(point)).expect("im Bild");
-            assert!(screen.x > 0.0 && screen.x < 1600.0, "{point:?} bei {screen}");
+            assert!(
+                screen.x > 0.0 && screen.x < 1600.0,
+                "{point:?} bei {screen}"
+            );
             assert!(screen.y > 0.0 && screen.y < 900.0, "{point:?} bei {screen}");
         }
+    }
+
+    #[test]
+    fn overview_follows_the_fleets() {
+        use super::super::feed::testing::{MIXED, data, stepped};
+        let data = data();
+        let field = data.balance.battle.exit_radius;
+        // Zu Beginn stehen die Flotten weit auseinander, im Gefecht eng beisammen: Die
+        // Übersicht rückt entsprechend näher, zeigt aber immer alle Schiffe.
+        let (start, _) = stepped(&data, MIXED, 0);
+        let (fight, _) = stepped(&data, MIXED, 400);
+        let wide = overview_extent(&start, field);
+        let tight = overview_extent(&fight, field);
+        assert!(wide > 1300.0 && wide <= field);
+        assert!(tight < wide, "{tight} gegen {wide}");
+        for (battle, extent) in [(&start, wide), (&fight, tight)] {
+            let projector =
+                Projector::new(&overview_transform(extent), FOV, Vec2::new(1600.0, 900.0));
+            for ship in battle.ships.iter().filter(|ship| ship.status.in_play()) {
+                let (screen, _) = projector
+                    .project(to_world(ship.pos))
+                    .expect("vor der Kamera");
+                assert!(screen.x > 0.0 && screen.x < 1600.0 && screen.y > 0.0 && screen.y < 900.0);
+            }
+        }
+        // Ein leeres Feld zeigt die Übersicht nicht kleiner als ihr Mindestmaß.
+        let mut empty = start.clone();
+        empty.ships.clear();
+        assert_eq!(overview_extent(&empty, field), 650.0);
     }
 
     #[test]

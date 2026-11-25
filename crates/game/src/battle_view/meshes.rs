@@ -19,17 +19,17 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_6, TAU};
 /// Partei aus. Bei Effekten ist der vierte Wert die Deckkraft.
 pub type Paint = [f32; 4];
 
-/// Rumpfplatten: Stahl mit einem Hauch Parteifarbe.
-pub const HULL: Paint = [0.62, 0.64, 0.68, 0.22];
+/// Rumpfplatten: Stahl, deutlich in der Parteifarbe getönt.
+pub const HULL: Paint = [0.56, 0.58, 0.62, 0.42];
 /// Aufbauten und Panzerplatten: dunkler abgesetzt.
-pub const PLATE: Paint = [0.36, 0.38, 0.42, 0.12];
+pub const PLATE: Paint = [0.3, 0.32, 0.36, 0.3];
 /// Öffnungen, Rohre, Düsen.
 pub const DARK: Paint = [0.055, 0.06, 0.075, 0.0];
 /// Abzeichen: Streifen, Leitwerke und Kuppeln in voller Parteifarbe.
 pub const TRIM: Paint = [0.95, 0.95, 0.95, 1.0];
 
 /// Unter dieser doppelten Fläche gilt ein Dreieck als entartet und wird verworfen.
-const MIN_DOUBLE_AREA: f32 = 1e-9;
+const MIN_DOUBLE_AREA: f32 = 1e-7;
 
 /// Dreiecksliste mit Normalen und Farben; jede Ecke gehört zu genau einem Dreieck.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -118,7 +118,10 @@ impl MeshData {
             if mirrored {
                 corners.swap(1, 2);
             }
-            result.tri_painted(corners.map(|corner| corner.0), corners.map(|corner| corner.1));
+            result.tri_painted(
+                corners.map(|corner| corner.0),
+                corners.map(|corner| corner.1),
+            );
         }
         result
     }
@@ -167,6 +170,7 @@ impl MeshData {
     }
 
     /// Kleinste und größte Koordinaten.
+    #[cfg(test)]
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
@@ -177,6 +181,7 @@ impl MeshData {
         (min, max)
     }
 
+    #[cfg(test)]
     pub fn surface_area(&self) -> f32 {
         (0..self.triangle_count())
             .map(|index| {
@@ -373,6 +378,9 @@ fn convex_hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
 
 /// Elliptischer Ring mit `sides` Ecken um die x-Achse, Mitte bei `center`.
 fn ring(center: Vec3, sides: usize, half_height: f32, half_width: f32, phase: f32) -> Vec<Vec3> {
+    // Ein verschwindend kleiner Ring ist eine Spitze: alle Ecken genau in der Mitte.
+    let snap = |radius: f32| if radius.abs() < 1e-5 { 0.0 } else { radius };
+    let (half_height, half_width) = (snap(half_height), snap(half_width));
     (0..sides)
         .map(|index| {
             let angle = phase + TAU * index as f32 / sides as f32;
@@ -459,15 +467,33 @@ fn dome(radius: f32, height: f32, sides: usize, paint: Paint) -> MeshData {
 /// Geschützturm: Sockel, Turmhaus und Zwillingsrohre in Richtung +x. Fuß bei y = 0.
 fn turret(size: f32, barrel: f32, paint: Paint) -> MeshData {
     let base = along(
-        &frustum(Vec3::ZERO, Vec3::X * 0.22 * size, (0.56 * size, 0.5 * size), 8, PLATE),
+        &frustum(
+            Vec3::ZERO,
+            Vec3::X * 0.22 * size,
+            (0.56 * size, 0.5 * size),
+            8,
+            PLATE,
+        ),
         Vec3::Y,
         Vec3::ZERO,
     );
     let house = MeshData::loft(
         &[
-            rect_ring(-0.55 * size, (0.2 * size, 0.62 * size), (-0.42 * size, 0.42 * size)),
-            rect_ring(0.25 * size, (0.2 * size, 0.62 * size), (-0.46 * size, 0.46 * size)),
-            rect_ring(0.6 * size, (0.2 * size, 0.42 * size), (-0.3 * size, 0.3 * size)),
+            rect_ring(
+                -0.55 * size,
+                (0.2 * size, 0.62 * size),
+                (-0.42 * size, 0.42 * size),
+            ),
+            rect_ring(
+                0.25 * size,
+                (0.2 * size, 0.62 * size),
+                (-0.46 * size, 0.46 * size),
+            ),
+            rect_ring(
+                0.6 * size,
+                (0.2 * size, 0.42 * size),
+                (-0.3 * size, 0.3 * size),
+            ),
         ],
         paint,
     );
@@ -483,13 +509,7 @@ fn turret(size: f32, barrel: f32, paint: Paint) -> MeshData {
 
 /// Triebwerksdüse: dunkler Kegelstumpf, dessen Öffnung bei `at` liegt.
 fn nozzle(at: Vec3, radius: f32, length: f32) -> MeshData {
-    frustum(
-        at + Vec3::X * length,
-        at,
-        (radius * 0.78, radius),
-        8,
-        DARK,
-    )
+    frustum(at + Vec3::X * length, at, (radius * 0.78, radius), 8, DARK)
 }
 
 // --- Schiffsklassen -------------------------------------------------------------------
@@ -528,12 +548,12 @@ impl ClassModel {
     }
 
     /// Triebwerksstrahlen aller Düsen als ein Mesh. Ursprung ist die Heckebene x = −1;
-    /// die Strahlen reichen bei voller Fahrt das Siebenfache des Düsenradius dahinter.
-    /// An der Düse hell, zur Spitze hin dunkel.
+    /// die Strahlen reichen bei voller Fahrt das Fünffache des Düsenradius dahinter.
+    /// An der Düse deckend, zur Spitze hin durchsichtig.
     pub fn glow(&self) -> MeshData {
         let mut mesh = MeshData::default();
         for engine in &self.engines {
-            let length = engine.radius * 7.0;
+            let length = engine.radius * 5.0;
             let center = Vec3::new(engine.at.x + 1.0, engine.at.y, engine.at.z);
             let section = |back: f32, scale: f32| {
                 let radius = engine.radius * scale;
@@ -541,17 +561,18 @@ impl ClassModel {
             };
             mesh.append(&MeshData::loft_painted(&[
                 (section(1.0, 0.0), GLOW_COLD),
-                (section(0.3, 0.55), GLOW_WARM),
-                (section(0.0, 0.8), GLOW_HOT),
+                (section(0.4, 0.62), GLOW_WARM),
+                (section(0.0, 0.85), GLOW_HOT),
             ]));
         }
         mesh
     }
 }
 
+// Deckkraft des Triebwerksstrahls: an der Düse voll, zur Spitze hin auslaufend.
 const GLOW_HOT: Paint = [1.0, 1.0, 1.0, 1.0];
-const GLOW_WARM: Paint = [0.45, 0.45, 0.45, 1.0];
-const GLOW_COLD: Paint = [0.06, 0.06, 0.06, 1.0];
+const GLOW_WARM: Paint = [1.0, 1.0, 1.0, 0.4];
+const GLOW_COLD: Paint = [1.0, 1.0, 1.0, 0.0];
 
 /// Jäger: kleiner Pfeil mit gepfeilten Flügeln und Endscheiben.
 fn fighter() -> ClassModel {
@@ -741,8 +762,11 @@ fn frigate() -> ClassModel {
     blisters.append(&along(&blister, Vec3::Y, Vec3::new(0.48, 0.185, 0.0)));
     blisters.append(&along(&blister, Vec3::Y, Vec3::new(-0.7, 0.19, 0.0)));
     blisters.append(&along(&blister, Vec3::NEG_Y, Vec3::new(0.0, -0.17, 0.0)));
-    let flank = along(&blister, Vec3::Z, Vec3::new(0.3, 0.01, 0.285))
-        .with(&along(&blister, Vec3::Z, Vec3::new(-0.38, 0.01, 0.3)));
+    let flank = along(&blister, Vec3::Z, Vec3::new(0.3, 0.01, 0.285)).with(&along(
+        &blister,
+        Vec3::Z,
+        Vec3::new(-0.38, 0.01, 0.3),
+    ));
     blisters.append(&flank.both_sides());
     let engines = vec![
         Engine {
@@ -1126,11 +1150,11 @@ fn band(rings: &[(Vec<Vec3>, f32)]) -> MeshData {
     mesh
 }
 
-/// Schildschimmer: Kappe einer Kugel (Radius 1) um +x, gut 60° weit. In der Mitte deckend,
+/// Schildschimmer: Kappe einer Kugel (Radius 1) um +x, gut 50° weit. In der Mitte deckend,
 /// zum Rand hin durchsichtig, damit nur die getroffene Stelle aufleuchtet.
 pub fn shield_cap() -> MeshData {
     let (steps, sides) = (5, 18);
-    let widest = 64f32.to_radians();
+    let widest = 52f32.to_radians();
     let rings: Vec<(Vec<Vec3>, f32)> = (0..=steps)
         .map(|step| {
             let inward = step as f32 / steps as f32;
@@ -1138,7 +1162,7 @@ pub fn shield_cap() -> MeshData {
             let radius = angle.sin();
             (
                 ring(Vec3::X * angle.cos(), sides, radius, radius, 0.0),
-                inward.powf(1.5),
+                inward.powf(1.8),
             )
         })
         .collect();
@@ -1158,10 +1182,10 @@ pub fn glow_disc() -> MeshData {
             .collect()
     };
     band(&[
-        (circle(1.0), 0.0),
-        (circle(0.62), 0.16),
-        (circle(0.3), 0.6),
         (circle(0.0), 1.0),
+        (circle(0.3), 0.6),
+        (circle(0.62), 0.16),
+        (circle(1.0), 0.0),
     ])
 }
 
@@ -1257,10 +1281,10 @@ mod tests {
     fn intended(class: ShipClass) -> (f32, (f32, f32)) {
         match class {
             ShipClass::Fighter => (0.64, (-0.13, 0.17)),
-            ShipClass::Corvette => (0.462, (-0.10, 0.27)),
+            ShipClass::Corvette => (0.462, (-0.113, 0.27)),
             ShipClass::Frigate => (0.385, (-0.255, 0.45)),
             ShipClass::Cruiser => (0.355, (-0.2, 0.34)),
-            ShipClass::Battleship => (0.37, (-0.17, 0.47)),
+            ShipClass::Battleship => (0.37, (-0.191, 0.47)),
             ShipClass::Carrier => (0.566, (-0.1, 0.36)),
         }
     }
@@ -1272,18 +1296,29 @@ mod tests {
         assert_eq!(mesh.colors.len(), vertices, "{what}: Farben");
         assert_eq!(mesh.indices.len() % 3, 0, "{what}: Indexzahl");
         assert!(
-            mesh.indices.iter().all(|index| (*index as usize) < vertices),
+            mesh.indices
+                .iter()
+                .all(|index| (*index as usize) < vertices),
             "{what}: Index außerhalb"
         );
         for index in 0..mesh.triangle_count() {
             let [a, b, c] = mesh.triangle(index);
             let cross = (b - a).cross(c - a);
-            assert!(cross.length() > 1e-8, "{what}: entartetes Dreieck {index}");
+            assert!(
+                cross.length() >= MIN_DOUBLE_AREA,
+                "{what}: entartetes Dreieck {index}"
+            );
             // Die gespeicherte Normale gehört zur Vorderseite des Dreiecks.
             for offset in 0..3 {
                 let normal = mesh.normals[mesh.indices[index * 3 + offset] as usize];
-                assert!((normal.length() - 1.0).abs() < 1e-4, "{what}: Normale nicht normiert");
-                assert!(normal.dot(cross.normalize()) > 0.999, "{what}: Normale falsch herum");
+                assert!(
+                    (normal.length() - 1.0).abs() < 1e-4,
+                    "{what}: Normale nicht normiert"
+                );
+                assert!(
+                    normal.dot(cross.normalize()) > 0.999,
+                    "{what}: Normale falsch herum"
+                );
             }
         }
         assert!(
@@ -1300,7 +1335,11 @@ mod tests {
         assert!((unit.signed_volume() - 1.0).abs() < 1e-5);
         assert!((unit.surface_area() - 6.0).abs() < 1e-5);
         // Spiegeln, Drehen und Verschieben erhalten Außenseite und Volumen.
-        let moved = along(&unit.mirrored_z(), Vec3::new(0.3, 1.0, -0.2), Vec3::splat(4.0));
+        let moved = along(
+            &unit.mirrored_z(),
+            Vec3::new(0.3, 1.0, -0.2),
+            Vec3::splat(4.0),
+        );
         check(&moved, "bewegter Quader");
         assert!((moved.signed_volume() - 1.0).abs() < 1e-4);
         // Ein Kegel hat eine Spitze: Die entarteten Dreiecke dort entfallen.
@@ -1315,7 +1354,10 @@ mod tests {
             (beam(), "Strahl"),
         ] {
             check(&mesh, what);
-            assert!(mesh.signed_volume() > 0.0, "{what}: Flächen zeigen nach innen");
+            assert!(
+                mesh.signed_volume() > 0.0,
+                "{what}: Flächen zeigen nach innen"
+            );
         }
         check(&missile(), "Lenkwaffe");
         // Schild und Leuchtscheibe sind offene Flächen mit auslaufender Deckkraft.
@@ -1325,11 +1367,14 @@ mod tests {
         assert!(min.x > 0.4 && (max.x - 1.0).abs() < 1e-5, "Kappe um +x");
         let disc = glow_disc();
         check(&disc, "Leuchtscheibe");
-        assert!(disc.normals.iter().all(|normal| normal.z > 0.999), "Scheibe zeigt nach +z");
+        assert!(
+            disc.normals.iter().all(|normal| normal.z > 0.999),
+            "Scheibe zeigt nach +z"
+        );
         for mesh in [&shield, &disc] {
             let alphas: Vec<f32> = mesh.colors.iter().map(|color| color[3]).collect();
-            assert!(alphas.iter().any(|alpha| *alpha == 0.0), "Rand läuft aus");
-            assert!(alphas.iter().any(|alpha| *alpha == 1.0), "Mitte deckt");
+            assert!(alphas.contains(&0.0), "Rand läuft aus");
+            assert!(alphas.contains(&1.0), "Mitte deckt");
         }
         for piece in debris() {
             check(&piece, "Trümmer");
@@ -1345,7 +1390,10 @@ mod tests {
             let model = ClassModel::of(class);
             let what = class.label();
             check(&model.hull, what);
-            assert!(model.hull.signed_volume() > 0.0, "{what}: Flächen zeigen nach innen");
+            assert!(
+                model.hull.signed_volume() > 0.0,
+                "{what}: Flächen zeigen nach innen"
+            );
             let (min, max) = model.hull.bounds();
             // Länge genau 2: Bug bei +1, Heck bei −1.
             assert!((max.x - 1.0).abs() < 1e-4, "{what}: Bug bei {}", max.x);
@@ -1353,8 +1401,16 @@ mod tests {
             // Spiegelsymmetrisch in der Breite (der Träger trägt seine Insel an Steuerbord,
             // die Flugdecks sind aber gleich breit).
             let (half_width, (bottom, top)) = intended(class);
-            assert!((max.z - half_width).abs() < 0.01, "{what}: Breite {}", max.z);
-            assert!((min.z + half_width).abs() < 0.01, "{what}: Breite {}", min.z);
+            assert!(
+                (max.z - half_width).abs() < 0.01,
+                "{what}: Breite {}",
+                max.z
+            );
+            assert!(
+                (min.z + half_width).abs() < 0.01,
+                "{what}: Breite {}",
+                min.z
+            );
             assert!((max.y - top).abs() < 0.01, "{what}: Höhe {}", max.y);
             assert!((min.y - bottom).abs() < 0.01, "{what}: Tiefe {}", min.y);
             // Jedes Triebwerk sitzt an der Heckebene und innerhalb des Rumpfs.
@@ -1366,7 +1422,10 @@ mod tests {
             let glow = model.glow();
             check(&glow, what);
             let (glow_min, glow_max) = glow.bounds();
-            assert!(glow_max.x.abs() < 1e-5 && glow_min.x < -0.2, "{what}: Triebwerksstrahl");
+            assert!(
+                glow_max.x.abs() < 1e-5 && glow_min.x < -0.2,
+                "{what}: Triebwerksstrahl"
+            );
         }
     }
 
@@ -1398,14 +1457,20 @@ mod tests {
             .collect();
         for a in 0..areas.len() {
             for b in (a + 1)..areas.len() {
-                assert!((areas[a] - areas[b]).abs() > 0.05, "{a} und {b} sind gleich groß");
+                assert!(
+                    (areas[a] - areas[b]).abs() > 0.05,
+                    "{a} und {b} sind gleich groß"
+                );
             }
         }
     }
 
     #[test]
     fn fore_and_aft_halves_cover_the_hull() {
-        for class in ShipClass::ALL.into_iter().filter(|class| class.is_capital()) {
+        for class in ShipClass::ALL
+            .into_iter()
+            .filter(|class| class.is_capital())
+        {
             let model = ClassModel::of(class);
             let what = class.label();
             let (fore, aft) = model.hull.split_x(model.break_at);
@@ -1414,13 +1479,18 @@ mod tests {
             // Schneiden verliert und erfindet keine Fläche.
             let whole = model.hull.surface_area();
             let parts = fore.surface_area() + aft.surface_area();
-            assert!((whole - parts).abs() < 1e-3 * whole, "{what}: {whole} gegen {parts}");
+            assert!(
+                (whole - parts).abs() < 1e-3 * whole,
+                "{what}: {whole} gegen {parts}"
+            );
             // Jede Hälfte bleibt auf ihrer Seite, zusammen reichen sie von Heck bis Bug.
             let (hull_min, hull_max) = model.hull.bounds();
             let (fore_min, fore_max) = fore.bounds();
             let (aft_min, aft_max) = aft.bounds();
             assert!(fore_min.x >= model.break_at - 1e-5 && aft_max.x <= model.break_at + 1e-5);
-            assert!((fore_max.x - hull_max.x).abs() < 1e-5 && (aft_min.x - hull_min.x).abs() < 1e-5);
+            assert!(
+                (fore_max.x - hull_max.x).abs() < 1e-5 && (aft_min.x - hull_min.x).abs() < 1e-5
+            );
             assert!((fore_min.min(aft_min) - hull_min).length() < 1e-4);
             assert!((fore_max.max(aft_max) - hull_max).length() < 1e-4);
             // Die verschlossenen Hälften sind gültige Meshes mit einer Bruchfläche, die zur

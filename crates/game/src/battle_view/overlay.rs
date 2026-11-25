@@ -23,7 +23,13 @@ fn configure(mut store: ResMut<GizmoConfigStore>) {
 }
 
 /// Kreis in der Gefechtsebene.
-fn ring(gizmos: &mut Gizmos<BattleGizmos>, center: Vec3, radius: f32, color: Color, resolution: u32) {
+fn ring(
+    gizmos: &mut Gizmos<BattleGizmos>,
+    center: Vec3,
+    radius: f32,
+    color: Color,
+    resolution: u32,
+) {
     gizmos
         .circle(
             Isometry3d::new(center, Quat::from_rotation_x(-FRAC_PI_2)),
@@ -59,13 +65,26 @@ fn draw_overlay(
         radius += 600.0;
     }
     let extent = balance.exit_radius;
-    gizmos.line(Vec3::new(-extent, 0.0, 0.0), Vec3::new(extent, 0.0, 0.0), grid);
-    gizmos.line(Vec3::new(0.0, 0.0, -extent), Vec3::new(0.0, 0.0, extent), grid);
+    gizmos.line(
+        Vec3::new(-extent, 0.0, 0.0),
+        Vec3::new(extent, 0.0, 0.0),
+        grid,
+    );
+    gizmos.line(
+        Vec3::new(0.0, 0.0, -extent),
+        Vec3::new(0.0, 0.0, extent),
+        grid,
+    );
 
     // Auswahlring, leicht pulsierend.
     let chosen = selected
         .0
-        .and_then(|index| Some((battle.ships.get(index as usize)?, frame.position(index as usize)?)))
+        .and_then(|index| {
+            Some((
+                battle.ships.get(index as usize)?,
+                frame.position(index as usize)?,
+            ))
+        })
         .filter(|(ship, _)| ship.status.in_play());
     if let Some((ship, position)) = chosen {
         let pulse = 1.0 + 0.05 * (time.elapsed_secs() * 4.0).sin();
@@ -93,7 +112,12 @@ fn draw_overlay(
 
     // Flottenanker: Raute am Bezugspunkt der Formation, Pfeil in ihre Blickrichtung.
     for (side, combatant) in battle.combatants.iter().enumerate() {
-        if !battle.is_fighting(side) && !combatant.retreating {
+        // Eine Partei ohne Schiffe auf dem Feld hat keinen Anker mehr.
+        let present = battle
+            .ships
+            .iter()
+            .any(|ship| ship.side as usize == side && ship.status.can_act());
+        if !present {
             continue;
         }
         let (r, g, b) = feed.side_color(side);

@@ -135,8 +135,8 @@ mod tests {
 
     #[test]
     fn parses_practice_options() {
-        let args = parse("--practice --fleet-a speer:4,waechter:6 --fleet-b bastion:2 --seed 9")
-            .unwrap();
+        let args =
+            parse("--practice --fleet-a speer:4,waechter:6 --fleet-b bastion:2 --seed 9").unwrap();
         assert!(args.practice);
         assert_eq!(args.fleet_a.as_deref(), Some("speer:4,waechter:6"));
         assert_eq!(args.fleet_b.as_deref(), Some("bastion:2"));

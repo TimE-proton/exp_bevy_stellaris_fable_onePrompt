@@ -5,7 +5,7 @@
 
 use crate::args::{Args, numbered};
 use crate::battle_view::feed::BattleFeed;
-use crate::battle_view::practice::LINEUP_ROW_GAP;
+use crate::battle_view::practice::{LINEUP_ROW_GAP, PracticeBattle};
 use crate::battle_view::{
     CameraRequest, EffectStats, PART_LABELS, SelectedShip, ViewOptions, ViewTimings, to_world,
 };
@@ -52,7 +52,8 @@ impl Plugin for SelftestPlugin {
             shot_taken: false,
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
-        .add_systems(Update, drive.run_if(in_state(AppState::InGame)));
+        .add_systems(Update, (drive, probe_drive).run_if(in_state(AppState::InGame)))
+        .add_systems(FixedUpdate, probe_step.in_set(crate::battle_view::BattleFeedSet::Campaign).run_if(resource_exists::<ProbeBattle>));
     }
 }
 
@@ -116,11 +117,65 @@ fn drive(
     }
 }
 
+// --- PROBE (temporär) ---
+#[derive(Resource)]
+struct ProbeBattle(sim::battle::Battle);
+
+fn probe_step(data: Res<sim::GameData>, mut probe: ResMut<ProbeBattle>, mut feed: ResMut<BattleFeed>) {
+    probe.0.step(&data);
+    feed.refresh(&probe.0);
+}
+
+fn probe_drive(
+    mut commands: Commands,
+    args: Res<Args>,
+    test: Res<Selftest>,
+    data: Res<sim::GameData>,
+    mut feed: ResMut<BattleFeed>,
+    mut next: ResMut<NextState<crate::state::ViewState>>,
+    mut ui_state: ResMut<UiState>,
+) {
+    use crate::battle_view::feed::{FeedInfo, SideInfo};
+    if test.frame == 40 {
+        let config = crate::battle_view::practice::PracticeSetup::default().resolve(&data).unwrap();
+        let battle = config.build(&data);
+        feed.begin(&battle, FeedInfo {
+            title: "Gefecht bei Probe".into(),
+            sides: vec![
+                SideInfo { name: "Karawane".into(), color: (0.95, 0.8, 0.2) },
+                SideInfo { name: "Liga".into(), color: (0.3, 0.6, 1.0) },
+            ],
+            player_side: Some(0),
+            can_restart: false,
+            still: false,
+        });
+        commands.insert_resource(ProbeBattle(battle));
+        next.set(crate::state::ViewState::Battle);
+    }
+    if test.frame == 150 {
+        ui_state.menu_open = true;
+    }
+    if test.frame == 160 && let Some(path) = args.screenshot.as_deref() {
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(numbered(path, 1)));
+    }
+    if test.frame == 170 {
+        ui_state.menu_open = false;
+        commands.remove_resource::<ProbeBattle>();
+        feed.clear();
+        next.set(crate::state::ViewState::Galaxy);
+    }
+}
+
 // --- Gefechtsübung ---------------------------------------------------------------------
 
 /// Frames, die nach einem Kamerasprung vergehen, bevor fotografiert wird, und danach,
 /// bevor es weitergeht (das Foto wird erst einige Frames später geschrieben).
 const SETTLE_FRAMES: u32 = 6;
+/// So viele Frames braucht die Engine nach dem Start, bis alle Zeichenprogramme der
+/// Grafikkarte übersetzt sind; vorher bleibt das Bild leer.
+const WARMUP_FRAMES: u32 = 45;
+/// Fotos der Schaustellung: alle Klassen und drei Paare aus der Nähe.
+const LINEUP_PHOTOS: u32 = 4;
 /// Stufe der Zeitsteuerung während des Gefechts: schnell, aber langsam genug, um den
 /// richtigen Augenblick zu erwischen.
 const FIGHT_SPEED: usize = 3;
@@ -137,7 +192,7 @@ enum Phase {
     Aftermath,
     /// Bis zum Ende laufen lassen.
     Finish,
-    /// Schaustellung: alle Klassen, dann die kleinen, dann die großen.
+    /// Schaustellung: alle Klassen, dann je zwei aus der Nähe.
     Lineup(u32),
     Done,
 }
@@ -169,7 +224,7 @@ struct PracticeTest {
 impl PracticeTest {
     fn new(limit: u32, lineup: bool) -> Self {
         Self {
-            limit: limit.max(60),
+            limit: limit.max(120),
             lineup,
             frame: 0,
             phase: if lineup {
@@ -182,6 +237,27 @@ impl PracticeTest {
             photos: 0,
             peak_in_play: 0,
         }
+    }
+
+    /// Hält die Zeit an, wartet, bis die Kamera steht, macht das Foto `photo` (0 = keines)
+    /// und geht dann in die Phase `next`. Die Zeit hält sofort an, nicht erst mit dem
+    /// nächsten Frame: Auf dem Bild soll genau der Augenblick sein, der ausgesucht wurde.
+    fn hold(
+        &mut self,
+        speed: &mut SimSpeed,
+        clock: &mut Time<Virtual>,
+        photo: u32,
+        next: Phase,
+        resume: Option<usize>,
+    ) {
+        speed.paused = true;
+        clock.pause();
+        self.pending = Some(Pending {
+            frames_left: 2 * SETTLE_FRAMES,
+            photo,
+            next,
+            resume,
+        });
     }
 }
 
@@ -229,7 +305,12 @@ fn busy_exchange(battle: &Battle, feed: &BattleFeed, relaxed: bool) -> Option<(V
             score += 2.0;
         }
         if best.is_none_or(|(most, ..)| score > most) {
-            best = Some((score, to_world(beam.from), to_world(beam.to), shooter as u32));
+            best = Some((
+                score,
+                to_world(beam.from),
+                to_world(beam.to),
+                shooter as u32,
+            ));
         }
     }
     let threshold = if relaxed { 0.0 } else { 9.0 };
@@ -249,11 +330,11 @@ fn wreck_cluster(battle: &Battle) -> Option<(Vec3, f32)> {
                 .iter()
                 .filter(|other| other.pos.distance(wreck.pos) < 320.0)
                 .count();
-            let mut score = neighbours as f32;
+            let mut score = neighbours.min(15) as f32;
             if wreck.class.is_capital() {
-                score += 6.0;
+                score += 40.0;
                 if wreck.age > 3.0 {
-                    score += 4.0;
+                    score += 20.0;
                 }
             }
             (score, to_world(wreck.pos), wreck.radius)
@@ -267,9 +348,11 @@ fn drive_practice(
     args: Res<Args>,
     mut test: ResMut<PracticeTest>,
     feed: Res<BattleFeed>,
+    practice: Option<Res<PracticeBattle>>,
     stats: Res<EffectStats>,
     mut timings: ResMut<ViewTimings>,
     mut speed: ResMut<SimSpeed>,
+    mut clock: ResMut<Time<Virtual>>,
     mut options: ResMut<ViewOptions>,
     mut selected: ResMut<SelectedShip>,
     mut camera: MessageWriter<CameraRequest>,
@@ -287,7 +370,7 @@ fn drive_practice(
         .count();
     test.peak_in_play = test.peak_in_play.max(in_play);
 
-    if frame == 5 && !test.lineup {
+    if frame == WARMUP_FRAMES && !test.lineup {
         // Zeit laufen lassen, schnellste Stufe; ab hier wird die Rechenzeit gemessen.
         speed.paused = false;
         speed.level = SPEEDS.len() - 1;
@@ -318,14 +401,6 @@ fn drive_practice(
         return;
     }
 
-    let hold = |test: &mut PracticeTest, photo: u32, next: Phase, resume: Option<usize>| {
-        test.pending = Some(Pending {
-            frames_left: 2 * SETTLE_FRAMES,
-            photo,
-            next,
-            resume,
-        });
-    };
     let since_contact = test.contact.map(|contact| battle.time - contact);
     let out_of_time = frame + 40 >= test.limit;
 
@@ -340,32 +415,47 @@ fn drive_practice(
         Phase::Overview => {
             // Einige Sekunden nach dem ersten Schuss, wenn Geschosse unterwegs sind.
             let ripe = since_contact.is_some_and(|time| time >= 8.0) && battle.shots.len() >= 6;
-            if ripe || since_contact.is_some_and(|time| time >= 25.0) || battle.finished || out_of_time {
-                speed.paused = true;
+            if ripe
+                || since_contact.is_some_and(|time| time >= 25.0)
+                || battle.finished
+                || out_of_time
+            {
                 camera.write(CameraRequest::Overview);
-                hold(&mut test, 1, Phase::CloseUp, Some(FIGHT_SPEED));
+                test.hold(&mut speed, &mut clock, 1, Phase::CloseUp, Some(FIGHT_SPEED));
             }
         }
         Phase::CloseUp => {
             let relaxed = since_contact.is_some_and(|time| time >= 30.0) || out_of_time;
             let found = busy_exchange(battle, &feed, relaxed);
-            let give_up = battle.finished || since_contact.is_some_and(|time| time >= 70.0) || out_of_time;
+            let give_up =
+                battle.finished || since_contact.is_some_and(|time| time >= 70.0) || out_of_time;
             if let Some((from, to, shooter)) = found {
-                speed.paused = true;
                 let radius = battle.ships[shooter as usize].radius;
                 let along = (to - from).normalize_or_zero();
                 let across = along.cross(Vec3::Y);
                 // Schräg hinter dem Schützen, Blick am Strahl entlang zum Ziel.
-                let eye = from - along * (radius * 3.4 + 20.0) + across * (radius * 2.0 + 14.0)
+                let eye = from - along * (radius * 3.4 + 20.0)
+                    + across * (radius * 2.0 + 14.0)
                     + Vec3::Y * (radius * 1.5 + 12.0);
                 let target = from + along * (from.distance(to) * 0.4).min(200.0);
                 camera.write(CameraRequest::Place { eye, target });
                 selected.0 = Some(shooter);
-                hold(&mut test, 2, Phase::Aftermath, Some(FIGHT_SPEED));
+                test.hold(
+                    &mut speed,
+                    &mut clock,
+                    2,
+                    Phase::Aftermath,
+                    Some(FIGHT_SPEED),
+                );
             } else if give_up {
-                speed.paused = true;
                 camera.write(CameraRequest::FocusFight);
-                hold(&mut test, 2, Phase::Aftermath, Some(FIGHT_SPEED));
+                test.hold(
+                    &mut speed,
+                    &mut clock,
+                    2,
+                    Phase::Aftermath,
+                    Some(FIGHT_SPEED),
+                );
             }
         }
         Phase::Aftermath => {
@@ -375,10 +465,11 @@ fn drive_practice(
                 .map(|combatant| combatant.initial.iter().sum::<u32>())
                 .sum();
             let enough = battle.wrecks.len() as u32 >= (initial / 5).max(4);
-            let late = since_contact.is_some_and(|time| time >= 40.0);
+            let late = since_contact.is_some_and(|time| time >= 20.0);
             if (enough && late) || battle.finished || out_of_time {
-                speed.paused = true;
                 selected.0 = None;
+                // Ist das Gefecht schon vorbei, verdeckt sonst die Bilanz das Trümmerfeld.
+                options.summary = false;
                 match wreck_cluster(battle) {
                     Some((position, radius)) => {
                         let reach = (radius * 5.5).clamp(110.0, 380.0);
@@ -391,16 +482,26 @@ fn drive_practice(
                         camera.write(CameraRequest::FocusFight);
                     }
                 }
-                hold(&mut test, 3, Phase::Finish, Some(SPEEDS.len() - 1));
+                test.hold(
+                    &mut speed,
+                    &mut clock,
+                    3,
+                    Phase::Finish,
+                    Some(SPEEDS.len() - 1),
+                );
             }
         }
         Phase::Finish => {
             if battle.finished || frame >= test.limit {
-                // Noch ein paar Frames mit der Bilanz, dann Schluss.
+                // Zum Schluss die Übersicht mit der Bilanz; ein viertes Foto, wenn das
+                // Gefecht zu Ende kam.
                 camera.write(CameraRequest::Overview);
-                hold(&mut test, 0, Phase::Done, None);
+                options.summary = true;
+                let photo = if battle.finished { 4 } else { 0 };
+                test.hold(&mut speed, &mut clock, photo, Phase::Done, None);
             }
         }
+        Phase::Lineup(_) if frame < WARMUP_FRAMES => {}
         Phase::Lineup(step) => {
             options.labels = true;
             options.overlay = false;
@@ -420,27 +521,30 @@ fn drive_practice(
                 let right = members.last().map_or(0.0, |(at, radius)| at.x + radius);
                 ((left + right) * 0.5, right - left)
             };
-            let (members, back): (&[(Vec3, f32)], f32) = match step {
-                1 => (&row[..], LINEUP_ROW_GAP * 0.5),
-                2 => (&row[..row.len().min(3)], 0.0),
-                _ => (&row[row.len().saturating_sub(3)..], 0.0),
+            // Erst beide Reihen ganz, dann die vordere Reihe paarweise aus der Nähe.
+            let pair = |first: usize| &row[first.min(row.len())..(first + 2).min(row.len())];
+            let (members, back, zoom): (&[(Vec3, f32)], f32, f32) = match step {
+                1 => (&row[..], LINEUP_ROW_GAP * 0.45, 0.9),
+                2 => (pair(0), 0.0, 1.05),
+                3 => (pair(2), 0.0, 1.05),
+                _ => (pair(4), 0.0, 0.95),
             };
             let (center, width) = span(members);
             let target = Vec3::new(center, 0.0, -back);
-            let distance = width * 0.72 + 16.0;
+            let distance = width * zoom + 14.0;
             camera.write(CameraRequest::Place {
-                eye: target + Vec3::new(0.12, 0.62, 1.0).normalize() * distance,
+                eye: target + Vec3::new(0.1, 0.66, 1.0).normalize() * distance,
                 target,
             });
-            let next = if step >= 3 {
+            let next = if step >= LINEUP_PHOTOS {
                 Phase::Done
             } else {
                 Phase::Lineup(step + 1)
             };
-            hold(&mut test, step, next, None);
+            test.hold(&mut speed, &mut clock, step, next, None);
         }
         Phase::Done => {
-            let wanted = 3;
+            let wanted = if test.lineup { LINEUP_PHOTOS } else { 3 };
             let complete = test.photos >= wanted;
             let ended = if test.lineup {
                 "Schaustellung".to_string()
@@ -454,12 +558,20 @@ fn drive_practice(
                 .enumerate()
                 .map(|(part, label)| format!("{label} {:.0}", timings.part_micros(part)))
                 .collect();
+            let per_tick = practice.as_ref().map_or(String::new(), |practice| {
+                let ticks = practice.ticks.max(1) as f64;
+                format!(
+                    "; Gefechtsrechner {:.0} µs und Feed {:.0} µs je Takt",
+                    practice.step_time.as_secs_f64() * 1e6 / ticks,
+                    practice.feed_time.as_secs_f64() * 1e6 / ticks
+                )
+            });
             let verdict = if complete { "OK" } else { "FEHLER" };
             println!(
                 "SELBSTTEST {verdict}: Gefechtsübung, {frame} Frames, Gefechtszeit {:.1} s ({ended}), \
                  {} Schiffe ({} zugleich im Feld), {} Wracks, höchstens {} Geschosse und {} Strahlen gezeigt, \
                  {} Effektplätze, {} Fotos, Ansicht {:.0} µs im Mittel und {:.0} µs höchstens je Frame \
-                 ({}; {} Frames gemessen)",
+                 ({}; {} Frames gemessen){per_tick}",
                 battle.time,
                 battle.ships.len(),
                 test.peak_in_play,

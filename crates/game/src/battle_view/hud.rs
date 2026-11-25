@@ -27,10 +27,10 @@ const ARMOR: Color32 = Color32::from_rgb(190, 170, 140);
 
 /// Ab dieser Rumpflänge auf dem Bildschirm (Pixel) verschwindet die Markierung ganz;
 /// darunter blendet sie sich ein.
-const MARKER_GONE: f32 = 34.0;
-const MARKER_FULL: f32 = 16.0;
+const MARKER_GONE: f32 = 46.0;
+const MARKER_FULL: f32 = 20.0;
 /// Ab dieser Rumpflänge trägt ein Schiff seinen Namen (wenn Namen eingeschaltet sind).
-const LABEL_FROM: f32 = 42.0;
+const LABEL_FROM: f32 = 46.0;
 
 /// Was die Tafeln lesen.
 pub struct HudRefs<'a> {
@@ -54,6 +54,7 @@ pub enum HudAction {
     ToggleOverlay,
     ToggleLabels,
     ToggleFollow,
+    ToggleSummary,
     ToggleHelp,
 }
 
@@ -118,7 +119,11 @@ pub fn summarize(battle: &Battle, data: &GameData, side: usize) -> SideSummary {
         ..Default::default()
     };
     let (mut morale, mut crews) = (0.0, 0);
-    for ship in battle.ships.iter().filter(|ship| ship.side as usize == side) {
+    for ship in battle
+        .ships
+        .iter()
+        .filter(|ship| ship.side as usize == side)
+    {
         if ship.status.can_act() {
             morale += ship.morale;
             crews += 1;
@@ -172,7 +177,7 @@ pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudActi
     {
         inspector(&ctx, refs, battle, ship.0, ship.1, actions);
     }
-    if battle.finished {
+    if battle.finished && refs.options.summary {
         summary(&ctx, refs, battle, actions);
     }
 }
@@ -216,7 +221,9 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
                 actions.push(HudAction::SetSpeed(level));
             }
         }
-        if speed.paused && !battle.finished {
+        if refs.feed.info.still {
+            ui.label(RichText::new("STANDBILD").color(ACCENT).strong());
+        } else if speed.paused && !battle.finished {
             let hint = if battle.tick == 0 {
                 "PAUSIERT – Leertaste beginnt das Gefecht"
             } else {
@@ -232,6 +239,14 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
                 actions.push(HudAction::ToggleHelp);
             }
             ui.separator();
+            if battle.finished
+                && ui
+                    .selectable_label(refs.options.summary, "Bilanz")
+                    .on_hover_text("Bilanz des Gefechts ein- und ausblenden")
+                    .clicked()
+            {
+                actions.push(HudAction::ToggleSummary);
+            }
             if ui
                 .selectable_label(refs.options.labels, "Namen")
                 .on_hover_text("Namen an nahen Schiffen (N)")
@@ -289,7 +304,11 @@ fn side_panel(
         .show(ctx, |ui| {
             ui.set_width(236.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(refs.feed.side_name(side)).strong().color(color));
+                ui.label(
+                    RichText::new(refs.feed.side_name(side))
+                        .strong()
+                        .color(color),
+                );
                 if refs.feed.info.player_side == Some(side) {
                     ui.label(RichText::new("(du)").color(MUTED));
                 }
@@ -337,16 +356,18 @@ fn side_panel(
                         .small(),
                 );
             }
-            egui::Grid::new(("lage", side)).num_columns(3).show(ui, |ui| {
-                ui.label(RichText::new("Kampfwert").color(MUTED));
-                ui.add(bar(summary.strength, color, 110.0));
-                ui.label(percent(summary.strength));
-                ui.end_row();
-                ui.label(RichText::new("Moral").color(MUTED));
-                ui.add(bar(summary.morale, health_color(summary.morale), 110.0));
-                ui.label(percent(summary.morale));
-                ui.end_row();
-            });
+            egui::Grid::new(("lage", side))
+                .num_columns(3)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Kampfwert").color(MUTED));
+                    ui.add(bar(summary.strength, color, 110.0));
+                    ui.label(percent(summary.strength));
+                    ui.end_row();
+                    ui.label(RichText::new("Moral").color(MUTED));
+                    ui.add(bar(summary.morale, health_color(summary.morale), 110.0));
+                    ui.label(percent(summary.morale));
+                    ui.end_row();
+                });
             if refs.feed.info.player_side == Some(side) {
                 ui.separator();
                 orders(ui, battle, side, actions);
@@ -359,8 +380,8 @@ fn orders(ui: &mut egui::Ui, battle: &Battle, side: usize, actions: &mut Vec<Hud
     let combatant = &battle.combatants[side];
     let locked = battle.finished || combatant.retreating;
     ui.add_enabled_ui(!locked, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Formation").color(MUTED));
+        ui.label(RichText::new("Formation").color(MUTED).small());
+        ui.horizontal(|ui| {
             for formation in Formation::ALL {
                 if ui
                     .selectable_label(combatant.formation == formation, formation.label())
@@ -375,8 +396,8 @@ fn orders(ui: &mut egui::Ui, battle: &Battle, side: usize, actions: &mut Vec<Hud
                 }
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Doktrin").color(MUTED));
+        ui.label(RichText::new("Doktrin").color(MUTED).small());
+        ui.horizontal(|ui| {
             for doctrine in Doctrine::ALL {
                 if ui
                     .selectable_label(combatant.doctrine == doctrine, doctrine.label())
@@ -415,6 +436,7 @@ fn inspector(
     egui::Window::new("schiff")
         .title_bar(false)
         .resizable(false)
+        .default_height(640.0)
         .anchor(Align2::LEFT_BOTTOM, [8.0, -8.0])
         .show(ctx, |ui| {
             ui.set_width(330.0);
@@ -422,7 +444,11 @@ fn inspector(
                 ui.label(RichText::new(&design.name).strong().size(16.0));
                 ui.label(RichText::new(ship.class.label()).color(MUTED));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Auswahl aufheben").clicked() {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Auswahl aufheben")
+                        .clicked()
+                    {
                         actions.push(HudAction::Select(None));
                     }
                 });
@@ -445,7 +471,10 @@ fn inspector(
                     actions.push(HudAction::Camera(CameraRequest::FocusShip(index)));
                 }
                 if ui
-                    .add_enabled(in_play, egui::Button::selectable(refs.options.follow, "Verfolgen").small())
+                    .add_enabled(
+                        in_play,
+                        egui::Button::selectable(refs.options.follow, "Verfolgen").small(),
+                    )
                     .on_hover_text("Die Kamera wandert mit dem Schiff mit (V)")
                     .clicked()
                 {
@@ -454,40 +483,66 @@ fn inspector(
             });
             ui.separator();
 
-            egui::Grid::new("schiff_zustand").num_columns(3).show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, label: &str, value: f32, full: f32, color: Color32| {
-                    let fraction = if full > 0.0 { value / full } else { 0.0 };
-                    ui.label(RichText::new(label).color(MUTED));
-                    ui.add(bar(fraction, color, 150.0));
-                    if full > 0.0 {
-                        ui.label(format!("{} / {}", decimal(value.max(0.0) as f64, 0), decimal(full as f64, 0)));
-                    } else {
-                        ui.label(RichText::new("–").color(MUTED));
-                    }
-                    ui.end_row();
-                };
-                let hull = ship.hull / ship.hull_max.max(1e-6);
-                row(ui, "Rumpf", ship.hull, ship.hull_max, health_color(hull));
-                row(ui, "Schild", ship.shield, ship.shield_max, SHIELD);
-                for (face, label) in ["Panzer Bug", "Panzer Steuerbord", "Panzer Heck", "Panzer Backbord"]
+            egui::Grid::new("schiff_zustand")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    let row =
+                        |ui: &mut egui::Ui, label: &str, value: f32, full: f32, color: Color32| {
+                            let fraction = if full > 0.0 { value / full } else { 0.0 };
+                            ui.label(RichText::new(label).color(MUTED));
+                            ui.add(bar(fraction, color, 150.0));
+                            if full > 0.0 {
+                                ui.label(format!(
+                                    "{} / {}",
+                                    decimal(value.max(0.0) as f64, 0),
+                                    decimal(full as f64, 0)
+                                ));
+                            } else {
+                                ui.label(RichText::new("–").color(MUTED));
+                            }
+                            ui.end_row();
+                        };
+                    let hull = ship.hull / ship.hull_max.max(1e-6);
+                    row(ui, "Rumpf", ship.hull, ship.hull_max, health_color(hull));
+                    row(ui, "Schild", ship.shield, ship.shield_max, SHIELD);
+                    for (face, label) in [
+                        "Panzer Bug",
+                        "Panzer Steuerbord",
+                        "Panzer Heck",
+                        "Panzer Backbord",
+                    ]
                     .into_iter()
                     .enumerate()
-                {
-                    row(ui, label, ship.armor[face], ship.armor_max[face], ARMOR);
-                }
-                row(ui, "Munition", ship.ammo, ship.ammo_max, ACCENT);
-                row(ui, "Treibstoff", ship.fuel, ship.fuel_max, Color32::from_rgb(90, 200, 190));
-                row(ui, "Moral", ship.morale, 100.0, health_color(ship.morale / 100.0));
-            });
+                    {
+                        row(ui, label, ship.armor[face], ship.armor_max[face], ARMOR);
+                    }
+                    row(ui, "Munition", ship.ammo, ship.ammo_max, ACCENT);
+                    row(
+                        ui,
+                        "Treibstoff",
+                        ship.fuel,
+                        ship.fuel_max,
+                        Color32::from_rgb(90, 200, 190),
+                    );
+                    row(
+                        ui,
+                        "Moral",
+                        ship.morale,
+                        100.0,
+                        health_color(ship.morale / 100.0),
+                    );
+                });
             if ship.hangar > 0 {
                 ui.label(format!("{} Jäger im Hangar", ship.hangar));
             }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Ziel").color(MUTED));
-                match ship
-                    .target
-                    .and_then(|target| battle.ships.get(target as usize).map(|other| (target, other)))
-                {
+                match ship.target.and_then(|target| {
+                    battle
+                        .ships
+                        .get(target as usize)
+                        .map(|other| (target, other))
+                }) {
                     Some((target, other)) => {
                         let name = &refs.data.designs[other.design as usize].name;
                         let text = RichText::new(format!("{name} ({})", other.class.label()))
@@ -505,36 +560,39 @@ fn inspector(
 
             ui.label(RichText::new("Module").strong());
             egui::ScrollArea::vertical()
-                .max_height(230.0)
+                .max_height(190.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    egui::Grid::new("module").striped(true).num_columns(3).show(ui, |ui| {
-                        for (slot, state) in design.modules.iter().zip(&ship.modules) {
-                            let module = &refs.data.modules[slot.module_id as usize];
-                            let condition = module_condition(state.hp, module.hp);
-                            let fraction = (state.hp / module.hp.max(1e-6)).clamp(0.0, 1.0);
-                            let mut name = RichText::new(&module.name);
-                            if state.hp <= 0.0 {
-                                name = name.color(MUTED).strikethrough();
+                    egui::Grid::new("module")
+                        .striped(true)
+                        .num_columns(3)
+                        .show(ui, |ui| {
+                            for (slot, state) in design.modules.iter().zip(&ship.modules) {
+                                let module = &refs.data.modules[slot.module_id as usize];
+                                let condition = module_condition(state.hp, module.hp);
+                                let fraction = (state.hp / module.hp.max(1e-6)).clamp(0.0, 1.0);
+                                let mut name = RichText::new(&module.name);
+                                if state.hp <= 0.0 {
+                                    name = name.color(MUTED).strikethrough();
+                                }
+                                let label = ui.label(name);
+                                if matches!(module.kind, ModuleKind::Weapon(_)) {
+                                    label.on_hover_text(format!(
+                                        "Feuerwinkel {}, {} Grad",
+                                        facing_label(slot.facing, slot.arc),
+                                        decimal(slot.arc as f64, 0)
+                                    ));
+                                }
+                                ui.add(bar(fraction, health_color(fraction), 70.0));
+                                let color = match condition {
+                                    "intakt" => GOOD,
+                                    "beschädigt" => ACCENT,
+                                    _ => WARNING,
+                                };
+                                ui.label(RichText::new(condition).color(color));
+                                ui.end_row();
                             }
-                            let label = ui.label(name);
-                            if matches!(module.kind, ModuleKind::Weapon(_)) {
-                                label.on_hover_text(format!(
-                                    "Feuerwinkel {}, {} Grad",
-                                    facing_label(slot.facing, slot.arc),
-                                    decimal(slot.arc as f64, 0)
-                                ));
-                            }
-                            ui.add(bar(fraction, health_color(fraction), 70.0));
-                            let color = match condition {
-                                "intakt" => GOOD,
-                                "beschädigt" => ACCENT,
-                                _ => WARNING,
-                            };
-                            ui.label(RichText::new(condition).color(color));
-                            ui.end_row();
-                        }
-                    });
+                        });
                 });
         });
 }
@@ -553,13 +611,19 @@ pub fn outcome_text(feed: &BattleFeed, battle: &Battle, outcome: &Outcome) -> St
 /// Bilanz nach dem Ende des Gefechts.
 fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut Vec<HudAction>) {
     let outcome = matchup::outcome_of(battle);
+    let mut open = true;
     egui::Window::new("Bilanz")
-        .collapsible(true)
+        .open(&mut open)
+        .collapsible(false)
         .resizable(false)
         .default_pos([ctx.content_rect().center().x - 260.0, 150.0])
         .show(ctx, |ui| {
             ui.set_min_width(500.0);
-            ui.label(RichText::new(outcome_text(refs.feed, battle, &outcome)).strong().size(16.0));
+            ui.label(
+                RichText::new(outcome_text(refs.feed, battle, &outcome))
+                    .strong()
+                    .size(16.0),
+            );
             ui.label(
                 RichText::new(format!("Dauer {} Minuten Gefechtszeit", clock(battle.time)))
                     .color(MUTED),
@@ -568,7 +632,11 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
             for (side, result) in outcome.sides.iter().enumerate() {
                 let color = color32(refs.feed.side_color(side));
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(refs.feed.side_name(side)).strong().color(color));
+                    ui.label(
+                        RichText::new(refs.feed.side_name(side))
+                            .strong()
+                            .color(color),
+                    );
                     let mut notes = Vec::new();
                     if result.holds_field {
                         notes.push("hält das Feld");
@@ -578,8 +646,12 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                     }
                     notes.push("Verlust am Bauwert");
                     ui.label(
-                        RichText::new(format!("{} {}", notes.join(" · "), percent(result.loss_share())))
-                            .color(MUTED),
+                        RichText::new(format!(
+                            "{} {}",
+                            notes.join(" · "),
+                            percent(result.loss_share())
+                        ))
+                        .color(MUTED),
                     );
                 });
                 egui::Grid::new(("bilanz", side))
@@ -621,8 +693,18 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                 if ui.button(RichText::new("Zurück").size(15.0)).clicked() {
                     actions.push(HudAction::Request(BattleViewRequest::Leave));
                 }
+                if ui
+                    .button("Feld ansehen")
+                    .on_hover_text("Bilanz ausblenden; „Bilanz“ in der Kopfleiste holt sie zurück")
+                    .clicked()
+                {
+                    actions.push(HudAction::ToggleSummary);
+                }
             });
         });
+    if !open {
+        actions.push(HudAction::ToggleSummary);
+    }
 }
 
 /// Umriss der Markierung einer Klasse (x voraus) und ihre halbe Größe in Pixeln.
@@ -632,11 +714,24 @@ pub fn marker_outline(class: ShipClass) -> (&'static [[f32; 2]], f32) {
         ShipClass::Corvette => (&[[1.25, 0.0], [-0.9, 0.55], [-0.9, -0.55]], 5.2),
         ShipClass::Frigate => (&[[1.0, 0.0], [0.0, 0.8], [-1.0, 0.0], [0.0, -0.8]], 6.0),
         ShipClass::Cruiser => (
-            &[[1.3, 0.0], [0.35, 0.62], [-1.0, 0.62], [-1.0, -0.62], [0.35, -0.62]],
+            &[
+                [1.3, 0.0],
+                [0.35, 0.62],
+                [-1.0, 0.62],
+                [-1.0, -0.62],
+                [0.35, -0.62],
+            ],
             7.2,
         ),
         ShipClass::Battleship => (
-            &[[1.3, 0.0], [0.55, 0.85], [-1.0, 0.85], [-1.25, 0.0], [-1.0, -0.85], [0.55, -0.85]],
+            &[
+                [1.3, 0.0],
+                [0.55, 0.85],
+                [-1.0, 0.85],
+                [-1.25, 0.0],
+                [-1.0, -0.85],
+                [0.55, -0.85],
+            ],
             8.8,
         ),
         ShipClass::Carrier => (
@@ -691,7 +786,8 @@ pub fn collect_markers(battle: &Battle, frame: &ViewFrame, projector: &Projector
         let mut points = Vec::new();
         if alpha > 0.0 {
             // Der Bug der Markierung zeigt, wohin das Schiff auf dem Bildschirm fährt.
-            let ahead = *position + super::heading_rotation(*heading) * Vec3::X * ship.radius.max(8.0);
+            let ahead =
+                *position + super::heading_rotation(*heading) * Vec3::X * ship.radius.max(8.0);
             let direction = projector
                 .project(ahead)
                 .map(|(point, _)| point - screen)
@@ -763,11 +859,13 @@ fn markers(ctx: &egui::Context, refs: &HudRefs, battle: &Battle) {
                 painter.line_segment([corner, corner - egui::vec2(0.0, sy * arm)], stroke);
             }
         }
-        if refs.options.labels && marker.pixels >= LABEL_FROM && labels < 60 {
+        // Im Standbild (Schaustellung) trägt jedes Schiff seinen Namen, sonst nur die nahen.
+        let near = marker.pixels >= LABEL_FROM || refs.feed.info.still;
+        if refs.options.labels && near && labels < 60 {
             labels += 1;
             let design = &refs.data.designs[ship.design as usize];
             painter.text(
-                marker.center + egui::vec2(0.0, marker.pixels * 0.32 + 10.0),
+                marker.center + egui::vec2(0.0, (marker.pixels * 0.36).min(150.0) + 12.0),
                 Align2::CENTER_TOP,
                 format!("{} · {}", design.name, ship.class.label()),
                 egui::FontId::proportional(13.0),
@@ -833,6 +931,7 @@ pub(super) fn draw_hud(
             HudAction::ToggleOverlay => options.overlay = !options.overlay,
             HudAction::ToggleLabels => options.labels = !options.labels,
             HudAction::ToggleFollow => options.follow = !options.follow && selected.0.is_some(),
+            HudAction::ToggleSummary => options.summary = !options.summary,
             HudAction::ToggleHelp => ui_state.help_open = !ui_state.help_open,
         }
     }
@@ -880,7 +979,10 @@ mod tests {
     fn hud_draws_for_a_running_battle_and_every_selection() {
         let data = data();
         let (battle, feed) = stepped(&data, MIXED, 450);
-        assert!(!battle.finished && !battle.wrecks.is_empty(), "mitten im Gefecht");
+        assert!(
+            !battle.finished && !battle.wrecks.is_empty(),
+            "mitten im Gefecht"
+        );
         let camera = super::super::camera::overview_transform(2400.0);
         let frame_data = view_frame(&feed, &camera);
         let speed = SimSpeed::default();
@@ -889,6 +991,7 @@ mod tests {
                 overlay: true,
                 labels,
                 follow: labels,
+                summary: true,
             };
             // Ohne Auswahl und mit jedem Schiff des Gefechts als Auswahl, auch mit
             // zerstörten und entkommenen.
@@ -903,7 +1006,10 @@ mod tests {
                 };
                 let mut actions = Vec::new();
                 frame(|ui| battle_hud(ui, &refs, &mut actions));
-                assert!(actions.is_empty(), "ohne Eingabe darf nichts ausgelöst werden");
+                assert!(
+                    actions.is_empty(),
+                    "ohne Eingabe darf nichts ausgelöst werden"
+                );
             }
         }
         // Ein Auswahlindex, den es nicht gibt, bringt nichts zum Absturz.
@@ -943,6 +1049,17 @@ mod tests {
         let mut actions = Vec::new();
         frame(|ui| battle_hud(ui, &refs, &mut actions));
         assert!(actions.is_empty());
+        // Auch mit ausgeblendeter Bilanz (zum Betrachten des Felds).
+        let hidden = ViewOptions {
+            summary: false,
+            ..Default::default()
+        };
+        let refs = HudRefs {
+            options: &hidden,
+            ..refs
+        };
+        frame(|ui| battle_hud(ui, &refs, &mut actions));
+        assert!(actions.is_empty());
         // Die Bilanz nennt den Ausgang und zählt je Partei, was der Kern gezählt hat.
         let outcome = matchup::outcome_of(&battle);
         let text = outcome_text(&feed, &battle, &outcome);
@@ -956,7 +1073,9 @@ mod tests {
             for class in 0..6 {
                 assert!(
                     result.lost[class] + result.escaped[class] + result.holding[class]
-                        <= result.initial[class].max(result.lost[class] + result.escaped[class] + result.holding[class])
+                        <= result.initial[class].max(
+                            result.lost[class] + result.escaped[class] + result.holding[class]
+                        )
                 );
             }
         }
@@ -978,9 +1097,15 @@ mod tests {
         assert_eq!(summarize(&battle, &data, 1).hangar, 0);
 
         let (battle, _) = stepped(&data, MIXED, 500);
-        let lost: u32 = battle.combatants.iter().map(|c| c.lost.iter().sum::<u32>()).sum();
+        let lost: u32 = battle
+            .combatants
+            .iter()
+            .map(|c| c.lost.iter().sum::<u32>())
+            .sum();
         assert!(lost > 0);
-        let worn = (0..2).map(|side| summarize(&battle, &data, side).strength).fold(1.0, f32::min);
+        let worn = (0..2)
+            .map(|side| summarize(&battle, &data, side).strength)
+            .fold(1.0, f32::min);
         assert!(worn < 0.9, "Verluste drücken den Kampfwert");
     }
 
@@ -1000,20 +1125,40 @@ mod tests {
             assert!(size >= last);
             last = size;
         }
-        assert_ne!(marker_outline(ShipClass::Battleship).0, marker_outline(ShipClass::Carrier).0);
+        assert_ne!(
+            marker_outline(ShipClass::Battleship).0,
+            marker_outline(ShipClass::Carrier).0
+        );
 
         let data = data();
         let (battle, feed) = stepped(&data, MIXED, 60);
-        // Aus der Übersicht ist jedes Schiff klein: Alle auf dem Feld tragen eine
-        // deckende Markierung, und sie liegt dort, wo das Schiff im Bild steht.
+        // Aus der Übersicht über das ganze Feld ist jedes Schiff klein: Alle tragen eine
+        // Markierung (die kleinen Klassen voll deckend), und sie liegt dort, wo das Schiff
+        // im Bild steht.
         let camera = super::super::camera::overview_transform(2400.0);
         let frame_data = view_frame(&feed, &camera);
         let markers = collect_markers(&battle, &frame_data, &frame_data.projector);
-        let in_play = battle.ships.iter().filter(|ship| ship.status.in_play()).count();
+        let in_play = battle
+            .ships
+            .iter()
+            .filter(|ship| ship.status.in_play())
+            .count();
         assert_eq!(markers.len(), in_play);
         for marker in &markers {
             let ship = &battle.ships[marker.ship as usize];
-            assert!(marker.alpha > 0.99, "{:?} mit {} Pixeln", ship.class, marker.pixels);
+            assert!(
+                marker.alpha > 0.8,
+                "{:?} mit {} Pixeln",
+                ship.class,
+                marker.pixels
+            );
+            if !ship.class.is_capital() {
+                assert_eq!(
+                    marker.alpha, 1.0,
+                    "{:?} mit {} Pixeln",
+                    ship.class, marker.pixels
+                );
+            }
             let (outline, size) = marker_outline(ship.class);
             assert_eq!(marker.points.len(), outline.len());
             for point in &marker.points {
@@ -1035,11 +1180,15 @@ mod tests {
             .iter()
             .position(|ship| ship.class == ShipClass::Battleship && ship.status.in_play())
             .unwrap();
-        let near = Transform::from_translation(frame_data.poses[capital].0 + Vec3::new(0.0, 60.0, 110.0))
-            .looking_at(frame_data.poses[capital].0, Vec3::Y);
+        let near =
+            Transform::from_translation(frame_data.poses[capital].0 + Vec3::new(0.0, 60.0, 110.0))
+                .looking_at(frame_data.poses[capital].0, Vec3::Y);
         let close_frame = view_frame(&feed, &near);
         let close = collect_markers(&battle, &close_frame, &close_frame.projector);
-        let own = close.iter().find(|marker| marker.ship as usize == capital).unwrap();
+        let own = close
+            .iter()
+            .find(|marker| marker.ship as usize == capital)
+            .unwrap();
         assert_eq!(own.alpha, 0.0);
         assert!(own.points.is_empty());
         assert!(own.pixels > 200.0);
@@ -1087,6 +1236,9 @@ mod tests {
                 }
             }
         }
-        assert!(damaged > 0 && failed > 0 && intact > 0, "{damaged} / {failed} / {intact}");
+        assert!(
+            damaged > 0 && failed > 0 && intact > 0,
+            "{damaged} / {failed} / {intact}"
+        );
     }
 }

@@ -6,6 +6,7 @@
 //! später die Partie für ihre Gefechte tun.
 
 use super::camera::ViewOptions;
+use super::BattleFeedSet;
 use super::feed::{BattleFeed, BattleOrder, BattleViewRequest, FeedInfo, SideInfo};
 use crate::args::Args;
 use crate::session::Notice;
@@ -22,6 +23,7 @@ use sim::battle::matchup::{self, Side};
 use sim::battle::{Battle, Doctrine, Formation, V2};
 use sim::clock::SimClock;
 use sim::data::{Rgb, ShipClass};
+use std::time::{Duration, Instant};
 
 /// Namen und Farben der beiden Übungsparteien.
 pub const SIDE_NAMES: [&str; 2] = ["Blauer Verband", "Roter Verband"];
@@ -211,6 +213,23 @@ pub struct StartPractice(pub PracticeConfig);
 pub struct PracticeBattle {
     pub battle: Battle,
     config: PracticeConfig,
+    /// Rechenzeit: gerechnete Takte, Zeit im Gefechtsrechner und Zeit für das Ablegen im
+    /// Feed. Der Selbsttest weist sie aus.
+    pub ticks: u64,
+    pub step_time: Duration,
+    pub feed_time: Duration,
+}
+
+impl PracticeBattle {
+    fn new(battle: Battle, config: PracticeConfig) -> Self {
+        Self {
+            battle,
+            config,
+            ticks: 0,
+            step_time: Duration::ZERO,
+            feed_time: Duration::ZERO,
+        }
+    }
 }
 
 fn feed_info(config: &PracticeConfig) -> FeedInfo {
@@ -228,6 +247,7 @@ fn feed_info(config: &PracticeConfig) -> FeedInfo {
             .collect(),
         player_side: (!config.lineup).then_some(0),
         can_restart: !config.lineup,
+        still: config.lineup,
     }
 }
 
@@ -246,7 +266,11 @@ pub(super) fn plugin(app: &mut App) {
                 .chain()
                 .run_if(in_state(AppState::Practice)),
         )
-        .add_systems(FixedUpdate, step.run_if(in_state(AppState::Practice)))
+        .add_systems(
+            FixedUpdate,
+            step.in_set(BattleFeedSet::Practice)
+                .run_if(in_state(AppState::Practice)),
+        )
         .add_systems(OnExit(AppState::Practice), leave);
 }
 
@@ -302,7 +326,7 @@ fn start_requested(
     let battle = config.build(&data);
     feed.begin(&battle, feed_info(&config));
     options.labels = config.lineup;
-    commands.insert_resource(PracticeBattle { battle, config });
+    commands.insert_resource(PracticeBattle::new(battle, config));
     // Die Laufbedingungen des Kerns (`day_start`, `month_start`) lesen die Uhr der Partie,
     // sobald der feste Takt läuft, auch wenn die Simulation selbst ruht. Ohne Partie gibt
     // es keine Uhr; die Übung stellt deshalb eine leere hin und räumt sie beim Verlassen
@@ -355,7 +379,8 @@ fn handle_view_requests(
                 next.set(AppState::MainMenu);
             }
             BattleViewRequest::Restart => {
-                practice.battle = practice.config.build(&data);
+                let config = practice.config.clone();
+                *practice = PracticeBattle::new(config.build(&data), config);
                 feed.begin(&practice.battle, feed_info(&practice.config));
                 *speed = SimSpeed::default();
             }
@@ -403,8 +428,13 @@ fn step(
     if practice.config.lineup || practice.battle.finished {
         return;
     }
+    let start = Instant::now();
     practice.battle.step(&data);
+    let stepped = Instant::now();
     feed.refresh(&practice.battle);
+    practice.ticks += 1;
+    practice.step_time += stepped - start;
+    practice.feed_time += stepped.elapsed();
 }
 
 fn leave(
@@ -481,7 +511,9 @@ pub fn setup_dialog(
                 );
                 match fleet_summary(data, &setup.fleets[side]) {
                     Ok(summary) => ui.label(RichText::new(summary).color(MUTED)),
-                    Err(error) => ui.label(RichText::new(error).color(Color32::from_rgb(235, 110, 95))),
+                    Err(error) => {
+                        ui.label(RichText::new(error).color(Color32::from_rgb(235, 110, 95)))
+                    }
                 };
                 ui.horizontal(|ui| {
                     ui.label("Formation");
@@ -489,7 +521,11 @@ pub fn setup_dialog(
                         .selected_text(setup.formations[side].label())
                         .show_ui(ui, |ui| {
                             for option in Formation::ALL {
-                                ui.selectable_value(&mut setup.formations[side], option, option.label());
+                                ui.selectable_value(
+                                    &mut setup.formations[side],
+                                    option,
+                                    option.label(),
+                                );
                             }
                         });
                     ui.label("Doktrin");
@@ -497,7 +533,11 @@ pub fn setup_dialog(
                         .selected_text(setup.doctrines[side].label())
                         .show_ui(ui, |ui| {
                             for option in Doctrine::ALL {
-                                ui.selectable_value(&mut setup.doctrines[side], option, option.label());
+                                ui.selectable_value(
+                                    &mut setup.doctrines[side],
+                                    option,
+                                    option.label(),
+                                );
                             }
                         });
                 });
@@ -519,12 +559,17 @@ pub fn setup_dialog(
             ui.horizontal(|ui| {
                 ui.label("Seed");
                 ui.add(egui::TextEdit::singleline(&mut setup.seed_text).desired_width(120.0));
-                ui.label(RichText::new("Gleicher Seed, gleicher Verlauf.").color(MUTED).small());
+                ui.label(
+                    RichText::new("Gleicher Seed, gleicher Verlauf.")
+                        .color(MUTED)
+                        .small(),
+                );
             });
             ui.add_space(8.0);
             let config = setup.resolve(data);
             ui.horizontal(|ui| {
-                let begin = egui::Button::new(RichText::new("Gefecht beginnen").size(17.0).color(ACCENT));
+                let begin =
+                    egui::Button::new(RichText::new("Gefecht beginnen").size(17.0).color(ACCENT));
                 let response = ui.add_enabled(config.is_ok(), begin);
                 match config {
                     Ok(config) => {
@@ -556,20 +601,32 @@ mod tests {
         let data = data();
         for preset in &PRESETS {
             let setup = PracticeSetup::from_preset(preset);
-            let config = setup.resolve(&data).unwrap_or_else(|error| panic!("{}: {error}", preset.name));
+            let config = setup
+                .resolve(&data)
+                .unwrap_or_else(|error| panic!("{}: {error}", preset.name));
             let battle = config.build(&data);
             assert_eq!(battle.combatants.len(), 2);
             assert!(battle.is_hostile(0, 1));
             assert_eq!(battle.combatants[0].formation, preset.formations[0]);
             for side in 0..2 {
-                assert!(battle.is_fighting(side), "{}: Partei {side} ohne Schiffe", preset.name);
+                assert!(
+                    battle.is_fighting(side),
+                    "{}: Partei {side} ohne Schiffe",
+                    preset.name
+                );
             }
             assert!(fleet_summary(&data, preset.fleets[0]).is_ok());
         }
         // Das Großgefecht bringt rund 200 Schiffe je Seite auf das Feld.
-        let large = PracticeSetup::from_preset(&PRESETS[3]).resolve(&data).unwrap();
+        let large = PracticeSetup::from_preset(&PRESETS[3])
+            .resolve(&data)
+            .unwrap();
         for side in &large.sides {
-            assert!((190..=210).contains(&side.ship_count()), "{} Schiffe", side.ship_count());
+            assert!(
+                (190..=210).contains(&side.ship_count()),
+                "{} Schiffe",
+                side.ship_count()
+            );
         }
     }
 
@@ -584,10 +641,17 @@ mod tests {
         assert_eq!(setup.resolve(&data).unwrap().seed, 42);
         setup.fleets[1] = "gibtesnicht:3".into();
         let error = setup.resolve(&data).unwrap_err();
-        assert!(error.contains(SIDE_NAMES[1]) && error.contains("gibtesnicht"), "{error}");
+        assert!(
+            error.contains(SIDE_NAMES[1]) && error.contains("gibtesnicht"),
+            "{error}"
+        );
         setup.fleets[1] = String::new();
         assert!(setup.resolve(&data).is_err());
-        assert!(fleet_summary(&data, "horst:2").unwrap().contains("48 Bordjäger"));
+        assert!(
+            fleet_summary(&data, "horst:2")
+                .unwrap()
+                .contains("48 Bordjäger")
+        );
         // Formation und Doktrin des Dialogs kommen im Gefecht an.
         let mut setup = PracticeSetup::default();
         setup.formations[1] = Formation::Pincer;
@@ -602,7 +666,11 @@ mod tests {
         let data = data();
         let battle = PracticeConfig::lineup(&data).build(&data);
         for side in 0..2u16 {
-            let mut row: Vec<_> = battle.ships.iter().filter(|ship| ship.side == side).collect();
+            let mut row: Vec<_> = battle
+                .ships
+                .iter()
+                .filter(|ship| ship.side == side)
+                .collect();
             assert_eq!(row.len(), ShipClass::ALL.len());
             row.sort_by(|a, b| a.pos.x.total_cmp(&b.pos.x));
             // Vom Jäger links bis zum Träger rechts, ohne Überschneidung.
@@ -613,7 +681,10 @@ mod tests {
             }
             for pair in row.windows(2) {
                 let gap = pair[1].pos.x - pair[0].pos.x;
-                assert!(gap > 0.75 * (pair[0].radius + pair[1].radius), "Schiffe überschneiden sich");
+                assert!(
+                    gap > 0.75 * (pair[0].radius + pair[1].radius),
+                    "Schiffe überschneiden sich"
+                );
             }
         }
     }

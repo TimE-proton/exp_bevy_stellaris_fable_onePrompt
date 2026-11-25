@@ -34,7 +34,7 @@ pub fn to_world(point: V2) -> Vec3 {
 }
 
 /// Punkt der Welt, senkrecht auf die Gefechtsebene gelotet.
-#[inline]
+#[cfg(test)]
 pub fn to_plane(point: Vec3) -> V2 {
     V2::new(point.x, -point.z)
 }
@@ -53,6 +53,17 @@ pub struct BattleViewShown(pub bool);
 /// Die Ansicht arbeitet, sobald sie gezeigt wird und der Feed ein Gefecht hält.
 pub fn view_active(shown: Res<BattleViewShown>, feed: Res<BattleFeed>) -> bool {
     shown.0 && feed.is_active()
+}
+
+/// Wer im festen Takt den Feed füllt, gehört in eines dieser Sets. Das Schedule der
+/// Simulation duldet keine ungeordneten Zugriffe auf dieselbe Resource; die Sets legen die
+/// Reihenfolge fest: nach dem Takt der Simulation, erst die Übung, dann die Partie.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BattleFeedSet {
+    /// Gefechtsübung ([`practice`]).
+    Practice,
+    /// Gefechte der Partie.
+    Campaign,
 }
 
 /// Reihenfolge der Ansicht innerhalb eines Frames.
@@ -218,6 +229,12 @@ impl Plugin for BattleViewPlugin {
                     .chain()
                     .run_if(view_active),
             )
+            .configure_sets(
+                FixedUpdate,
+                (BattleFeedSet::Practice, BattleFeedSet::Campaign)
+                    .chain()
+                    .after(sim::SimRoot),
+            )
             .add_systems(Update, update_poses.in_set(BattleViewSet::Poses))
             .add_systems(Last, close_timing_frame)
             // Dieselbe Ansicht für die Gefechtsübung und für Gefechte der Partie.
@@ -225,10 +242,7 @@ impl Plugin for BattleViewPlugin {
             .add_systems(OnExit(AppState::Practice), scene::hide_view)
             .add_systems(OnEnter(ViewState::Battle), scene::show_view)
             .add_systems(OnExit(ViewState::Battle), scene::hide_view)
-            .add_systems(
-                EguiPrimaryContextPass,
-                hud::draw_hud.run_if(view_active),
-            );
+            .add_systems(EguiPrimaryContextPass, hud::draw_hud.run_if(view_active));
         camera::plugin(app);
         scene::plugin(app);
         effects::plugin(app);

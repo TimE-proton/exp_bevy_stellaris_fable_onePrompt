@@ -99,7 +99,7 @@ impl BattleAssets {
             ..default()
         };
         let wreck = |glow: LinearRgba| StandardMaterial {
-            base_color: Color::linear_rgb(0.3, 0.28, 0.27),
+            base_color: Color::linear_rgb(0.13, 0.12, 0.118),
             emissive: glow,
             perceptual_roughness: 0.85,
             ..default()
@@ -132,7 +132,7 @@ impl BattleAssets {
                 materials.add(wreck(LinearRgba::BLACK)),
             ],
             debris_material: materials.add(StandardMaterial {
-                base_color: Color::linear_rgb(0.34, 0.33, 0.33),
+                base_color: Color::linear_rgb(0.16, 0.155, 0.155),
                 perceptual_roughness: 0.8,
                 ..default()
             }),
@@ -143,9 +143,9 @@ impl BattleAssets {
                 materials.add(flash((0.9, 0.2, 0.06), 1.0, 0.3)),
             ],
             shield_materials: [
-                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.55))),
-                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.3))),
-                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.12))),
+                materials.add(additive(LinearRgba::new(0.3, 0.7, 2.0, 0.22))),
+                materials.add(additive(LinearRgba::new(0.3, 0.7, 2.0, 0.13))),
+                materials.add(additive(LinearRgba::new(0.3, 0.7, 2.0, 0.06))),
             ],
             star_material: materials.add(glowing(LinearRgba::WHITE)),
         }
@@ -187,7 +187,11 @@ fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
 }
 
 fn scaled(color: LinearRgba, factor: f32) -> LinearRgba {
-    LinearRgba::rgb(color.red * factor, color.green * factor, color.blue * factor)
+    LinearRgba::rgb(
+        color.red * factor,
+        color.green * factor,
+        color.blue * factor,
+    )
 }
 
 /// Parteifarbe als Anstrich: linear, auf gleiche Helligkeit gebracht, damit dunkle und
@@ -223,7 +227,7 @@ impl SideMaterials {
             .collect();
         Self {
             classes,
-            glow: materials.add(glowing(scaled(mix(side, white, 0.35), 4.5))),
+            glow: materials.add(additive(scaled(mix(side, white, 0.3), 3.2))),
             tracer: materials.add(glowing(scaled(mix(side, white, 0.4), 9.0))),
             missile: materials.add(glowing(scaled(mix(side, white, 0.55), 7.0))),
             beam_light: materials.add(glowing(scaled(mix(side, white, 0.15), 11.0))),
@@ -401,7 +405,7 @@ pub(super) fn show_view(
         SceneProp,
         DirectionalLight {
             color: Color::srgb(1.0, 0.96, 0.9),
-            illuminance: 3_400.0,
+            illuminance: 2_700.0,
             shadow_maps_enabled: false,
             ..default()
         },
@@ -464,6 +468,7 @@ pub(super) fn rebuild_on_epoch(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut selected: ResMut<SelectedShip>,
+    mut options: ResMut<ViewOptions>,
     mut requests: MessageWriter<CameraRequest>,
 ) {
     let _span = timings.span(Part::Scene);
@@ -488,6 +493,8 @@ pub(super) fn rebuild_on_epoch(
             .collect(),
     };
     selected.0 = None;
+    options.follow = false;
+    options.summary = true;
     requests.write(CameraRequest::Overview);
 }
 
@@ -532,7 +539,8 @@ fn sync_ships(
 
     for (entity, mut visual, mut transform, mut material) in &mut hulls {
         let index = visual.index as usize;
-        let (Some(ship), Some((position, heading))) = (battle.ships.get(index), frame.poses.get(index))
+        let (Some(ship), Some((position, heading))) =
+            (battle.ships.get(index), frame.poses.get(index))
         else {
             commands.entity(entity).despawn();
             continue;
@@ -576,7 +584,11 @@ fn sync_ships(
             *visibility = wanted;
         }
         if throttle > 0.04 {
-            let scale = Vec3::new(0.2 + 0.8 * throttle, 0.75 + 0.25 * throttle, 0.75 + 0.25 * throttle);
+            let scale = Vec3::new(
+                0.2 + 0.8 * throttle,
+                0.75 + 0.25 * throttle,
+                0.75 + 0.25 * throttle,
+            );
             if transform.scale != scale {
                 transform.scale = scale;
             }
@@ -610,11 +622,13 @@ fn sync_ships(
                 rotation: heading_rotation(*heading),
                 scale: Vec3::splat(ship.radius),
             },
+            Visibility::Inherited,
             children![(
                 EngineGlow { ship: index as u32 },
                 Mesh3d(assets.classes[class].glow.clone()),
                 MeshMaterial3d(side.glow.clone()),
                 Transform::from_xyz(-1.0, 0.0, 0.0),
+                Visibility::Inherited,
             )],
         ));
     }
@@ -886,10 +900,17 @@ mod tests {
             // die bei beiden Parteien gleich aussehen.
             let bluish = blue.iter().filter(|c| c[2] > 0.8 && c[0] < 0.2).count();
             let reddish = red.iter().filter(|c| c[0] > 0.8 && c[2] < 0.2).count();
-            assert!(bluish >= 12 && bluish == reddish, "{}: {bluish} / {reddish}", class.label());
+            assert!(
+                bluish >= 12 && bluish == reddish,
+                "{}: {bluish} / {reddish}",
+                class.label()
+            );
             let same = blue.iter().zip(&red).filter(|(a, b)| a == b).count();
             assert!(same >= 12, "{}: keine neutralen Teile", class.label());
-            assert!(blue.iter().chain(&red).all(|c| c[3] == 1.0), "Rümpfe sind deckend");
+            assert!(
+                blue.iter().chain(&red).all(|c| c[3] == 1.0),
+                "Rümpfe sind deckend"
+            );
         }
         assert_eq!(side_tint((0.5, 0.5, 0.5)), [1.0, 1.0, 1.0]);
         let tint = side_tint((1.0, 0.4, 0.3));
