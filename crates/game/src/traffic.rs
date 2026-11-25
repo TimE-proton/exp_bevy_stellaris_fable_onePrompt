@@ -4,6 +4,7 @@ use crate::map::{MapCamera, Selection};
 use crate::state::{AppState, ViewState};
 use bevy::prelude::*;
 use sim::clock::{SimClock, TICKS_PER_DAY};
+use sim::finance::{Finance, Stage};
 use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
 use sim::ids::SystemId;
@@ -53,6 +54,7 @@ fn draw_traffic(
     polities: Res<Polities>,
     logistics: Res<Logistics>,
     fleets: Res<Fleets>,
+    finance: Res<Finance>,
     selection: Res<Selection>,
     projection: Single<&Projection, With<MapCamera>>,
 ) {
@@ -132,6 +134,25 @@ fn draw_traffic(
             let to = Vec2::from(galaxy.system(*target).pos);
             gizmos.line_2d(at, to, color.with_alpha(0.35));
         }
+    }
+
+    // Unruhe: Ein gelber Ring markiert Systeme mit unruhigen, ein orangeroter solche mit
+    // autonomen Welten.
+    for system in &galaxy.systems {
+        let worst = system
+            .planets
+            .iter()
+            .filter(|planet| galaxy.planet(**planet).owner.is_some())
+            .map(|planet| finance.region(*planet).stage)
+            .max();
+        let color = match worst {
+            Some(Stage::Restless) => Color::srgb(0.95, 0.78, 0.25),
+            Some(Stage::Autonomous) => Color::srgb(1.0, 0.45, 0.15),
+            _ => continue,
+        };
+        gizmos
+            .circle_2d(Vec2::from(system.pos), 12.5, color)
+            .resolution(24);
     }
 
     // Blockierte Systeme: doppelter roter Ring.

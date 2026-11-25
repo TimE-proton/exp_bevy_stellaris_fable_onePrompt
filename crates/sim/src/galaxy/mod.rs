@@ -4,7 +4,7 @@ mod generate;
 mod plugin;
 
 pub use generate::{generate_galaxy, habitability, roll_planet};
-pub use plugin::GalaxyPlugin;
+pub use plugin::{GalaxyPlugin, MigrationStep};
 
 use crate::data::Atmosphere;
 use crate::ids::{GoodId, LaneId, PlanetId, PolityId, SystemId};

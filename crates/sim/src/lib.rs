@@ -15,6 +15,7 @@ pub mod command;
 pub mod data;
 pub mod diplomacy;
 pub mod economy;
+pub mod finance;
 pub mod fleet;
 pub mod galaxy;
 pub mod harness;
@@ -127,6 +128,7 @@ impl PluginGroup for SimPlugins {
             .add(diplomacy::DiplomacyPlugin)
             .add(logistics::LogisticsPlugin)
             .add(economy::EconomyPlugin)
+            .add(finance::FinancePlugin)
             .add(fleet::FleetPlugin)
             .add(ai::AiPlugin)
     }

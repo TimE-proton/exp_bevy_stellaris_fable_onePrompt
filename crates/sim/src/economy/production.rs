@@ -20,6 +20,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
         markets,
         planets,
         treasuries,
+        tax_rates,
         ..
     } = economy;
 
@@ -36,6 +37,12 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
             }
             let local = &mut planets[planet_id.index()];
             let treasury = &mut treasuries[owner.index()];
+            // Autonome Regionen behalten ihre Steuern.
+            let tax_rate = if local.tax_exempt {
+                0.0
+            } else {
+                tax_rates[owner.index()]
+            };
 
             // Arbeitsmarkt: Reichen die Arbeitskräfte nicht, laufen alle Werke anteilig.
             let labor_supply = planet.population * balance.workforce_share;
@@ -115,9 +122,6 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 }
                 let firm = &mut local.firms[recipe.sector.index()];
                 let full_cost = staffed * cost_per_unit;
-                if full_cost > 0.0 {
-                    run = run.min(super::to_credits(firm.cash) / full_cost);
-                }
                 let run = run.clamp(0.0, 1.0);
                 if run <= 0.0 {
                     continue;
@@ -126,9 +130,12 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 let fuel_used = (fuel_need * run).min(fuel_need * fuel_share);
                 let fuel_saved =
                     (fuel_need * run - fuel_used) * (market.ask(fuel, spread) + fuel_lift);
-                let full_cost = full_cost - if run > 0.0 { fuel_saved / run } else { 0.0 };
+                let cost = full_cost * run - fuel_saved;
 
-                // Einkauf.
+                // Einkauf und Verkauf laufen am selben Tag über dasselbe Kontor und werden
+                // verrechnet. Weil der Erlös Material und Energie deckt (sonst stünde das
+                // Werk still), braucht die Firma keine Vorkasse: Eine leere Kasse hält
+                // kein profitables Werk an.
                 for (good, amount) in &recipe.input_ids {
                     let quantity = staffed * run * *amount as f64;
                     let stock = &mut market.stock[good.index()];
@@ -136,23 +143,26 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 }
                 let fuel_stock = &mut market.stock[fuel.index()];
                 *fuel_stock = (*fuel_stock - fuel_used).max(0.0);
-                let paid_inputs = pay(&mut firm.cash, &mut market.cash, to_money(full_cost * run));
-
-                // Verkauf an das Kontor; es zahlt, soweit seine Kasse reicht.
                 let quantity = staffed * run * output_per_unit;
                 market.stock[recipe.output_id.index()] += quantity;
                 market.supply_today[recipe.output_id.index()] += quantity;
-                let earned = pay(
-                    &mut market.cash,
-                    &mut firm.cash,
-                    to_money(quantity * net_price),
-                );
-                market.turnover_today += super::to_credits(paid_inputs + earned);
+                let revenue = quantity * net_price;
+                let net = to_money(revenue - cost);
+                // Das Kontor zahlt den Überschuss, soweit seine Kasse reicht.
+                let settled = if net >= 0 {
+                    pay(&mut market.cash, &mut firm.cash, net)
+                } else {
+                    -pay(&mut firm.cash, &mut market.cash, -net)
+                };
+                market.turnover_today += revenue + cost;
+                // Für die Gewinnrechnung: Erlös und Einkauf getrennt, anteilig nach Zahlung.
+                let earned = to_money(revenue).min(settled.max(0) + to_money(cost));
+                let paid_inputs = earned - settled;
 
                 // Löhne für die geleistete Arbeit, davon Einkommensteuer an den Staat.
                 let wages_due = to_money(staffed * run * recipe.labor as f64 * local.wage);
                 let wages = wages_due.min(firm.cash.max(0));
-                let tax = (wages as f64 * balance.income_tax).round() as Money;
+                let tax = (wages as f64 * tax_rate).round() as Money;
                 firm.cash -= wages;
                 *treasury += tax;
                 local.households += wages - tax;
@@ -193,8 +203,14 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                     continue;
                 }
                 let unit_price = market.ask(good, spread) + 0.5 * lift_cost(data, planet, good);
-                // Kaufkräftige Nachfrage: Wünsche ohne Geld bewegen keinen Preis.
-                market.demand_today[good.index()] += desired.min(budget / unit_price).max(0.0);
+                // Kaufkräftige Nachfrage: Wünsche ohne Geld bewegen keinen Preis. Das
+                // Lebensnotwendige zählt dagegen voll, auch wenn es gerade unbezahlbar ist:
+                // Sonst hielte ein leerer Markt die Frachter fern, die ihn füllen könnten.
+                market.demand_today[good.index()] += if need.essential {
+                    desired
+                } else {
+                    desired.min(budget / unit_price).max(0.0)
+                };
                 let quantity = desired
                     .min(market.stock[good.index()] * BUYER_SHARE)
                     .min(budget / unit_price)
@@ -286,7 +302,8 @@ pub fn abandon_dead_colonies(
         let leftover = galaxy.planets[index].population;
         galaxy.planets[index].population = 0.0;
         galaxy.planets[index].owner = None;
-        galaxy.planets[capital.index()].population += leftover;
+        let home = &mut galaxy.planets[capital.index()];
+        home.population = (home.population + leftover).min(home.capacity);
         let old = std::mem::replace(&mut economy.planets[index], super::PlanetEconomy::new(data));
         let cash = old.households + old.firms.iter().map(|firm| firm.cash).sum::<Money>();
         economy.planets[capital.index()].households += cash;

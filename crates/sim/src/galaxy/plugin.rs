@@ -8,6 +8,10 @@ use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 
+/// Markiert die monatliche Wanderung, damit der Zusammenhalt danach rechnen kann.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MigrationStep;
+
 /// Galaxie: die Planeten und ihre Bevölkerung.
 pub struct GalaxyPlugin;
 
@@ -21,7 +25,10 @@ impl Plugin for GalaxyPlugin {
                     .in_set(SimSet::Production)
                     .after(crate::economy::ProductionStep)
                     .run_if(day_start),
-                migration.in_set(SimSet::Cohesion).run_if(month_start),
+                migration
+                    .in_set(SimSet::Cohesion)
+                    .in_set(MigrationStep)
+                    .run_if(month_start),
             ),
         );
     }

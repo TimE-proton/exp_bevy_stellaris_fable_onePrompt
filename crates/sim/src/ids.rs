@@ -1,6 +1,7 @@
 //! Stabile, fortlaufende Kennungen. Alle Zustandslisten sind über diese Indizes
 //! adressiert; nichts hängt an Speicheradressen oder Hash-Reihenfolgen.
 
+use crate::data::Sector;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -64,3 +65,22 @@ id_type!(
     /// Handelshaus in [`crate::logistics::Logistics::houses`].
     HouseId, "H"
 );
+
+/// Wer Anteile ausgibt: Firmen und Werften je Planet und Zweig, Handelshäuser, und das
+/// Kontor eines Systems als Kolonialgesellschaft.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub enum IssuerId {
+    Firm { planet: PlanetId, sector: Sector },
+    House(HouseId),
+    Kontor(SystemId),
+}
+
+/// Wer Anteile und Anleihen hält: der Staat, die Elite einer Region, der Bevölkerungsfonds
+/// einer Region. Zu welcher Gemeinschaft eine Region gehört, folgt dem Besitz des
+/// Planeten: Wechselt er, werden seine Halter für das alte Reich zu Fremden.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub enum HolderId {
+    State(PolityId),
+    Elite(PlanetId),
+    Public(PlanetId),
+}

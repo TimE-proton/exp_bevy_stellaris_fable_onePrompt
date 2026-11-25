@@ -21,6 +21,8 @@ pub fn setup_economy(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> E
             .map(|_| PlanetEconomy::new(data))
             .collect(),
         treasuries: vec![0; polities.list.len()],
+        tax_rates: vec![data.balance.economy.income_tax; polities.list.len()],
+        treasury_targets: vec![0; polities.list.len()],
         initial_money: 0,
         minted: 0,
     };
@@ -193,10 +195,13 @@ pub fn seed_colony(
     economy.planets[capital.index()].households -= cash;
 
     let market = &economy.markets[planet.system.index()];
+    // Siedler bringen Förderanlagen mit, keine Fabriken: Rezepte ohne Vorprodukte, die
+    // aus dem leben, was der Ort hergibt. Verarbeitung folgt später, wenn sie sich rechnet.
     let mut ranked: Vec<(usize, f64)> = data
         .recipes
         .iter()
         .enumerate()
+        .filter(|(_, recipe)| recipe.input_ids.is_empty())
         .filter_map(|(index, recipe)| {
             let economics = unit_economics(data, planet, balance.economy.base_wage, market, recipe);
             (economics.local_yield > 0.0)
@@ -259,6 +264,13 @@ pub fn seed_colony(
         };
         local.firms[data.recipes[*index].sector.index()].cash += part;
         granted += part;
+    }
+    // Geld, das auf der Welt noch lag (etwa Dividenden an die Halter einer zuvor
+    // aufgegebenen Kolonie), bleibt erhalten.
+    let previous = &economy.planets[colony.index()];
+    local.households += previous.households;
+    for (firm, old) in local.firms.iter_mut().zip(&previous.firms) {
+        firm.cash += old.cash;
     }
     economy.planets[colony.index()] = local;
 }

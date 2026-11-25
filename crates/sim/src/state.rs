@@ -9,6 +9,7 @@ use crate::command::{CommandLog, CommandQueue};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, setup_economy};
+use crate::finance::{Finance, setup_finance};
 use crate::fleet::{Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
 use crate::hash::Fnv64;
@@ -70,6 +71,7 @@ sim_state! {
     galaxy: Galaxy,
     polities: Polities,
     economy: Economy,
+    finance: Finance,
     logistics: Logistics,
     fleets: Fleets,
     diplomacy: Diplomacy,
@@ -83,7 +85,15 @@ sim_state! {
 pub fn money_drift(world: &World) -> Option<i64> {
     let economy = world.get_resource::<Economy>()?;
     let logistics = world.get_resource::<Logistics>()?;
-    Some(economy.money_in_accounts() + logistics.money() - economy.initial_money - economy.minted)
+    let finance = world.get_resource::<Finance>()?;
+    let in_transit = world
+        .get_resource::<crate::economy::EquityFlows>()
+        .map_or(0, |flows| flows.in_transit());
+    Some(
+        economy.money_in_accounts() + logistics.money() + finance.money() + in_transit
+            - economy.initial_money
+            - economy.minted,
+    )
 }
 
 impl SimState {
@@ -112,6 +122,8 @@ impl SimState {
         let mut economy = setup_economy(data, &galaxy, &polities);
         let logistics = setup_logistics(data, &galaxy, &polities);
         economy.initial_money += logistics.money();
+        // Die Eliten erhalten ihr Geld aus dem der Haushalte: Die Summe bleibt gleich.
+        let finance = setup_finance(data, &galaxy, &polities, &mut economy, &logistics);
         let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,
@@ -119,6 +131,7 @@ impl SimState {
             galaxy,
             polities,
             economy,
+            finance,
             logistics,
             fleets,
             diplomacy: Diplomacy::default(),

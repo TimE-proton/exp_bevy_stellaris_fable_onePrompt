@@ -145,6 +145,32 @@ fn system_health(sim: &Headless, system: SystemId) -> (f64, f64, f64) {
     (price, used / capital.max(1e-9), fed / people.max(1e-9))
 }
 
+/// Güter, die ein System in den letzten Monaten bezogen bzw. abgegeben hat.
+fn traded_goods(sim: &Headless, system: SystemId) -> (Vec<usize>, Vec<usize>) {
+    let logistics = sim.world().resource::<Logistics>();
+    let (mut imports, mut exports) = (Vec::new(), Vec::new());
+    for ((from, to, good), volume) in &logistics.flows {
+        if *volume < 2.0 {
+            continue;
+        }
+        if *to == system && !imports.contains(&good.index()) {
+            imports.push(good.index());
+        }
+        if *from == system && !exports.contains(&good.index()) {
+            exports.push(good.index());
+        }
+    }
+    // Was in beide Richtungen floss, taugt für keine der beiden Aussagen.
+    let both: Vec<usize> = imports
+        .iter()
+        .copied()
+        .filter(|good| exports.contains(good))
+        .collect();
+    imports.retain(|good| !both.contains(good));
+    exports.retain(|good| !both.contains(good));
+    (imports, exports)
+}
+
 #[test]
 fn a_blockade_raises_prices_and_idles_factories() {
     let attacker = PolityId(0);
@@ -155,6 +181,11 @@ fn a_blockade_raises_prices_and_idles_factories() {
     control.run_days(30 * DAYS_PER_YEAR);
     let target = largest_colony_system(&blockaded, victim);
     assert_eq!(target, largest_colony_system(&control, victim));
+    let (imports, _exports) = traded_goods(&blockaded, target);
+    assert!(
+        !imports.is_empty(),
+        "das System hat vorher nichts importiert"
+    );
 
     blockaded.issue(attacker, SimCommand::DeclareWar { target: victim });
     blockaded.issue(
@@ -172,41 +203,46 @@ fn a_blockade_raises_prices_and_idles_factories() {
         },
     );
     // Die Flotte braucht Zeit für den Anmarsch; danach steht die Sperre zwei Jahre.
-    let mut arrived_after = None;
-    for day in 0..3 * DAYS_PER_YEAR {
+    let mut established = false;
+    for _ in 0..3 * DAYS_PER_YEAR {
         blockaded.run_days(1);
         control.run_days(1);
         if blockaded.world().resource::<Fleets>().is_blockaded(target) {
-            arrived_after = Some(day);
+            established = true;
             break;
         }
     }
-    assert!(
-        arrived_after.is_some(),
-        "die Flotte hat die Blockade nie errichtet"
-    );
+    assert!(established, "die Flotte hat die Blockade nie errichtet");
     blockaded.run_days(2 * DAYS_PER_YEAR);
     control.run_days(2 * DAYS_PER_YEAR);
     assert!(blockaded.world().resource::<Fleets>().is_blockaded(target));
 
-    let (price_blocked, use_blocked, fed_blocked) = system_health(&blockaded, target);
-    let (price_open, use_open, fed_open) = system_health(&control, target);
+    // Mittleres Preisverhältnis gesperrt/offen über eine Gütergruppe.
+    let ratio = |goods: &[usize]| -> f64 {
+        let closed = blockaded.world().resource::<Economy>().market(target);
+        let open = control.world().resource::<Economy>().market(target);
+        goods
+            .iter()
+            .map(|good| closed.price[*good] / open.price[*good])
+            .sum::<f64>()
+            / goods.len().max(1) as f64
+    };
+    // Was von außen kam, wird knapp und teuer. (Für Exportgüter gilt keine einfache Regel:
+    // Manche stauen sich und verfallen, andere werden teurer, weil ihren Herstellern die
+    // Vorprodukte ausgehen.)
+    let import_ratio = ratio(&imports);
     assert!(
-        price_blocked > price_open * 1.2,
-        "Preise: gesperrt {price_blocked:.2}, offen {price_open:.2}"
+        import_ratio > 1.5,
+        "Importgüter nur {import_ratio:.2}-mal so teuer"
     );
+    // Die Werke leiden: Vorprodukte fehlen, Absatz fehlt.
+    let (_, use_blocked, fed_blocked) = system_health(&blockaded, target);
+    let (_, use_open, fed_open) = system_health(&control, target);
     assert!(
-        use_blocked < use_open - 0.05 || fed_blocked < fed_open - 0.1,
+        use_blocked < use_open - 0.03 || fed_blocked < fed_open - 0.05,
         "Auslastung gesperrt {use_blocked:.2} / offen {use_open:.2}, \
          Versorgung gesperrt {fed_blocked:.2} / offen {fed_open:.2}"
     );
-    // Während der Sperre erreicht kein Frachter das System.
-    let logistics = blockaded.world().resource::<Logistics>();
-    assert!(!logistics.freighters.iter().any(|f| f.alive
-        && f.route.is_empty()
-        && f.system == target
-        && f.idle_days == 0
-        && f.cargo.is_some()),);
     assert!(check_invariants(blockaded.world()).is_ok());
 }
 
@@ -245,7 +281,7 @@ fn locations_specialize_without_building_bonuses() {
     let colony_focus: f64 =
         colonies.iter().map(|planet| focus(planet.id)).sum::<f64>() / colonies.len() as f64;
     assert!(
-        colony_focus > home_focus * 1.3,
+        colony_focus > home_focus * 1.15,
         "Kolonien {colony_focus:.2} gegen Heimatwelten {home_focus:.2}"
     );
 

@@ -2,6 +2,7 @@
 //! Sie lesen, zeichnen und geben Aktionen zurück. Erst das System unten wendet sie an.
 
 mod economy;
+mod finance;
 mod fleets;
 mod format;
 mod panels;
@@ -22,6 +23,7 @@ use sim::clock::SimClock;
 use sim::command::{CommandQueue, CommandSource};
 use sim::diplomacy::Diplomacy;
 use sim::economy::Economy;
+use sim::finance::Finance;
 use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
 use sim::logistics::Logistics;
@@ -35,6 +37,7 @@ pub enum LeftTab {
     Overview,
     Market,
     Production,
+    Ownership,
 }
 
 /// Zustand der Oberfläche selbst (kein Spielzustand).
@@ -49,6 +52,16 @@ pub struct UiState {
     pub fleets_open: bool,
     /// Güter, deren Preisverlauf im Diagramm gezeigt wird (Index = Gut).
     pub chart_goods: Vec<bool>,
+    pub exchange_open: bool,
+    pub treasury_open: bool,
+    /// An der Börse gewählter Emittent.
+    pub issuer: Option<sim::ids::IssuerId>,
+    pub exchange_all: bool,
+    pub trade_percent: f32,
+    pub premium_percent: f32,
+    pub tax_percent: f32,
+    pub reserve_target: f32,
+    pub bond_amount: f32,
 }
 
 impl Default for UiState {
@@ -62,6 +75,15 @@ impl Default for UiState {
             chains_open: false,
             fleets_open: false,
             chart_goods: Vec::new(),
+            exchange_open: false,
+            treasury_open: false,
+            issuer: None,
+            exchange_all: false,
+            trade_percent: 5.0,
+            premium_percent: 30.0,
+            tax_percent: 0.0,
+            reserve_target: 0.0,
+            bond_amount: 20_000.0,
         }
     }
 }
@@ -75,6 +97,7 @@ pub struct SimParams<'w> {
     config: Res<'w, SimConfig>,
     chronicle: Res<'w, Chronicle>,
     economy: Res<'w, Economy>,
+    finance: Res<'w, Finance>,
     logistics: Res<'w, Logistics>,
     fleets: Res<'w, Fleets>,
     diplomacy: Res<'w, Diplomacy>,
@@ -154,6 +177,7 @@ fn draw_ui(
                 config: &sim.config,
                 chronicle: &sim.chronicle,
                 economy: &sim.economy,
+                finance: &sim.finance,
                 logistics: &sim.logistics,
                 fleets: &sim.fleets,
                 diplomacy: &sim.diplomacy,
@@ -194,6 +218,11 @@ fn draw_ui(
             UiAction::Select(new) => *selection = new,
             UiAction::Focus(system) => {
                 focus.write(FocusSystem(system));
+            }
+            UiAction::ShowIssuer(issuer) => {
+                ui_state.issuer = Some(issuer);
+                ui_state.exchange_open = true;
+                ui_state.exchange_all = true;
             }
             UiAction::Command(command) => {
                 if let (Some(queue), Some(sim)) = (queue.as_mut(), sim.as_ref())

@@ -79,8 +79,8 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | 1 – 6 | Geschwindigkeit ½× bis 25× (1× = ein Tag je Sekunde) |
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
-| Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt") |
-| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Flotten |
+| Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt"), Besitz (Zusammenhalt, Eigentümer) |
+| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staatsfinanzen, Flotten |
 | F1 | Hilfe |
 | Esc | Menü |
 
@@ -132,17 +132,47 @@ wählt `--data-dir PFAD` oder die Umgebungsvariable `KONFLUENZ_DATA`.
   laufen ohne Treibstoff im Notbetrieb weiter, Handelshäuser behalten eine Mindestflotte,
   junge Kolonien haben eine Schonfrist. Engpässe schmerzen, sind aber nie endgültig.
 
+## Besitz und Zusammenhalt
+
+- **Emittenten und Halter.** Firmen und Werften (je Planet und Wirtschaftszweig),
+  Handelshäuser und die Kontore der Systeme geben Anteile aus. Halter sind Staaten, die
+  Elite einer Region und der Bevölkerungsfonds einer Region. Zu welchem Reich ein Halter
+  gehört, folgt dem Besitz seines Planeten.
+- **Dividenden** fließen an die Halter, wo immer sie sitzen. Schießt die Hauptwelt Kapital
+  in eine Kolonie nach, erhält sie neue Anteile: Gerade die erfolgreichen Kolonien gehören
+  mit der Zeit dem Zentrum, und ihre Gewinne fließen ab.
+- **Kurse** folgen den Gewinnen (Vielfaches des Jahresgewinns, nie unter einem Bruchteil
+  des Buchwerts), gedrückt durch Risiko (Blockade, Krieg, feindliche Flotten, Unruhe,
+  Misstrauen gegen den Staat) und durch Ereignisse, deren Wirkung abklingt.
+- **Zusammenhalt** je Planet, 0 bis 100. Es bindet, wenn die Einheimischen am übrigen Reich
+  beteiligt sind und der Besitz an ihren Betrieben breit gestreut ist. Es trennt, wenn das
+  Zentrum die Mehrheit hält, Gewinne einseitig abfließen oder Fremde beteiligt sind; dazu
+  kommen Versorgung, Kriegsmüdigkeit, Steuern, Blockade, Entfernung und Enteignungen. Der
+  Reiter „Besitz" zeigt jeden Beitrag in Punkten.
+- **Stufen** mit Verweildauern: loyal, unruhig, autonom (zahlt keine Steuern mehr),
+  Abspaltung. Eine abtrünnige Region ruft einen Freistaat aus oder tritt zu der fremden
+  Gemeinschaft über, die dort die Mehrheit hält.
+- **Werkzeuge des Staates:** Anteile kaufen, anbieten, an eine Region verteilen,
+  Übernahmeangebot, Enteignung (wirkt sofort, kostet Kurse und Vertrauen über Jahre),
+  Staatsanleihen (Zins steigt mit Schulden und Kriegsmüdigkeit, Ausfall möglich),
+  Steuersatz und Rücklage.
+- **Geldmenge.** Fällt das Preisniveau unter das Ziel, schöpft die Notenbank Geld für den
+  Staat. Die Schöpfung ist ausgewiesen und Teil der Geldsummenprüfung.
+
+Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
+
 ## Stand
 
 | Meilenstein | Inhalt | Stand |
 |---|---|---|
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
-| 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | offen |
+| 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | offen |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
 Bereits in Meilenstein 1 enthalten, weil spätere Stufen darauf bauen: Gemeinschaften mit
-Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände.
+Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände. Flotten und
+Gefechte sind bis Meilenstein 4 grob aufgelöst (eine Stärkezahl je Flotte).

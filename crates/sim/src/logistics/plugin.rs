@@ -3,7 +3,7 @@ use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::Economy;
+use crate::economy::{Economy, EquityFlows};
 use crate::fleet::Fleets;
 use crate::galaxy::Galaxy;
 use crate::polity::Polities;
@@ -57,6 +57,7 @@ fn shipbuilding(
     galaxy: Res<Galaxy>,
     mut economy: ResMut<Economy>,
     mut logistics: ResMut<Logistics>,
+    mut flows: ResMut<EquityFlows>,
 ) {
-    expand_fleets_of_trade(&galaxy, &mut economy, &mut logistics, &data);
+    expand_fleets_of_trade(&galaxy, &mut economy, &mut logistics, &data, &mut flows);
 }

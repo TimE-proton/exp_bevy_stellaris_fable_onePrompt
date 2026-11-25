@@ -1,7 +1,7 @@
 //! Die einzelnen Fenster und Leisten.
 
 use super::format::{decimal, percent, population};
-use super::{LeftTab, UiState, economy, fleets};
+use super::{LeftTab, UiState, economy, finance, fleets};
 use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
@@ -13,6 +13,7 @@ use sim::command::SimCommand;
 use sim::data::{GameData, Rgb};
 use sim::diplomacy::Diplomacy;
 use sim::economy::{Economy, to_credits};
+use sim::finance::Finance;
 use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
 use sim::ids::{PlanetId, SystemId};
@@ -29,6 +30,7 @@ pub struct SimRefs<'a> {
     pub config: &'a SimConfig,
     pub chronicle: &'a Chronicle,
     pub economy: &'a Economy,
+    pub finance: &'a Finance,
     pub logistics: &'a Logistics,
     pub fleets: &'a Fleets,
     pub diplomacy: &'a Diplomacy,
@@ -43,6 +45,8 @@ pub enum UiAction {
     SetSpeed(usize),
     Select(Selection),
     Focus(SystemId),
+    /// Emittenten an der Börse zeigen.
+    ShowIssuer(sim::ids::IssuerId),
     Command(SimCommand),
     Quit,
 }
@@ -158,6 +162,8 @@ pub fn in_game(
     economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
     economy::flows_window(&ctx, sim, &mut state.flows_open, None);
     fleets::fleets_window(&ctx, sim, &mut state.fleets_open, selection, actions);
+    finance::exchange_window(&ctx, sim, state, actions);
+    finance::treasury_window(&ctx, sim, state, actions);
     if state.menu_open {
         pause_menu(root.ctx(), state, actions);
     }
@@ -242,6 +248,8 @@ fn top_bar(
             }
             ui.separator();
             ui.toggle_value(&mut state.fleets_open, "Flotten");
+            ui.toggle_value(&mut state.treasury_open, "Staat");
+            ui.toggle_value(&mut state.exchange_open, "Börse");
             ui.toggle_value(&mut state.chains_open, "Ketten");
             ui.toggle_value(&mut state.flows_open, "Warenflüsse");
             ui.separator();
@@ -314,6 +322,7 @@ fn left_panel(
         ui.selectable_value(&mut state.tab, LeftTab::Overview, "Übersicht");
         ui.selectable_value(&mut state.tab, LeftTab::Market, "Markt");
         ui.selectable_value(&mut state.tab, LeftTab::Production, "Produktion");
+        ui.selectable_value(&mut state.tab, LeftTab::Ownership, "Besitz");
     });
     ui.separator();
     match (state.tab, selection.system) {
@@ -325,6 +334,16 @@ fn left_panel(
             planet_picker(ui, sim, system, selection, actions);
             if let Some(planet) = shown_planet(sim, selection) {
                 economy::production_tab(ui, sim, planet);
+            }
+        }
+        (LeftTab::Ownership, Some(system)) => {
+            planet_picker(ui, sim, system, selection, actions);
+            if let Some(planet) = shown_planet(sim, selection) {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        finance::ownership_tab(ui, sim, planet, actions);
+                    });
             }
         }
         _ => selection_panel(ui, sim, selection, actions),
@@ -693,6 +712,8 @@ fn help_window(ctx: &egui::Context, state: &mut UiState) {
                 });
             ui.add_space(6.0);
             ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
+        ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
+        ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
         });
     state.help_open = open;
 }
@@ -750,6 +771,7 @@ mod tests {
                 config: &self.state.config,
                 chronicle: &self.state.chronicle,
                 economy: &self.state.economy,
+                finance: &self.state.finance,
                 logistics: &self.state.logistics,
                 fleets: &self.state.fleets,
                 diplomacy: &self.state.diplomacy,
@@ -793,13 +815,22 @@ mod tests {
         history.record(5, &fixture.state.economy);
         let refs = fixture.refs(&history);
         let speed = SimSpeed::default();
-        for tab in [LeftTab::Overview, LeftTab::Market, LeftTab::Production] {
+        for tab in [
+            LeftTab::Overview,
+            LeftTab::Market,
+            LeftTab::Production,
+            LeftTab::Ownership,
+        ] {
             let mut state = UiState {
                 menu_open: true,
                 help_open: true,
                 flows_open: true,
                 chains_open: true,
                 fleets_open: true,
+                exchange_open: true,
+                exchange_all: true,
+                treasury_open: true,
+                issuer: fixture.state.finance.issuers.keys().next().copied(),
                 tab,
                 ..Default::default()
             };

@@ -299,6 +299,18 @@ fn main() -> ExitCode {
                     stats.house_money / 1000.0,
                     stats.treasuries / 1000.0
                 );
+                println!(
+                    "      Zusammenhalt {:>5.1}  unruhig {:>2}  autonom {:>2}  Abspaltungen {:>2}  Gemeinschaften {:>2}  Kolonien: lokal {:>4.2} Zentrum {:>4.2}  Eliten {:>6.0} Tsd.  Schulden {:>6.0} Tsd.",
+                    stats.cohesion,
+                    stats.restless_regions,
+                    stats.autonomous_regions,
+                    stats.secessions,
+                    stats.polities_alive,
+                    stats.colony_local_share,
+                    stats.colony_center_share,
+                    stats.elite_money / 1000.0,
+                    stats.debt / 1000.0
+                );
                 if let Err(message) = sim::harness::check_invariants(sim.world()) {
                     eprintln!("INVARIANTE VERLETZT: {message}");
                     return ExitCode::FAILURE;
@@ -336,6 +348,49 @@ fn main() -> ExitCode {
                     local.essentials_met(&data.balance.economy),
                     local.total_capital(),
                     top
+                );
+                let region = sim
+                    .world()
+                    .resource::<sim::finance::Finance>()
+                    .region(planet.id);
+                let parts: Vec<String> = region
+                    .factors
+                    .contributions(&data.balance.finance.cohesion)
+                    .into_iter()
+                    .filter(|(_, points)| points.abs() >= 1.0)
+                    .map(|(label, points)| format!("{label} {points:+.0}"))
+                    .collect();
+                println!(
+                    "      Zusammenhalt {:>5.1} ({}), Ziel {:>5.1}: {}",
+                    region.cohesion,
+                    region.stage.label(),
+                    region.factors.target,
+                    parts.join(", ")
+                );
+            }
+            println!("\nUnruhige und autonome Regionen (alle Gemeinschaften):");
+            let finance = sim.world().resource::<sim::finance::Finance>();
+            for planet in galaxy.planets.iter().filter(|p| p.owner.is_some()) {
+                let region = finance.region(planet.id);
+                if region.stage == sim::finance::Stage::Loyal {
+                    continue;
+                }
+                let parts: Vec<String> = region
+                    .factors
+                    .contributions(&data.balance.finance.cohesion)
+                    .into_iter()
+                    .filter(|(_, points)| points.abs() >= 1.0)
+                    .map(|(label, points)| format!("{label} {points:+.0}"))
+                    .collect();
+                println!(
+                    "  {:<16} {:>6.0} Mio. {:>5.1} ({:<7}) lokal {:.2} Zentrum {:.2}: {}",
+                    planet.name,
+                    planet.population,
+                    region.cohesion,
+                    region.stage.label(),
+                    region.factors.local_share,
+                    region.factors.center_share,
+                    parts.join(", ")
                 );
             }
             let mut flows: Vec<_> = logistics.flows.iter().collect();

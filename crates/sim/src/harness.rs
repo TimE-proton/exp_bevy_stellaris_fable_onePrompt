@@ -152,6 +152,19 @@ pub struct EconomyStats {
     pub firm_money: f64,
     pub market_money: f64,
     pub house_money: f64,
+    pub elite_money: f64,
+    /// Bevölkerungsgewichteter Zusammenhalt der besiedelten Welten.
+    pub cohesion: f64,
+    pub restless_regions: usize,
+    pub autonomous_regions: usize,
+    pub secessions: u32,
+    /// Lebende Gemeinschaften.
+    pub polities_alive: usize,
+    /// Mittlerer Anteil der Einheimischen bzw. des Zentrums an den Betrieben der Kolonien.
+    pub colony_local_share: f64,
+    pub colony_center_share: f64,
+    /// Summe aller Staatsschulden in Credits.
+    pub debt: f64,
     pub anomaly: Option<String>,
 }
 
@@ -238,6 +251,39 @@ pub fn economy_stats(world: &World) -> EconomyStats {
         .map(|market| credits(market.cash))
         .sum();
     stats.house_money = credits(logistics.money());
+    let finance = world.resource::<crate::finance::Finance>();
+    let polities = world.resource::<Polities>();
+    stats.elite_money = credits(finance.money());
+    let (mut weight, mut weighted) = (0.0, 0.0);
+    let (mut colonies, mut local, mut center) = (0.0, 0.0, 0.0);
+    for planet in &galaxy.planets {
+        let Some(owner) = planet.owner else {
+            continue;
+        };
+        let region = finance.region(planet.id);
+        weight += planet.population;
+        weighted += planet.population * region.cohesion;
+        match region.stage {
+            crate::finance::Stage::Loyal => {}
+            crate::finance::Stage::Restless => stats.restless_regions += 1,
+            crate::finance::Stage::Autonomous => stats.autonomous_regions += 1,
+        }
+        if polities.get(owner).capital != Some(planet.id) {
+            colonies += 1.0;
+            local += region.factors.local_share;
+            center += region.factors.center_share;
+        }
+    }
+    stats.cohesion = weighted / f64::max(weight, 1e-9);
+    stats.colony_local_share = local / f64::max(colonies, 1.0);
+    stats.colony_center_share = center / f64::max(colonies, 1.0);
+    stats.secessions = finance.secessions;
+    stats.polities_alive = polities.alive().count();
+    stats.debt = finance
+        .bonds
+        .iter()
+        .map(|bond| credits(bond.principal))
+        .sum();
     stats.anomaly = economy.find_anomaly();
     stats
 }
@@ -522,9 +568,13 @@ mod tests {
         let data = data();
         let sim = run_ai_game(&data, 2, 40 * DAYS_PER_YEAR);
         let summary = summarize(&sim);
-        assert_eq!(
-            summary.free_planets, 0,
-            "nach 40 Jahren ist jeder Planet vergeben"
+        // Nach 40 Jahren ist der Raum verteilt; frei sind höchstens Welten, die gerade
+        // aufgegeben wurden.
+        assert!(
+            summary.free_planets * 10 <= summary.planets,
+            "{} von {} Planeten noch frei",
+            summary.free_planets,
+            summary.planets
         );
         // Niemand geht bei der Ausdehnung leer aus.
         for polity in &summary.polities {

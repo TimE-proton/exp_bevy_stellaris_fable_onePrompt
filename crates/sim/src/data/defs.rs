@@ -156,7 +156,7 @@ pub struct NameData {
 }
 
 /// Wirtschaftszweig; je Planet und Zweig gibt es eine Firma.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Sector {
     Mining,
     Agrar,
@@ -229,6 +229,92 @@ pub struct Balance {
     pub economy: EconomyBalance,
     pub logistics: LogisticsBalance,
     pub fleets: FleetBalance,
+    pub finance: FinanceBalance,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct FinanceBalance {
+    /// Anteil des Geldes einer Heimatwelt, den zu Beginn ihre Elite hält.
+    pub elite_cash_share: f64,
+    /// Kurs als Vielfaches des Jahresgewinns.
+    pub earnings_multiple: f64,
+    /// Untergrenze des Kurses als Anteil am Buchwert.
+    pub book_floor: f64,
+    /// Kursaufschlag, wenn alle Anteile auf einmal gekauft würden.
+    pub price_impact: f64,
+    /// Anteil eines Kursschocks, der je Monat abklingt.
+    pub shock_recovery: f64,
+    /// Monatliches Verblassen von Enteignungs- und Ausfallerinnerung.
+    pub memory_decay: f64,
+    pub expropriation_risk_foreign: f64,
+    pub expropriation_risk_everyone: f64,
+    pub expropriation_shock: f64,
+    pub war_shock: f64,
+    pub base_yield: f64,
+    pub yield_per_debt: f64,
+    pub yield_per_weariness: f64,
+    pub yield_after_default: f64,
+    /// Über diesem Zins zeichnet niemand mehr.
+    pub max_yield: f64,
+    pub bond_years: u64,
+    pub default_haircut: f64,
+    pub default_shock: f64,
+    /// Monatliche Abgabe der Eliten an die Haushalte ihrer Welt.
+    pub elite_spending: f64,
+    /// Anteil ihrer Kasse, den Eliten bzw. Fonds je Monat anlegen.
+    pub elite_invest_share: f64,
+    pub public_invest_share: f64,
+    /// Davon im Ausland.
+    pub foreign_invest_share: f64,
+    /// Anteil der Kasse der Hauptwelt-Elite, der je Monat Koloniebetriebe finanziert.
+    pub colony_fund_share: f64,
+    pub weariness_per_month: f64,
+    pub weariness_recovery: f64,
+    pub cohesion: CohesionBalance,
+}
+
+/// Gewichte des Zusammenhalts in Punkten (Skala 0..100) und die Schwellen der Stufen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CohesionBalance {
+    pub base: f64,
+    pub interlock: f64,
+    pub dispersion: f64,
+    pub center: f64,
+    pub drain: f64,
+    /// Nettoabfluss (Anteil am Einkommen vor Ort), ab dem der volle Abzug gilt.
+    pub drain_scale: f64,
+    pub foreign: f64,
+    pub supply: f64,
+    /// Punkte je Punkt Kriegsmüdigkeit.
+    pub weariness: f64,
+    /// Punkte je 100 % Steuersatz über dem neutralen Satz.
+    pub tax: f64,
+    pub tax_neutral: f64,
+    pub blockade: f64,
+    pub capital: f64,
+    /// Punkte je Sprung Entfernung zur Hauptwelt, gedeckelt.
+    pub distance: f64,
+    pub distance_cap: f64,
+    /// Bonus nach Gründung oder Besitzwechsel, der über die Jahre verblasst.
+    pub honeymoon: f64,
+    pub honeymoon_years: f64,
+    pub expropriation: f64,
+    /// Anteil der Lücke zum Zielwert, der je Monat geschlossen wird.
+    pub adjust: f64,
+    pub restless_below: f64,
+    pub loyal_above: f64,
+    pub autonomy_below: f64,
+    pub autonomy_months: u32,
+    pub recover_above: f64,
+    pub recover_months: u32,
+    pub secession_below: f64,
+    pub secession_months: u32,
+    /// Fremder Besitzanteil, ab dem eine autonome Region zum Eigner übertritt.
+    pub foreign_pull: f64,
+    /// Mehr Gemeinschaften als diese gibt es nie; darüber bleibt eine Region autonom.
+    pub max_polities: u32,
+    /// Mindestbevölkerung (Mio.), damit eine Region einen eigenen Staat ausrufen kann.
+    pub independence_min_population: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -297,6 +383,10 @@ pub struct EconomyBalance {
     pub cash_per_million: f64,
     pub spend_rate: f64,
     pub depletion: f64,
+    /// Preisniveau am Heimatmarkt (1 = Richtpreise), unter dem die Notenbank Geld schöpft.
+    pub price_target: f64,
+    /// Höchste Geldschöpfung je Monat als Anteil am Geld der Haushalte.
+    pub mint_per_month: f64,
     pub state_reserve_per_million: f64,
     pub market_reserve_days: f64,
     pub firm_reserve_days: f64,

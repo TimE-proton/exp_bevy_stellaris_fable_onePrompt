@@ -185,6 +185,9 @@ pub fn move_and_trade(
         flows,
         captured,
     } = logistics;
+    // Wege je (Gemeinschaft, Startsystem) gelten für den ganzen Tag: einmal rechnen.
+    let mut routes: BTreeMap<(PolityId, SystemId), (Vec<f32>, Vec<Option<SystemId>>)> =
+        BTreeMap::new();
     for freighter in freighters.iter_mut() {
         if !freighter.alive {
             continue;
@@ -324,8 +327,15 @@ pub fn move_and_trade(
         }
 
         // --- Neue Fahrt planen ---
-        let (distance, previous) =
-            galaxy.distances_from(here, |s| open_for(polity, s, &owners, fleets, diplomacy));
+        // Wer zuletzt nichts fand, sucht nicht jeden Tag neu, sondern gestaffelt jeden
+        // dritten: Die Marktlage ändert sich nicht so schnell, die Rechenzeit schon.
+        if freighter.idle_days > 0 && !(day + freighter.id.0 as u64).is_multiple_of(3) {
+            freighter.idle_days += 1;
+            continue;
+        }
+        let (distance, previous) = routes.entry((polity, here)).or_insert_with(|| {
+            galaxy.distances_from(here, |s| open_for(polity, s, &owners, fleets, diplomacy))
+        });
         let home_market = &economy.markets[here.index()];
         let fuel = data.balance.economy.fuel_id;
         let fuel_price = home_market.ask(fuel, spread);
@@ -347,6 +357,11 @@ pub fn move_and_trade(
                         continue;
                     }
                     let market = &economy.markets[index];
+                    // Schneller Ausschluss: Ist das Gut dort heute nicht teurer als hier,
+                    // lohnt keine weitere Rechnung.
+                    if market.price[good_index] * (1.0 - spread) <= ask {
+                        continue;
+                    }
                     // Geliefert wird, was der Zielmarkt sinnvoll aufnimmt: die Lücke bis zum
                     // Anderthalbfachen seines Soll-Lagers, abzüglich dessen, was schon
                     // unterwegs ist. Kleine Märkte bekommen so kleine, aber lohnende Ladungen.
@@ -389,7 +404,7 @@ pub fn move_and_trade(
                 && here != house.home
                 && distance[house.home.index()].is_finite()
             {
-                freighter.route = Galaxy::route_to(&previous, house.home);
+                freighter.route = Galaxy::route_to(previous, house.home);
                 freighter.idle_days = 0;
             }
             continue;
@@ -420,7 +435,7 @@ pub fn move_and_trade(
             cost: paid,
             origin: here,
         });
-        freighter.route = Galaxy::route_to(&previous, target);
+        freighter.route = Galaxy::route_to(previous, target);
         freighter.idle_days = 0;
     }
 
@@ -437,6 +452,7 @@ pub fn expand_fleets_of_trade(
     economy: &mut Economy,
     logistics: &mut Logistics,
     data: &GameData,
+    flows: &mut crate::economy::EquityFlows,
 ) {
     logistics.flows.retain(|_, volume| {
         *volume *= 0.5;
@@ -472,28 +488,29 @@ pub fn expand_fleets_of_trade(
             continue;
         }
 
-        // Ausschüttung: Was über die Betriebsmittel hinausgeht, geht an die Eigentümer
-        // (bis Meilenstein 3: die Haushalte der Gemeinschaft, nach Köpfen). Fehlt dem Haus
-        // das Betriebskapital, schießen dieselben Haushalte nach: Ein Handelshaus kann
-        // schrumpfen, aber nicht für immer verschwinden.
+        // Ausschüttung: Was über die Betriebsmittel hinausgeht, geht als Dividende an die
+        // Anteilseigner. Fehlt dem Haus das Betriebskapital, zeichnen die Fonds der
+        // bevölkerungsreichsten Welten neue Anteile: Ein Handelshaus kann schrumpfen, aber
+        // nicht für immer verschwinden.
         let working = to_money(3000.0 + 400.0 * ships as f64);
         let floor = to_money(1500.0);
         let surplus = house.cash - working;
         let shortfall = floor - house.cash;
+        let issuer = crate::ids::IssuerId::House(id);
         if surplus > 0 {
-            let mut paid: Money = 0;
-            for planet in galaxy.planets_of(house.polity) {
-                let share = (surplus as f64 * planet.population / population) as Money;
-                economy.planets[planet.id.index()].households += share;
-                paid += share;
-            }
-            house.cash -= paid;
+            house.cash -= surplus;
+            flows.dividends.push((issuer, surplus));
         } else if shortfall > 0 {
             for planet in galaxy.planets_of(house.polity) {
                 let local = &mut economy.planets[planet.id.index()];
                 let wanted = (shortfall as f64 * planet.population / population) as Money;
                 let offer = (local.households as f64 * 0.01) as Money;
-                pay(&mut local.households, &mut house.cash, wanted.min(offer));
+                let got = pay(&mut local.households, &mut house.cash, wanted.min(offer));
+                if got > 0 {
+                    flows
+                        .injections
+                        .push((issuer, crate::ids::HolderId::Public(planet.id), got));
+                }
             }
         }
 

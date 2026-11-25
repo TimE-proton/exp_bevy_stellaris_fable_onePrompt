@@ -5,14 +5,17 @@
 //! werden mit Takt und laufender Nummer protokolliert. Seed, Datenprüfsumme und dieses
 //! Protokoll genügen, um eine Partie exakt zu wiederholen.
 
-use crate::chronicle::Chronicle;
+use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::data::GameData;
 use crate::diplomacy::{self, Diplomacy};
-use crate::economy::Economy;
+use crate::economy::{Economy, to_credits, to_money};
+use crate::finance::shares::ExpropriationScope;
+use crate::finance::{self, Finance};
 use crate::fleet::{self, Fleets, Stance};
 use crate::galaxy::Galaxy;
-use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
+use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, SystemId};
+use crate::logistics::Logistics;
 use crate::polity::{self, Polities};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
@@ -39,6 +42,44 @@ pub enum SimCommand {
     },
     MakePeace {
         target: PolityId,
+    },
+    /// Der Staat kauft Anteile am Markt, höchstens für `max_spend` Credits.
+    BuyShares {
+        issuer: IssuerId,
+        shares: u64,
+        max_spend: f64,
+    },
+    /// Der Staat stellt eigene Anteile zum Verkauf.
+    OfferShares {
+        issuer: IssuerId,
+        shares: u64,
+    },
+    /// Der Staat überträgt eigene Anteile ohne Gegenleistung an einen anderen Halter.
+    DistributeShares {
+        issuer: IssuerId,
+        shares: u64,
+        to: HolderId,
+    },
+    /// Übernahmeangebot des Staates mit Aufschlag auf den Kurs (0,3 = 30 %).
+    TakeoverBid {
+        issuer: IssuerId,
+        premium: f64,
+    },
+    /// Der Staat zieht Anteile auf eigenem Gebiet ohne Entschädigung ein.
+    Expropriate {
+        issuer: IssuerId,
+        scope: ExpropriationScope,
+    },
+    /// Staatsanleihen ausgeben, Betrag in Credits.
+    IssueBonds {
+        amount: f64,
+    },
+    SetTaxRate {
+        rate: f64,
+    },
+    /// Rücklage in Credits, die der Staat hält, statt sie wieder auszugeben.
+    SetTreasuryTarget {
+        amount: f64,
     },
 }
 
@@ -124,6 +165,8 @@ pub struct CommandContext<'w> {
     pub galaxy: ResMut<'w, Galaxy>,
     pub polities: ResMut<'w, Polities>,
     pub economy: ResMut<'w, Economy>,
+    pub finance: ResMut<'w, Finance>,
+    pub logistics: Res<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
     pub diplomacy: ResMut<'w, Diplomacy>,
     pub chronicle: ResMut<'w, Chronicle>,
@@ -200,14 +243,28 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         SimCommand::SetStance { fleet, stance } => {
             fleet::set_stance(&mut ctx.fleets, polity, *fleet, *stance)
         }
-        SimCommand::DeclareWar { target } => diplomacy::declare_war(
-            &mut ctx.diplomacy,
-            &ctx.polities,
-            &mut ctx.chronicle,
-            tick,
-            polity,
-            *target,
-        ),
+        SimCommand::DeclareWar { target } => {
+            diplomacy::declare_war(
+                &mut ctx.diplomacy,
+                &ctx.polities,
+                &mut ctx.chronicle,
+                tick,
+                polity,
+                *target,
+            )?;
+            // Kriegsausbruch: Die Kurse beider Seiten geben nach.
+            let factor = ctx.data.balance.finance.war_shock;
+            for side in [polity, *target] {
+                finance::shares::shock_polity(
+                    &mut ctx.finance,
+                    &ctx.galaxy,
+                    &ctx.logistics,
+                    side,
+                    factor,
+                );
+            }
+            Ok(())
+        }
         SimCommand::MakePeace { target } => diplomacy::make_peace(
             &mut ctx.diplomacy,
             &ctx.polities,
@@ -216,5 +273,109 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             polity,
             *target,
         ),
+        SimCommand::BuyShares {
+            issuer,
+            shares,
+            max_spend,
+        } => {
+            let capitals: Vec<_> = ctx.polities.list.iter().map(|p| p.capital).collect();
+            let seat =
+                finance::shares::seat_of_issuer(&ctx.galaxy, &ctx.logistics, &capitals, *issuer);
+            let (bought, _) = finance::buy_shares(
+                &mut ctx.finance,
+                &mut ctx.economy,
+                &ctx.data,
+                HolderId::State(polity),
+                *issuer,
+                seat,
+                *shares,
+                to_money(max_spend.max(0.0)),
+            );
+            if bought == 0 {
+                Err("nichts gekauft: kein Angebot am Markt oder Kasse zu leer".into())
+            } else {
+                Ok(())
+            }
+        }
+        SimCommand::OfferShares { issuer, shares } => {
+            finance::offer_shares(&mut ctx.finance, HolderId::State(polity), *issuer, *shares)
+                .map(|_| ())
+        }
+        SimCommand::DistributeShares { issuer, shares, to } => finance::distribute_shares(
+            &mut ctx.finance,
+            HolderId::State(polity),
+            *issuer,
+            *shares,
+            *to,
+        )
+        .map(|_| ()),
+        SimCommand::TakeoverBid { issuer, premium } => finance::takeover_bid(
+            &mut ctx.finance,
+            &mut ctx.economy,
+            &ctx.galaxy,
+            HolderId::State(polity),
+            *issuer,
+            *premium,
+        )
+        .map(|_| ()),
+        SimCommand::Expropriate { issuer, scope } => {
+            finance::expropriate(
+                &mut ctx.finance,
+                &ctx.galaxy,
+                &ctx.logistics,
+                &ctx.data,
+                polity,
+                *issuer,
+                *scope,
+            )?;
+            let name = finance::issuer_name(&ctx.galaxy, &ctx.logistics, *issuer);
+            let who = ctx.polities.get(polity).name.clone();
+            ctx.chronicle.push(
+                tick,
+                ChronicleKind::Finance,
+                Some(polity),
+                None,
+                format!(
+                    "{who} enteignet Anteilseigner von {name}. Die Kurse im Reich brechen ein."
+                ),
+            );
+            Ok(())
+        }
+        SimCommand::IssueBonds { amount } => {
+            let day = ctx.clock.day();
+            let placed = finance::issue_bonds(
+                &mut ctx.finance,
+                &mut ctx.economy,
+                &ctx.galaxy,
+                &ctx.diplomacy,
+                &ctx.data,
+                polity,
+                to_money(amount.max(0.0)),
+                day,
+            )?;
+            let who = ctx.polities.get(polity).name.clone();
+            ctx.chronicle.push(
+                tick,
+                ChronicleKind::Finance,
+                Some(polity),
+                None,
+                format!(
+                    "{who} platziert Anleihen über {:.0} Credits.",
+                    to_credits(placed)
+                ),
+            );
+            Ok(())
+        }
+        SimCommand::SetTaxRate { rate } => {
+            if !(0.0..=0.6).contains(rate) {
+                return Err("Steuersatz muss zwischen 0 und 60 % liegen".into());
+            }
+            ctx.economy.tax_rates[polity.index()] = *rate;
+            Ok(())
+        }
+        SimCommand::SetTreasuryTarget { amount } => {
+            ctx.economy.treasury_targets[polity.index()] = to_money(amount.max(0.0));
+            Ok(())
+        }
     }
 }

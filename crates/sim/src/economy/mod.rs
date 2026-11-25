@@ -9,7 +9,7 @@ mod plugin;
 pub mod production;
 mod setup;
 
-pub use capital::{invest_and_depreciate, migrate, settle_public_accounts};
+pub use capital::{invest_and_depreciate, migrate, settle_public_accounts, steer_money_supply};
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
     abandon_dead_colonies, grow_population, produce_and_consume, target_price,
@@ -19,7 +19,7 @@ pub use setup::{seed_colony, setup_economy};
 
 use crate::data::{EconomyBalance, GameData, RecipeDef, Sector, YieldSource};
 use crate::galaxy::Planet;
-use crate::ids::{GoodId, PlanetId, PolityId, SystemId};
+use crate::ids::{GoodId, HolderId, IssuerId, PlanetId, PolityId, SystemId};
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
@@ -161,6 +161,8 @@ pub struct PlanetEconomy {
     pub income_today: f64,
     /// Tag der Besiedlung (0 für Heimatwelten).
     pub founded_day: u64,
+    /// Autonome Regionen führen keine Steuern an das Zentrum ab.
+    pub tax_exempt: bool,
 }
 
 impl PlanetEconomy {
@@ -181,6 +183,7 @@ impl PlanetEconomy {
             income: 0.0,
             income_today: 0.0,
             founded_day: 0,
+            tax_exempt: false,
         }
     }
 
@@ -208,6 +211,10 @@ pub struct Economy {
     pub planets: Vec<PlanetEconomy>,
     /// Staatskasse je Gemeinschaft.
     pub treasuries: Vec<Money>,
+    /// Einkommensteuersatz je Gemeinschaft.
+    pub tax_rates: Vec<f64>,
+    /// Rücklage, die der Staat halten will; erst was darüber liegt, gibt er wieder aus.
+    pub treasury_targets: Vec<Money>,
     /// Geldmenge bei Spielbeginn (alle Konten, auch die der Handelshäuser).
     pub initial_money: Money,
     /// Seit Spielbeginn ausgewiesene Geldschöpfung.
@@ -273,6 +280,22 @@ impl Economy {
             return Some("Staatskasse negativ".into());
         }
         None
+    }
+}
+
+/// Kapitalbewegungen, die die Börse verbuchen muss. Das Geld ist dem Emittenten bereits
+/// abgebucht (Ausschüttung) bzw. gutgeschrieben (Einlage); die Börse zahlt es im selben
+/// Takt an die Halter aus bzw. gibt dafür neue Anteile aus.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct EquityFlows {
+    pub dividends: Vec<(IssuerId, Money)>,
+    pub injections: Vec<(IssuerId, HolderId, Money)>,
+}
+
+impl EquityFlows {
+    /// Geld, das zwischen Abbuchung und Auszahlung unterwegs ist.
+    pub fn in_transit(&self) -> Money {
+        self.dividends.iter().map(|(_, amount)| amount).sum()
     }
 }
 

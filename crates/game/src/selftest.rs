@@ -67,8 +67,8 @@ fn drive(
     {
         // Zur Halbzeit heranzoomen und die datenlastigen Tafeln öffnen.
         focus.write(FocusSystem(system));
-        ui_state.tab = LeftTab::Market;
-        ui_state.flows_open = true;
+        ui_state.tab = LeftTab::Ownership;
+        ui_state.exchange_open = true;
     }
     if test.frame == total.saturating_sub(12)
         && !test.shot_taken

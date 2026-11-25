@@ -11,7 +11,7 @@
         // Kontors im Zielsystem, für Proviant vom Heimatmarkt und als Startkapital der Firmen.
         cost: 6000.0,
         // Kapitalstock, den die Siedler mitbringen (verteilt auf die lohnendsten Rezepte).
-        seed_capital: 10.0,
+        seed_capital: 5.0,
     ),
     population: (
         // Jährliche Wachstumsrate bei voller Versorgung, weit unter der Tragfähigkeit.
@@ -84,6 +84,11 @@
         // Eine Heimatwelt, die 20 Einheiten am Tag fördert, verbraucht so in hundert
         // Jahren rund ein Fünftel eines mittleren Vorkommens.
         depletion: 0.0000003,
+        // Geldmengensteuerung: Fällt das Preisniveau am Heimatmarkt unter das Ziel, schöpft
+        // die Notenbank Geld für den Staat, höchstens diesen Anteil am Geld der Haushalte
+        // je Monat. Die Schöpfung ist ausgewiesen und Teil der Geldsummenprüfung.
+        price_target: 0.95,
+        mint_per_month: 0.006,
         // Rücklagen: Staat in Credits je Mio. Einwohner, Kontore und Firmen in Tagen
         // ihres Umsatzes bzw. ihrer Kosten. Was darüber liegt, fließt weiter.
         state_reserve_per_million: 1.5,
@@ -100,7 +105,7 @@
         // Frachter je Milliarde Einwohner bei Spielbeginn.
         freighters_per_billion: 2.5,
         // Mindestgewinn je Tag, damit ein Frachter ablegt.
-        min_profit_per_day: 2.0,
+        min_profit_per_day: 1.0,
         // Bauteile für einen neuen Frachter.
         freighter_hull: 4.0,
         freighter_engines: 1.0,
@@ -116,5 +121,94 @@
         // Anteil der eigenen Stärke, den eine Flotte dem Gegner je Tag zufügt
         // (grobe Auflösung bis Meilenstein 4).
         daily_damage: 0.06,
+    ),
+    finance: (
+        // Anteil des Geldes einer Heimatwelt, den zu Beginn ihre Elite hält.
+        elite_cash_share: 0.25,
+
+        // --- Kurse ---
+        // Kurs als Vielfaches des Jahresgewinns, nie unter diesem Anteil am Buchwert.
+        earnings_multiple: 8.0,
+        book_floor: 0.3,
+        // Kursaufschlag, wenn alle Anteile auf einmal gekauft würden.
+        price_impact: 2.0,
+        // Ein Kursschock klingt je Monat um diesen Anteil ab.
+        shock_recovery: 0.12,
+        // Enteignungen und Zahlungsausfälle verblassen je Monat um diesen Anteil.
+        memory_decay: 0.03,
+        expropriation_risk_foreign: 0.2,
+        expropriation_risk_everyone: 0.4,
+        // Faktor auf alle Kurse im Reich nach einer Enteignung bzw. bei Kriegsausbruch.
+        expropriation_shock: 0.75,
+        war_shock: 0.85,
+
+        // --- Anleihen ---
+        base_yield: 0.04,
+        // Aufschlag, wenn die Schulden drei Jahreseinnahmen erreichen.
+        yield_per_debt: 0.06,
+        yield_per_weariness: 0.0008,
+        yield_after_default: 0.15,
+        max_yield: 0.35,
+        bond_years: 10,
+        // Verlust der Gläubiger bei einem Ausfall und Faktor auf alle Kurse im Reich.
+        default_haircut: 0.4,
+        default_shock: 0.7,
+
+        // --- Anlageverhalten ---
+        // Monatliche Abgabe der Eliten an die Haushalte ihrer Welt (Dienste, Bauten).
+        elite_spending: 0.08,
+        elite_invest_share: 0.10,
+        public_invest_share: 0.02,
+        foreign_invest_share: 0.2,
+        // Anteil der Kasse der Hauptwelt-Elite, der je Monat Koloniebetriebe finanziert.
+        // Hoch gesetzt gehört bald jede Kolonie dem Zentrum.
+        colony_fund_share: 0.012,
+
+        // --- Kriegsmüdigkeit (0..100) ---
+        weariness_per_month: 0.6,
+        weariness_recovery: 1.0,
+
+        // --- Zusammenhalt (0..100) ---
+        // Zielwert = base + Beiträge. Positive Beiträge binden, negative trennen.
+        cohesion: (
+            base: 60.0,
+            // Einheimische sind am übrigen Reich beteiligt (voller Wert bei 100 %).
+            interlock: 25.0,
+            // Besitz an den Betrieben der Region ist breit gestreut.
+            dispersion: 15.0,
+            // Staat und Hauptwelt halten mehr als die Hälfte (voller Abzug bei 100 %).
+            center: 15.0,
+            // Gewinne fließen einseitig ab (voller Abzug ab drain_scale des Einkommens).
+            drain: 20.0,
+            drain_scale: 0.6,
+            // Eine fremde Gemeinschaft hält mehr als ein Viertel (voll ab drei Vierteln).
+            foreign: 40.0,
+            supply: 15.0,
+            weariness: 0.25,
+            tax: 60.0,
+            tax_neutral: 0.15,
+            blockade: 10.0,
+            capital: 10.0,
+            distance: 1.5,
+            distance_cap: 8.0,
+            honeymoon: 15.0,
+            honeymoon_years: 15.0,
+            expropriation: 30.0,
+            adjust: 0.06,
+
+            // Stufen: loyal → unruhig → autonom → Abspaltung, mit Verweildauern.
+            restless_below: 45.0,
+            loyal_above: 50.0,
+            autonomy_below: 30.0,
+            autonomy_months: 24,
+            recover_above: 40.0,
+            recover_months: 12,
+            secession_below: 20.0,
+            secession_months: 36,
+            foreign_pull: 0.4,
+            max_polities: 12,
+            // Unter dieser Bevölkerung (Mio.) ruft keine Region einen eigenen Staat aus.
+            independence_min_population: 150.0,
+        ),
     ),
 )

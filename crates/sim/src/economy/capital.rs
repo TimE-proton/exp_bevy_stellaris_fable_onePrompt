@@ -2,11 +2,12 @@
 //! werden ausgeglichen.
 
 use super::{
-    Economy, Money, expected_return, pay, recipes_of, to_credits, to_money, unit_economics,
+    Economy, EquityFlows, Money, expected_return, pay, recipes_of, to_credits, to_money,
+    unit_economics,
 };
 use crate::data::{GameData, Sector};
 use crate::galaxy::Galaxy;
-use crate::ids::{PlanetId, PolityId};
+use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 
 const MONTHS_PER_YEAR: f64 = 12.0;
 
@@ -18,7 +19,9 @@ pub fn invest_and_depreciate(
     economy: &mut Economy,
     data: &GameData,
     capitals: &[Option<PlanetId>],
+    funds: &mut [Money],
     day: u64,
+    flows: &mut EquityFlows,
 ) {
     let balance = &data.balance.economy;
     let machines = balance.capital_good_id;
@@ -28,19 +31,6 @@ pub fn invest_and_depreciate(
     for market in markets.iter_mut() {
         market.standing[machines.index()] = 0.0;
     }
-
-    // Anlagefonds je Gemeinschaft: Ein kleiner Teil des Geldes der Hauptwelt sucht jeden
-    // Monat lohnende Firmen auf den anderen Welten. So fließt Kapital in die Kolonien
-    // (ab Meilenstein 3 gegen Anteile: die Verflechtung, die das Reich zusammenhält).
-    let mut funds: Vec<Money> = capitals
-        .iter()
-        .map(|capital| {
-            capital.map_or(0, |id| {
-                (planets[id.index()].households as f64 * 0.015) as Money
-            })
-        })
-        .collect();
-    let mut drawn: Vec<Money> = vec![0; funds.len()];
 
     for planet in &galaxy.planets {
         let Some(owner) = planet.owner else {
@@ -124,13 +114,22 @@ pub fn invest_and_depreciate(
             let reserve = to_money(monthly_cost);
             let firm_cash = local.firms[sector.index()].cash;
 
+            let mut funded = false;
             if let Some((index, expected)) = best
                 && expected > balance.hurdle_per_year
             {
                 let unit_cost = balance.capital_cost * market.ask(machines, balance.spread);
                 // Fehlt der Firma das Geld für eine lohnende Investition, schießen die
-                // Haushalte Eigenkapital zu (ab Meilenstein 3: gegen Anteile).
-                if firm_cash < reserve + to_money(unit_cost) {
+                // Haushalte vor Ort Eigenkapital zu und erhalten dafür neue Anteile.
+                // Eingezahlt wird nur, wenn die Investition auch möglich ist: Maschinen
+                // liegen am Markt und es gibt Arbeitskräfte. Sonst läge das Geld brach und
+                // flösse als Dividende zurück, während die Einlage die Altaktionäre verwässert.
+                let labor_per_unit = data.recipes[index].labor as f64;
+                let feasible = market.stock[machines.index()]
+                    >= balance.capital_cost * balance.seed_investment * 2.0
+                    && labor_room >= labor_per_unit * balance.seed_investment * 0.5;
+                if feasible && firm_cash < reserve + to_money(unit_cost) {
+                    funded = true;
                     let wanted =
                         reserve + to_money(unit_cost * balance.seed_investment) - firm_cash;
                     let offer = (local.households as f64 * 0.02) as Money;
@@ -140,13 +139,30 @@ pub fn invest_and_depreciate(
                         &mut local.firms[sector.index()].cash,
                         wanted.min(offer),
                     );
-                    // Reicht das Geld vor Ort nicht, springt der Anlagefonds der Hauptwelt ein.
-                    if !is_capital && got < wanted {
+                    let issuer = IssuerId::Firm {
+                        planet: planet.id,
+                        sector,
+                    };
+                    if got > 0 {
+                        flows
+                            .injections
+                            .push((issuer, HolderId::Public(planet.id), got));
+                    }
+                    // Reicht das Geld vor Ort nicht, springt die Elite der Hauptwelt ein und
+                    // erhält dafür Anteile: So wächst der Besitz des Zentrums in den Kolonien.
+                    if !is_capital
+                        && got < wanted
+                        && let Some(capital) = capitals[owner.index()]
+                    {
                         let fund = &mut funds[owner.index()];
                         let extra = (wanted - got).min(*fund);
                         *fund -= extra;
-                        drawn[owner.index()] += extra;
                         local.firms[sector.index()].cash += extra;
+                        if extra > 0 {
+                            flows
+                                .injections
+                                .push((issuer, HolderId::Elite(capital), extra));
+                        }
                     }
                 }
                 let firm = &mut local.firms[sector.index()];
@@ -159,9 +175,14 @@ pub fn invest_and_depreciate(
                     .min(labor_room / labor_per_unit)
                     .min(market.stock[machines.index()] * 0.5 / balance.capital_cost)
                     .max(0.0);
-                // Der Investitionswunsch zählt als Nachfrage, auch wenn Maschinen fehlen.
-                market.standing[machines.index()] +=
-                    growth_cap.min(investable / unit_cost).max(0.0) * balance.capital_cost / 30.0;
+                // Der Investitionswunsch zählt als Nachfrage, auch wenn Maschinen oder Geld
+                // noch fehlen: Mindestens eine Erstinvestition ist immer gemeldet, damit
+                // Frachter die Maschinen bringen, die das Einzahlen erst sinnvoll machen.
+                market.standing[machines.index()] += growth_cap
+                    .min(investable / unit_cost)
+                    .max(balance.seed_investment)
+                    * balance.capital_cost
+                    / 30.0;
                 if units > 0.01 {
                     let stock = &mut market.stock[machines.index()];
                     *stock = (*stock - units * balance.capital_cost).max(0.0);
@@ -175,21 +196,22 @@ pub fn invest_and_depreciate(
                 }
             }
 
-            // Was über das Anderthalbfache der Betriebsmittel hinausgeht, wird großteils an
-            // die Eigentümer ausgeschüttet (bis Meilenstein 3: die Haushalte vor Ort).
+            // Was über das Anderthalbfache der Betriebsmittel hinausgeht, wird großteils als
+            // Dividende ausgeschüttet. Wer sie bekommt, entscheidet der Besitz an den Anteilen.
             let firm = &mut local.firms[sector.index()];
             let excess = firm.cash - (reserve + reserve / 2).max(to_money(50.0));
-            if excess > 0 {
-                let payout = pay(&mut firm.cash, &mut local.households, excess * 7 / 10);
-                local.income_today += to_credits(payout);
+            // Im Monat einer Kapitalerhöhung wird nichts ausgeschüttet.
+            if excess > 0 && !funded {
+                let payout = excess * 7 / 10;
+                firm.cash -= payout;
+                flows.dividends.push((
+                    IssuerId::Firm {
+                        planet: planet.id,
+                        sector,
+                    },
+                    payout,
+                ));
             }
-        }
-    }
-
-    // Was der Fonds ausgegeben hat, kommt von den Haushalten der Hauptwelt.
-    for (polity, amount) in drawn.into_iter().enumerate() {
-        if let Some(capital) = capitals[polity] {
-            planets[capital.index()].households -= amount;
         }
     }
 }
@@ -211,8 +233,12 @@ pub fn migrate(galaxy: &mut Galaxy, economy: &mut Economy, data: &GameData, poli
         let appeal = |index: usize| {
             let planet = &galaxy.planets[index];
             let local = &economy.planets[index];
+            // Anteil der Arbeitskräfte, die Arbeit finden. (Nicht der Anteil besetzter Stellen:
+            // Wo Leute fehlen, ist die Arbeit sicher und der Lohn hoch.)
+            let labor_supply = planet.population * data.balance.economy.workforce_share;
+            let employed = (local.labor_demand / labor_supply.max(1e-9)).min(1.0);
             local.wage
-                * local.employment
+                * (0.3 + 0.7 * employed)
                 * (0.7 + 0.3 * planet.habitability as f64)
                 * (0.2 + 0.8 * local.essentials_met(&data.balance.economy))
         };
@@ -231,23 +257,21 @@ pub fn migrate(galaxy: &mut Galaxy, economy: &mut Economy, data: &GameData, poli
             continue;
         }
 
-        // Abwanderung aus den unattraktiven Welten in einen gemeinsamen Topf …
-        let mut movers = 0.0;
-        let mut purse: Money = 0;
-        for (index, appeal) in members.iter().zip(&appeals) {
-            if *appeal >= average {
-                continue;
-            }
-            let planet = &mut galaxy.planets[*index];
-            let share = rate * ((average - appeal) / average * 3.0).min(1.0);
-            let leaving = planet.population * share;
-            let cash = (economy.planets[*index].households as f64 * share) as Money;
-            planet.population -= leaving;
-            economy.planets[*index].households -= cash;
-            movers += leaving;
-            purse += cash;
-        }
-        // … und Zuzug in die attraktiven, soweit Platz ist.
+        // Wer gehen möchte …
+        let leaving: Vec<f64> = members
+            .iter()
+            .zip(&appeals)
+            .map(|(index, appeal)| {
+                if *appeal >= average {
+                    return 0.0;
+                }
+                let share = rate * ((average - appeal) / average * 3.0).min(1.0);
+                galaxy.planets[*index].population * share
+            })
+            .collect();
+        let wanting: f64 = leaving.iter().sum();
+        // … und wo Platz ist: Zuzug in die attraktiven Welten, begrenzt durch ihre
+        // Tragfähigkeit.
         let weights: Vec<f64> = members
             .iter()
             .zip(&appeals)
@@ -262,42 +286,63 @@ pub fn migrate(galaxy: &mut Galaxy, economy: &mut Economy, data: &GameData, poli
             })
             .collect();
         let total_weight: f64 = weights.iter().sum();
-        let mut settled = 0.0;
-        let mut paid: Money = 0;
-        if total_weight > 0.0 {
-            for (index, weight) in members.iter().zip(&weights) {
-                if *weight <= 0.0 {
-                    continue;
-                }
-                let planet = &mut galaxy.planets[*index];
-                let room = (planet.capacity - planet.population).max(0.0);
-                let arriving = (movers * weight / total_weight).min(room);
-                let cash = (purse as f64 * weight / total_weight) as Money;
-                planet.population += arriving;
-                economy.planets[*index].households += cash;
-                settled += arriving;
-                paid += cash;
-            }
+        if wanting <= 0.0 || total_weight <= 0.0 {
+            continue;
         }
-        // Wer keinen Platz fand, bleibt auf der bevölkerungsreichsten Welt; ebenso der
-        // Rundungsrest des Geldes. Niemand und nichts geht verloren.
-        let fallback = *members
+        let arriving: Vec<f64> = members
             .iter()
-            .max_by(|a, b| {
-                galaxy.planets[**a]
-                    .population
-                    .total_cmp(&galaxy.planets[**b].population)
-                    .then(b.cmp(a))
+            .zip(&weights)
+            .map(|(index, weight)| {
+                let planet = &galaxy.planets[*index];
+                let room = (planet.capacity - planet.population).max(0.0);
+                (wanting * weight / total_weight).min(room * 0.98)
             })
-            .expect("mindestens zwei Mitglieder");
-        galaxy.planets[fallback].population += movers - settled;
-        economy.planets[fallback].households += purse - paid;
+            .collect();
+        let settled: f64 = arriving.iter().sum();
+        // Es zieht nur um, wer auch ankommt: Niemand geht verloren, keine Welt läuft über.
+        let moving = settled / wanting;
+        let mut purse: Money = 0;
+        for (position, index) in members.iter().enumerate() {
+            let gone = leaving[position] * moving;
+            if gone <= 0.0 {
+                continue;
+            }
+            let planet = &mut galaxy.planets[*index];
+            let share = gone / planet.population.max(1e-9);
+            let cash = (economy.planets[*index].households as f64 * share) as Money;
+            planet.population -= gone;
+            economy.planets[*index].households -= cash;
+            purse += cash;
+        }
+        // Die Umziehenden nehmen ihr Geld mit; der Rundungsrest geht an die erste Zielwelt.
+        let mut paid: Money = 0;
+        let mut first_target = None;
+        for (position, index) in members.iter().enumerate() {
+            if arriving[position] <= 0.0 {
+                continue;
+            }
+            first_target.get_or_insert(*index);
+            let cash = (purse as f64 * arriving[position] / settled) as Money;
+            galaxy.planets[*index].population += arriving[position];
+            economy.planets[*index].households += cash;
+            paid += cash;
+        }
+        match first_target {
+            Some(index) => economy.planets[index].households += purse - paid,
+            // Kein Ziel: Dann ist auch niemand gegangen und der Topf leer.
+            None => debug_assert_eq!(purse, 0),
+        }
     }
 }
 
 /// Kontore führen Überschüsse als Zölle ab, Staaten geben aus, was über ihre Rücklage
 /// hinausgeht (bis zum Ausbau des Haushalts: als Leistungen an die Haushalte).
-pub fn settle_public_accounts(galaxy: &Galaxy, economy: &mut Economy, data: &GameData) {
+pub fn settle_public_accounts(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    data: &GameData,
+    flows: &mut EquityFlows,
+) {
     let balance = &data.balance.economy;
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
@@ -315,12 +360,34 @@ pub fn settle_public_accounts(galaxy: &Galaxy, economy: &mut Economy, data: &Gam
         let working =
             to_money(market.turnover * balance.market_reserve_days + 0.5 * stock_value + 1500.0);
         let excess = market.cash - working;
+        // Ein Kontor ohne Kasse kann keinem Frachter etwas abkaufen. Der Staat schießt
+        // dann Kapital nach und erhält dafür neue Anteile.
+        let floor = to_money(600.0);
+        if market.cash < floor {
+            let needed = to_money(1500.0) - market.cash;
+            let got = pay(
+                &mut economy.treasuries[owner.index()],
+                &mut market.cash,
+                needed,
+            );
+            if got > 0 {
+                flows
+                    .injections
+                    .push((IssuerId::Kontor(system.id), HolderId::State(owner), got));
+            }
+        }
         if excess > 0 {
-            pay(
+            // Die Hälfte ist Zoll, die andere Hälfte Gewinn der Anteilseigner des Kontors.
+            let tariff = pay(
                 &mut market.cash,
                 &mut economy.treasuries[owner.index()],
-                excess,
+                excess / 2,
             );
+            let dividend = excess - tariff;
+            market.cash -= dividend;
+            flows
+                .dividends
+                .push((IssuerId::Kontor(system.id), dividend));
         }
     }
     for polity in 0..economy.treasuries.len() {
@@ -329,7 +396,8 @@ pub fn settle_public_accounts(galaxy: &Galaxy, economy: &mut Economy, data: &Gam
         if population <= 0.0 {
             continue;
         }
-        let reserve = to_money(population * balance.state_reserve_per_million);
+        let reserve = to_money(population * balance.state_reserve_per_million)
+            .max(economy.treasury_targets[polity]);
         let excess = economy.treasuries[polity] - reserve;
         if excess <= 0 {
             continue;
@@ -343,5 +411,47 @@ pub fn settle_public_accounts(galaxy: &Galaxy, economy: &mut Economy, data: &Gam
             spent += share;
         }
         economy.treasuries[polity] -= spent;
+    }
+}
+
+/// Geldmengensteuerung: Wächst die Wirtschaft, ohne dass Geld nachkommt, fallen die Preise
+/// bis an ihre Böden. Liegt das Preisniveau am Heimatmarkt einer Gemeinschaft unter dem
+/// Ziel, schöpft ihre Notenbank Geld und gibt es dem Staat, der es über seine Ausgaben in
+/// Umlauf bringt. Die Schöpfung ist ausgewiesen (`minted`); sonst entsteht nirgends Geld.
+pub fn steer_money_supply(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    data: &GameData,
+    capitals: &[Option<PlanetId>],
+) {
+    let balance = &data.balance.economy;
+    for (polity, capital) in capitals.iter().enumerate() {
+        let Some(capital) = capital else {
+            continue;
+        };
+        let market = &economy.markets[galaxy.planet(*capital).system.index()];
+        // Preisniveau der Güter, die dort tatsächlich gehandelt werden.
+        let (mut level, mut weight) = (0.0, 0.0);
+        for (index, good) in data.goods.iter().enumerate() {
+            let volume = market.demand[index] * good.base_price;
+            level += volume * market.price[index] / good.base_price;
+            weight += volume;
+        }
+        if weight <= 0.0 {
+            continue;
+        }
+        let level = level / weight;
+        let gap = ((balance.price_target - level) / 0.3).clamp(0.0, 1.0);
+        if gap <= 0.0 {
+            continue;
+        }
+        let id = PolityId::from_index(polity);
+        let households: Money = galaxy
+            .planets_of(id)
+            .map(|planet| economy.planets[planet.id.index()].households)
+            .sum();
+        let minted = (households as f64 * balance.mint_per_month * gap) as Money;
+        economy.treasuries[polity] += minted;
+        economy.minted += minted;
     }
 }
