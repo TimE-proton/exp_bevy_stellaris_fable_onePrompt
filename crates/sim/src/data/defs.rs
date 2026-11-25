@@ -230,6 +230,9 @@ pub struct Balance {
     pub logistics: LogisticsBalance,
     pub fleets: FleetBalance,
     pub finance: FinanceBalance,
+    pub military: super::ships::MilitaryBalance,
+    pub battle: super::ships::BattleBalance,
+    pub research: super::ships::ResearchBalance,
 }
 
 #[derive(Clone, Debug, Deserialize)]

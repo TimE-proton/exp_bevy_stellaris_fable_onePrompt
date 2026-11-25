@@ -5,8 +5,12 @@
 //! mit Dateiname und Ursache gemeldet werden statt irgendwo in der Simulation.
 
 mod defs;
+mod ship_loader;
+mod ships;
 
 pub use defs::*;
+pub use ship_loader::arc_covers;
+pub use ships::*;
 
 use crate::hash::Fnv64;
 use crate::ids::GoodId;
@@ -61,6 +65,10 @@ pub struct GameData {
     pub goods: Vec<GoodDef>,
     pub planet_kinds: Vec<PlanetKindDef>,
     pub recipes: Vec<RecipeDef>,
+    pub hulls: Vec<HullDef>,
+    pub modules: Vec<ModuleDef>,
+    pub designs: Vec<DesignDef>,
+    pub techs: Vec<TechDef>,
     pub galaxy: GalaxyParams,
     pub polities: Vec<PolityDef>,
     pub names: NameData,
@@ -107,6 +115,10 @@ impl GameData {
         let goods: Vec<GoodDef> = load_ron(dir, "goods.ron", &mut hasher)?;
         let planet_kinds: Vec<PlanetKindDef> = load_ron(dir, "planet_kinds.ron", &mut hasher)?;
         let recipes: Vec<RecipeDef> = load_ron(dir, "recipes.ron", &mut hasher)?;
+        let hulls: Vec<HullDef> = load_ron(dir, "hulls.ron", &mut hasher)?;
+        let modules: Vec<ModuleDef> = load_ron(dir, "modules.ron", &mut hasher)?;
+        let designs: Vec<DesignDef> = load_ron(dir, "designs.ron", &mut hasher)?;
+        let techs: Vec<TechDef> = load_ron(dir, "techs.ron", &mut hasher)?;
         let galaxy: GalaxyParams = load_ron(dir, "galaxy.ron", &mut hasher)?;
         let polities: Vec<PolityDef> = load_ron(dir, "polities.ron", &mut hasher)?;
         let names: NameData = load_ron(dir, "names.ron", &mut hasher)?;
@@ -115,6 +127,10 @@ impl GameData {
             goods,
             planet_kinds,
             recipes,
+            hulls,
+            modules,
+            designs,
+            techs,
             galaxy,
             polities,
             names,
@@ -123,6 +139,7 @@ impl GameData {
             dir: dir.to_path_buf(),
         };
         data.resolve_and_validate()?;
+        ship_loader::resolve_ships(&mut data)?;
         Ok(data)
     }
 
@@ -144,6 +161,43 @@ impl GameData {
 
     pub fn recipe_index(&self, key: &str) -> Option<usize> {
         self.recipes.iter().position(|recipe| recipe.key == key)
+    }
+
+    pub fn design_index(&self, key: &str) -> Option<u16> {
+        self.designs
+            .iter()
+            .position(|design| design.key == key)
+            .map(|index| index as u16)
+    }
+
+    pub fn tech_index(&self, key: &str) -> Option<u16> {
+        self.techs
+            .iter()
+            .position(|tech| tech.key == key)
+            .map(|index| index as u16)
+    }
+
+    /// Der wertvollste Entwurf einer Klasse, den eine Gemeinschaft mit den erforschten
+    /// Technologien (`known[tech]`) bauen kann.
+    pub fn best_design(&self, class: ShipClass, known: &[bool]) -> Option<u16> {
+        self.designs
+            .iter()
+            .enumerate()
+            .filter(|(_, design)| design.stats.class == class)
+            .filter(|(_, design)| {
+                design
+                    .stats
+                    .techs
+                    .iter()
+                    .all(|tech| known.get(*tech as usize).copied().unwrap_or(false))
+            })
+            .max_by(|a, b| {
+                a.1.stats
+                    .value
+                    .total_cmp(&b.1.stats.value)
+                    .then(b.0.cmp(&a.0))
+            })
+            .map(|(index, _)| index as u16)
     }
 
     pub fn raw_goods(&self) -> impl Iterator<Item = GoodId> + '_ {
@@ -400,6 +454,7 @@ mod tests {
         let hut = &data.recipes[data.recipe_index("huette").unwrap()];
         assert_eq!(hut.output_id, data.good_id("legierungen").unwrap());
         assert_eq!(hut.input_ids[0].0, data.good_id("erz").unwrap());
+        assert_eq!(data.techs.len(), 30);
         assert_ne!(data.hash, 0);
     }
 
@@ -407,5 +462,59 @@ mod tests {
     fn missing_directory_is_reported() {
         let error = GameData::locate(Some(Path::new("/nicht/vorhanden"))).unwrap_err();
         assert!(error.to_string().contains("nicht gefunden"));
+    }
+
+    #[test]
+    fn every_class_has_a_buildable_design_with_sane_stats() {
+        let data = GameData::load_workspace().unwrap();
+        let none = vec![false; data.techs.len()];
+        let all = vec![true; data.techs.len()];
+        for class in ShipClass::ALL {
+            let basic = data.best_design(class, &none).expect("Grundentwurf");
+            let stats = &data.designs[basic as usize].stats;
+            assert!(
+                stats.value > 0.0 && stats.speed > 0.0 && stats.hull > 0.0,
+                "{class:?}"
+            );
+            assert!(stats.power_output >= stats.power_draw, "{class:?}");
+            assert!(stats.main_range > 0.0, "{class:?}");
+            // Mit mehr Forschung wird nie ein schlechterer Entwurf gewählt.
+            let advanced = data.best_design(class, &all).unwrap();
+            assert!(data.designs[advanced as usize].stats.value >= stats.value);
+        }
+        // Größere Klassen kosten mehr und sind träger.
+        let value = |key: &str| {
+            data.designs[data.design_index(key).unwrap() as usize]
+                .stats
+                .clone()
+        };
+        assert!(value("bastion").value > value("speer").value);
+        assert!(value("speer").value > value("waechter").value);
+        assert!(value("waechter").value > value("dolch").value);
+        assert!(value("bastion").speed < value("dolch").speed);
+        // Das Heck ist die dünnste Stelle.
+        let armor = value("bastion").armor;
+        assert!(armor[2] < armor[1] && armor[1] < armor[0]);
+        // Schlachtschiffe und Kreuzer gewinnen durch die Breitseite Feuerkraft.
+        assert!(value("bastion").broadside > 1.05);
+        assert!(value("speer").broadside > 1.05);
+        // Ein Träger führt Jäger mit und rechnet ihren Preis ein.
+        let carrier = value("horst");
+        assert_eq!(carrier.fighters, 24);
+        assert!(carrier.craft.is_some());
+    }
+
+    #[test]
+    fn firing_arcs_cover_the_right_bearings() {
+        assert!(arc_covers(0.0, 90.0, 40.0));
+        assert!(!arc_covers(0.0, 90.0, 50.0));
+        assert!(arc_covers(90.0, 150.0, 20.0));
+        assert!(!arc_covers(90.0, 150.0, 0.0));
+        assert!(arc_covers(180.0, 240.0, -100.0));
+        assert!(
+            arc_covers(-120.0, 220.0, 170.0),
+            "über die 180-Grad-Naht hinweg"
+        );
+        assert!(arc_covers(33.0, 360.0, -147.0));
     }
 }

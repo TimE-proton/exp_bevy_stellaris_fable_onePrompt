@@ -1,6 +1,8 @@
 //! KI gegen KI ohne Grafik. Die Logik liegt in `sim::harness`; hier stehen nur
 //! Kommandozeile und Ausgabe.
 
+mod battle;
+
 use clap::{Parser, Subcommand};
 use sim::GameData;
 use sim::clock::{DAYS_PER_YEAR, date_of_tick};
@@ -82,6 +84,8 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Übungsgefechte: Paarungen, Kontermatrix bei gleichen Kosten, Leistungsmessung.
+    Battle(battle::BattleArgs),
 }
 
 fn parse_range(text: &str) -> Result<(u64, u64), String> {
@@ -106,6 +110,7 @@ fn main() -> ExitCode {
         }
     };
     match cli.command {
+        Command::Battle(args) => return battle::run(&data, args),
         Command::Run {
             seed,
             years,

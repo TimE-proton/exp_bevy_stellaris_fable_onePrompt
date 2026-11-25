@@ -9,6 +9,7 @@
 //! Gleicher Seed, gleiche Befehle und gleiches Programm ergeben denselben Verlauf.
 
 pub mod ai;
+pub mod battle;
 pub mod chronicle;
 pub mod clock;
 pub mod command;

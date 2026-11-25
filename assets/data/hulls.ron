@@ -1,0 +1,52 @@
+// Rumpfklassen. Jede Klasse hat eine Rolle im Gefecht; die Konter ergeben sich aus
+// Größe, Wendigkeit und Bewaffnung, nicht aus festen Boni.
+// hull: Rumpfpunkte. radius: Trefferfläche. signature: wie leicht Strahlwaffen sie
+// erfassen (1 = Kreuzer). speed/accel: Strecke je Sekunde. turn: Drehrate (rad/s).
+// armor_split: Anteil der Panzerung an Bug, jeder Flanke und Heck (Bug + 2 × Flanke +
+// Heck = 1). Das Heck ist immer am dünnsten: Flankieren lohnt sich.
+// segments: Rumpfsegmente für den Bau. ammo/fuel: Grundvorrat.
+// targets: Zielvorlieben gegenüber jeder Klasse.
+[
+    (
+        key: "jaeger", name: "Jäger", class: Fighter,
+        hull: 9.0, radius: 3.0, signature: 0.10, speed: 115.0, accel: 90.0, turn: 2.8,
+        armor_split: (0.4, 0.2, 0.2), segments: 0.4, build_days: 0, slots: 3,
+        ammo: 2.0, fuel: 12.0,
+        targets: (fighter: 0.5, corvette: 0.3, frigate: 0.25, cruiser: 0.8, battleship: 1.0, carrier: 1.0),
+    ),
+    (
+        key: "korvette", name: "Korvette", class: Corvette,
+        hull: 90.0, radius: 8.0, signature: 0.35, speed: 74.0, accel: 38.0, turn: 1.25,
+        armor_split: (0.4, 0.22, 0.16), segments: 3.0, build_days: 60, slots: 6,
+        ammo: 12.0, fuel: 60.0,
+        targets: (fighter: 0.1, corvette: 0.5, frigate: 0.4, cruiser: 0.7, battleship: 1.0, carrier: 1.0),
+    ),
+    (
+        key: "fregatte", name: "Fregatte", class: Frigate,
+        hull: 190.0, radius: 12.0, signature: 0.55, speed: 56.0, accel: 26.0, turn: 0.85,
+        armor_split: (0.38, 0.23, 0.16), segments: 6.0, build_days: 100, slots: 9,
+        ammo: 60.0, fuel: 90.0,
+        targets: (fighter: 1.0, corvette: 0.9, frigate: 0.6, cruiser: 0.3, battleship: 0.15, carrier: 0.3),
+    ),
+    (
+        key: "kreuzer", name: "Kreuzer", class: Cruiser,
+        hull: 440.0, radius: 20.0, signature: 1.0, speed: 43.0, accel: 16.0, turn: 0.5,
+        armor_split: (0.36, 0.24, 0.16), segments: 14.0, build_days: 200, slots: 14,
+        ammo: 160.0, fuel: 140.0,
+        targets: (fighter: 0.2, corvette: 0.9, frigate: 1.0, cruiser: 0.7, battleship: 0.4, carrier: 0.6),
+    ),
+    (
+        key: "schlachtschiff", name: "Schlachtschiff", class: Battleship,
+        hull: 1150.0, radius: 32.0, signature: 1.8, speed: 30.0, accel: 9.0, turn: 0.28,
+        armor_split: (0.36, 0.25, 0.14), segments: 36.0, build_days: 420, slots: 22,
+        ammo: 420.0, fuel: 220.0,
+        targets: (fighter: 0.05, corvette: 0.3, frigate: 0.5, cruiser: 1.0, battleship: 0.9, carrier: 0.8),
+    ),
+    (
+        key: "traeger", name: "Träger", class: Carrier,
+        hull: 820.0, radius: 36.0, signature: 2.0, speed: 28.0, accel: 8.0, turn: 0.25,
+        armor_split: (0.34, 0.25, 0.16), segments: 30.0, build_days: 400, slots: 18,
+        ammo: 80.0, fuel: 260.0,
+        targets: (fighter: 0.8, corvette: 0.8, frigate: 0.5, cruiser: 0.4, battleship: 0.3, carrier: 0.3),
+    ),
+]

@@ -65,6 +65,14 @@ id_type!(
     /// Handelshaus in [`crate::logistics::Logistics::houses`].
     HouseId, "H"
 );
+id_type!(
+    /// Schiff in [`crate::fleet::Fleets::ships`].
+    ShipId, "K"
+);
+id_type!(
+    /// Gefecht, fortlaufend über die ganze Partie.
+    BattleId, "B"
+);
 
 /// Wer Anteile ausgibt: Firmen und Werften je Planet und Zweig, Handelshäuser, und das
 /// Kontor eines Systems als Kolonialgesellschaft.

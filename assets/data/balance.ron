@@ -211,4 +211,81 @@
             independence_min_population: 150.0,
         ),
     ),
+    military: (
+        // Flotte, mit der jede Gemeinschaft beginnt: (Entwurf, Anzahl).
+        starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
+        // Monatlicher Unterhalt als Anteil am Bauwert; der Sold geht an die Haushalte.
+        upkeep_per_month: 0.012,
+        // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
+        yard_capital_per_slot: 4.0,
+        // Anteil des Rumpfes, der im Dock je Tag instand gesetzt wird, und Rumpfsegmente
+        // je vollständig repariertem Rumpf, als Anteil der Bausegmente.
+        repair_per_day: 0.01,
+        repair_parts: 0.4,
+        // Treibstoff je Streckeneinheit auf der Karte, als Anteil des Tankinhalts.
+        fuel_per_distance: 0.0012,
+        // Ohne Treibstoff fährt eine Flotte nur noch mit diesem Anteil ihrer Fahrt.
+        dry_speed: 0.4,
+        // Munition: Einheiten des Guts je Punkt Bordvorrat; ebenso Treibstoff.
+        ammo_goods: 0.02,
+        fuel_goods: 0.03,
+        // Güter für Rumpfreparaturen und für die Munition an Bord.
+        hull_good: "rumpfsegmente",
+        ammo_good: "munition",
+    ),
+    battle: (
+        // Gefechtszeit je Takt in Sekunden. 20 Takte sind ein Kalendertag.
+        dt: 0.1,
+        // Aufstellung: Abstand der Parteien vom Zentrum; wer weiter weg ist als
+        // exit_radius und sich zurückzieht, entkommt.
+        spawn_radius: 1300.0,
+        exit_radius: 2400.0,
+        // Nach so vielen Sekunden Gefechtszeit ohne Entscheidung lösen sich beide Seiten.
+        time_limit: 900.0,
+        // Zellgröße des räumlichen Gitters für die Zielsuche.
+        grid_cell: 220.0,
+        sensor_range: 1700.0,
+        // Wie oft Ziele neu gewählt und Flotten neu geführt werden (Sekunden).
+        retarget_every: 0.6,
+        command_every: 1.0,
+        // Trefferwahrscheinlichkeit von Strahlwaffen: Nachführung gegen Winkelgeschwindigkeit
+        // des Ziels, dazu die Zielgröße (signature) mit diesem Gewicht.
+        beam_signature_weight: 0.55,
+        // Anteil eines Rumpftreffers, der zusätzlich ein Modul beschädigt.
+        module_damage: 0.6,
+        // Wahrscheinlichkeit, dass ein zerstörter Reaktor das Schiff zerreißt.
+        reactor_breach: 0.5,
+        // --- Moral (0..100) ---
+        morale_start: 72.0,
+        // Abzug je Punkt Kriegsmüdigkeit der eigenen Gemeinschaft.
+        morale_per_weariness: 0.3,
+        // Abzug, wenn der eigene Rumpf vollständig verloren ginge.
+        morale_hull_loss: 45.0,
+        // Abzug, wenn in der Nähe ein eigenes Schiff verloren geht (Großkampfschiff doppelt),
+        // Zuwachs, wenn ein feindliches verloren geht.
+        morale_friend_lost: 3.5,
+        morale_enemy_lost: 2.0,
+        morale_radius: 650.0,
+        // Treffer ins Heck verunsichern zusätzlich (Faktor auf den Abzug).
+        morale_rear_factor: 1.6,
+        // Unter diesem Wert bricht ein Schiff aus der Formation und flieht.
+        morale_break: 18.0,
+        // Eine Flotte zieht sich zurück, wenn ihr verbliebener Kampfwert unter diesen
+        // Anteil des gegnerischen fällt (je Doktrin: Offensiv, Ausgewogen, Defensiv).
+        retreat_ratio: (0.25, 0.45, 0.7),
+        // Bevorzugter Abstand als Anteil der Hauptwaffenreichweite (je Doktrin).
+        range_keep: (0.55, 0.8, 0.95),
+        // Munition und Treibstoff: Verbrauch an Bord.
+        fuel_per_second: 0.02,
+        // --- Aufstellung ---
+        formation_spacing: 95.0,
+    ),
+    research: (
+        // Anteil der Staatseinnahmen, der anfangs in die Forschung geht.
+        budget_share: 0.10,
+        // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
+        efficiency: 1.0,
+        // Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
+        population_exponent: 0.25,
+    ),
 )
