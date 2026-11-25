@@ -387,6 +387,21 @@ pub struct MilitaryBalance {
     pub fuel_goods: f64,
     pub hull_good: String,
     pub ammo_good: String,
+    /// Moralabzug der Besatzungen bei vollem Soldrückstand (Skala 0..100).
+    pub morale_per_arrears: f32,
+    /// Tage, die eine Flotte nach dem Abzug aus einem Gefecht braucht, um sich zu sammeln.
+    pub regroup_days: u64,
+    /// Gefechtspause in einem System nach einem Gefecht ohne Entscheidung, in Tagen.
+    pub battle_pause_days: u64,
+    /// Zuwachs der Kriegsmüdigkeit (0..100), wenn eine Gemeinschaft in einem Gefecht den
+    /// Bauwert ihrer gesamten Flotte verlöre; kleinere Verluste zählen anteilig.
+    pub weariness_per_navy_lost: f64,
+    /// Anteil am Bauwert der gesamten Flotte, dessen Verlust in einem verlorenen Gefecht
+    /// als schwere Niederlage gilt, und der Faktor, um den dann die Kurse fallen.
+    pub heavy_defeat_share: f64,
+    pub defeat_shock: f64,
+    /// Anteil, um den ein Trümmerfeld je Monat verblasst.
+    pub debris_fade_per_month: f32,
     #[serde(skip)]
     pub starting_fleet_ids: Vec<(u16, u32)>,
     #[serde(skip)]

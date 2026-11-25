@@ -13,7 +13,7 @@ use crate::diplomacy::{self, Diplomacy};
 use crate::economy::{Economy, to_credits, to_money};
 use crate::finance::shares::ExpropriationScope;
 use crate::finance::{self, Finance};
-use crate::fleet::{self, Fleets, Stance};
+use crate::fleet::{self, Battles, Fleets, Stance};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use crate::logistics::Logistics;
@@ -102,11 +102,17 @@ pub enum SimCommand {
         fleet: FleetId,
         ships: Vec<ShipId>,
     },
-    /// Stehende Befehle einer Flotte für künftige Gefechte.
+    /// Aufstellung und Doktrin einer Flotte: stehende Befehle für künftige Gefechte, die
+    /// auch in einem laufenden Gefecht sofort gelten.
     SetFleetOrders {
         fleet: FleetId,
         formation: Formation,
         doctrine: Doctrine,
+    },
+    /// Eine Flotte bricht das Gefecht ab, in dem sie steht: Ihre Schiffe verlassen das
+    /// Feld, und was entkommt, weicht in ein Nachbarsystem aus.
+    Retreat {
+        fleet: FleetId,
     },
 }
 
@@ -195,6 +201,7 @@ pub struct CommandContext<'w> {
     pub finance: ResMut<'w, Finance>,
     pub logistics: Res<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
+    pub battles: ResMut<'w, Battles>,
     pub diplomacy: ResMut<'w, Diplomacy>,
     pub chronicle: ResMut<'w, Chronicle>,
 }
@@ -440,6 +447,14 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             fleet,
             formation,
             doctrine,
-        } => fleet::set_fleet_orders(&mut ctx.fleets, polity, *fleet, *formation, *doctrine),
+        } => {
+            fleet::set_fleet_orders(&mut ctx.fleets, polity, *fleet, *formation, *doctrine)?;
+            // Steht die Flotte im Gefecht, gelten die neuen Befehle dort sofort.
+            fleet::relay_orders(&ctx.data, &mut ctx.battles, *fleet, *formation, *doctrine);
+            Ok(())
+        }
+        SimCommand::Retreat { fleet } => {
+            fleet::order_retreat(&ctx.fleets, &mut ctx.battles, polity, *fleet)
+        }
     }
 }

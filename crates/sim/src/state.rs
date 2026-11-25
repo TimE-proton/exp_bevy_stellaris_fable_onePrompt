@@ -10,7 +10,7 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, setup_economy};
 use crate::finance::{Finance, setup_finance};
-use crate::fleet::{Fleets, setup_fleets};
+use crate::fleet::{Battles, Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
 use crate::hash::Fnv64;
 use crate::ids::PolityId;
@@ -74,6 +74,7 @@ sim_state! {
     finance: Finance,
     logistics: Logistics,
     fleets: Fleets,
+    battles: Battles,
     diplomacy: Diplomacy,
     queue: CommandQueue,
     log: CommandLog,
@@ -134,6 +135,7 @@ impl SimState {
             finance,
             logistics,
             fleets,
+            battles: Battles::default(),
             diplomacy: Diplomacy::default(),
             queue: CommandQueue::default(),
             log: CommandLog::default(),
@@ -155,7 +157,8 @@ pub fn new_game(world: &mut World, config: SimConfig) {
 }
 
 /// Format 2: Flotten bestehen aus Schiffen und führen Bauaufträge.
-pub const SAVE_FORMAT: u32 = 2;
+/// Format 3: Gefechte laufen im taktischen Rechner und gehören zum Spielstand.
+pub const SAVE_FORMAT: u32 = 3;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]

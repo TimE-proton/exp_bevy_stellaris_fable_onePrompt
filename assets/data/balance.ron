@@ -120,9 +120,6 @@
         start_strength: 100.0,
         // Strecke je Tag.
         speed: 22.0,
-        // Anteil der eigenen Stärke, den eine Flotte dem Gegner je Tag zufügt
-        // (grobe Auflösung bis Meilenstein 4).
-        daily_damage: 0.06,
     ),
     finance: (
         // Anteil des Geldes einer Heimatwelt, den zu Beginn ihre Elite hält.
@@ -250,6 +247,29 @@
         // Güter für Rumpfreparaturen und für die Munition an Bord.
         hull_good: "rumpfsegmente",
         ammo_good: "munition",
+
+        // --- Gefechte in der Partie ---
+        // Moral der Besatzungen zu Gefechtsbeginn: battle.morale_start, gemindert um die
+        // Kriegsmüdigkeit (battle.morale_per_weariness) und um diesen Abzug bei vollem
+        // Soldrückstand.
+        morale_per_arrears: 30.0,
+        // Wer das Feld nicht hält, weicht in ein Nachbarsystem aus und sammelt sich so
+        // viele Tage, der Marsch dorthin eingerechnet. Solange beginnt die Flotte kein
+        // Gefecht, tritt keinem bei und zählt nicht für Blockade, Kaperfahrt und Geleit.
+        regroup_days: 30,
+        // Endet ein Gefecht an der Zeitgrenze ohne Entscheidung, ruhen die Waffen in
+        // diesem System so viele Tage.
+        battle_pause_days: 20,
+        // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
+        // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
+        weariness_per_navy_lost: 20.0,
+        // Schwere Niederlage: Wer das Feld nicht hält und dabei mindestens diesen Anteil
+        // am Bauwert seiner gesamten Flotte verliert, dessen Kurse fallen um den Faktor
+        // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock).
+        heavy_defeat_share: 0.25,
+        defeat_shock: 0.9,
+        // Trümmerfelder verblassen je Monat um diesen Anteil (rund die Hälfte in drei Jahren).
+        debris_fade_per_month: 0.02,
     ),
     battle: (
         // Gefechtszeit je Takt in Sekunden. 20 Takte sind ein Kalendertag.

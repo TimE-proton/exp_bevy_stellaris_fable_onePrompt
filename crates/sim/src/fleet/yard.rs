@@ -11,6 +11,7 @@
 use super::{Fleets, Ship};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::data::{GameData, Sector, ShipClass};
+use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money, pay, purchase, recipes_of, to_credits, to_money};
 use crate::galaxy::Galaxy;
 use crate::ids::{PlanetId, PolityId};
@@ -163,12 +164,16 @@ pub fn cancel_order(fleets: &mut Fleets, polity: PolityId, order: u32) -> Result
 
 /// Tagesschritt aller Werften. Je Welt rücken die Aufträge in Nummernfolge vor, höchstens
 /// so viele zugleich, wie die Werft Bauplätze hat. Fertige Schiffe stoßen zu einer eigenen
-/// Flotte, die im System liegt, sonst entsteht dort eine neue.
+/// Flotte, die im System liegt, sonst entsteht dort eine neue. Stehen feindliche Flotten
+/// im System und nimmt keine eigene das Schiff auf, bleibt es im Dock und belegt seinen
+/// Bauplatz, bis der Orbit frei ist: Ein einzelnes Schiff ohne Munition liefe sonst
+/// geradewegs in sein erstes Gefecht.
 pub fn advance_yards(
     galaxy: &Galaxy,
     economy: &mut Economy,
     fleets: &mut Fleets,
     polities: &Polities,
+    diplomacy: &Diplomacy,
     chronicle: &mut Chronicle,
     data: &GameData,
     tick: u64,
@@ -283,28 +288,41 @@ pub fn advance_yards(
     if finished.is_empty() {
         return;
     }
+    let mut delivered = false;
     for id in finished {
         let index = fleets
             .orders
             .iter()
             .position(|order| order.id == id)
             .expect("eben gelesen");
-        let order = fleets.orders.remove(index);
-        let world = galaxy.planet(order.planet);
-        let ship = fleets.next_ship_id();
+        let (polity, system) = {
+            let order = &fleets.orders[index];
+            (order.polity, galaxy.planet(order.planet).system)
+        };
         // Zur Flotte mit der kleinsten Nummer, die im System liegt und nicht kämpft.
-        let fleet = fleets
+        let host = fleets
             .list
             .iter()
             .find(|fleet| {
                 fleet.alive
-                    && fleet.owner == order.polity
-                    && fleet.system == world.system
+                    && fleet.owner == polity
+                    && fleet.system == system
                     && fleet.route.is_empty()
                     && !fleet.in_battle
             })
-            .map(|fleet| fleet.id)
-            .unwrap_or_else(|| fleets.new_fleet(polities, order.polity, world.system));
+            .map(|fleet| fleet.id);
+        let contested = fleets
+            .docked_in(system)
+            .any(|fleet| diplomacy.at_war(fleet.owner, polity));
+        if host.is_none() && contested {
+            // Das Schiff bleibt im Dock; der Auftrag steht fertig in der Liste.
+            continue;
+        }
+        let order = fleets.orders.remove(index);
+        let world = galaxy.planet(order.planet);
+        let ship = fleets.next_ship_id();
+        let fleet = host.unwrap_or_else(|| fleets.new_fleet(polities, polity, system));
+        delivered = true;
         let fleet = &mut fleets.list[fleet.index()];
         fleet.ships.push(Ship::from_yard(data, ship, order.design));
         let design = &data.designs[order.design as usize];
@@ -322,7 +340,9 @@ pub fn advance_yards(
             ),
         );
     }
-    fleets.refresh(data);
+    if delivered {
+        fleets.refresh(data);
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +351,11 @@ mod tests {
     use super::*;
     use crate::economy::setup_economy;
     use crate::ids::FleetId;
+
+    /// Niemand führt Krieg.
+    fn peace() -> Diplomacy {
+        Diplomacy::default()
+    }
 
     #[test]
     fn slots_follow_arms_capital_and_the_capital_always_has_one() {
@@ -479,6 +504,7 @@ mod tests {
             &mut economy,
             &mut fleets,
             &polities,
+            &peace(),
             &mut chronicle,
             &data,
             0,
@@ -548,7 +574,16 @@ mod tests {
             .unwrap();
         }
         let day = |fleets: &mut Fleets, economy: &mut Economy, chronicle: &mut Chronicle| {
-            advance_yards(&galaxy, economy, fleets, &polities, chronicle, &data, 0)
+            advance_yards(
+                &galaxy,
+                economy,
+                fleets,
+                &polities,
+                &peace(),
+                chronicle,
+                &data,
+                0,
+            )
         };
         for _ in 0..days - 1 {
             day(&mut fleets, &mut economy, &mut chronicle);
@@ -619,7 +654,16 @@ mod tests {
             )
             .unwrap();
             for _ in 0..days {
-                advance_yards(&galaxy, economy, fleets, &polities, chronicle, &data, 0);
+                advance_yards(
+                    &galaxy,
+                    economy,
+                    fleets,
+                    &polities,
+                    &peace(),
+                    chronicle,
+                    &data,
+                    0,
+                );
             }
         };
         let sizes = |fleets: &Fleets| {
@@ -652,6 +696,85 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_ship_stays_in_the_dock_while_the_enemy_holds_the_orbit() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        let mut economy = setup_economy(&data, &galaxy, &polities);
+        let mut chronicle = Chronicle::default();
+        let me = PolityId(0);
+        let home = polities.list[0].capital.unwrap();
+        let system = galaxy.planet(home).system;
+        stock_parts(&data, &mut economy, &galaxy, home);
+        let corvette = data.design_index("dolch").unwrap();
+        let days = data.designs[corvette as usize].stats.build_days;
+        for _ in 0..2 {
+            order_ship(
+                &data,
+                &galaxy,
+                &economy,
+                &polities,
+                &mut fleets,
+                me,
+                home,
+                corvette,
+                &[],
+                0,
+            )
+            .unwrap();
+        }
+        // Die eigene Flotte ist fort, eine feindliche liegt im System.
+        let away = galaxy.neighbors(system)[0].system;
+        fleets.list[0].system = away;
+        fleets.list[1].system = system;
+        let mut war = Diplomacy::default();
+        war.wars.insert((me, PolityId(1)));
+        let day = |fleets: &mut Fleets,
+                   economy: &mut Economy,
+                   chronicle: &mut Chronicle,
+                   diplomacy: &Diplomacy| {
+            advance_yards(
+                &galaxy, economy, fleets, &polities, diplomacy, chronicle, &data, 0,
+            );
+        };
+        for _ in 0..days + 5 {
+            day(&mut fleets, &mut economy, &mut chronicle, &war);
+        }
+        // Das Schiff ist fertig, bleibt aber im Dock: keine neue Flotte, kein Eintrag.
+        assert_eq!(fleets.list.len(), polities.list.len());
+        assert_eq!(fleets.orders.len(), 2);
+        assert!(fleets.orders[0].progress >= 1.0 - 1e-6 && !fleets.orders[0].stalled);
+        assert!(chronicle.entries.is_empty());
+        // Es belegt seinen Bauplatz, und es kostet nichts mehr.
+        assert_eq!(fleets.orders[1].progress, 0.0);
+        let (spent, cash) = (fleets.orders[0].spent, economy.treasury(me));
+        day(&mut fleets, &mut economy, &mut chronicle, &war);
+        assert_eq!(
+            (fleets.orders[0].spent, economy.treasury(me)),
+            (spent, cash)
+        );
+        assert_eq!(fleets.find_anomaly(&data), None);
+
+        // Ohne Krieg wäre dieselbe Flotte kein Hindernis gewesen; mit dem Frieden (oder
+        // dem Abzug des Gegners) läuft das Schiff aus und der nächste Bau beginnt.
+        day(&mut fleets, &mut economy, &mut chronicle, &peace());
+        assert_eq!(fleets.orders.len(), 1);
+        assert_eq!(fleets.list.len(), polities.list.len() + 1);
+        let new = fleets.list.last().unwrap();
+        assert_eq!((new.owner, new.system, new.ships.len()), (me, system, 1));
+        assert_eq!(chronicle.entries.len(), 1);
+        day(&mut fleets, &mut economy, &mut chronicle, &war);
+        assert!(fleets.orders[0].progress > 0.0);
+
+        // Liegt eine eigene Flotte im System, die nicht kämpft, nimmt sie das nächste Schiff
+        // auch unter den Augen des Gegners auf.
+        for _ in 0..days {
+            day(&mut fleets, &mut economy, &mut chronicle, &war);
+        }
+        assert!(fleets.orders.is_empty());
+        assert_eq!(fleets.list.last().unwrap().ships.len(), 2);
+        assert_eq!(fleets.find_anomaly(&data), None);
+    }
+
+    #[test]
     fn the_scarcest_input_sets_the_pace_and_marks_the_order_stalled() {
         let (data, galaxy, polities, mut fleets) = setup();
         let mut economy = setup_economy(&data, &galaxy, &polities);
@@ -676,7 +799,16 @@ mod tests {
         )
         .unwrap();
         let day = |fleets: &mut Fleets, economy: &mut Economy, chronicle: &mut Chronicle| {
-            advance_yards(&galaxy, economy, fleets, &polities, chronicle, &data, 0);
+            advance_yards(
+                &galaxy,
+                economy,
+                fleets,
+                &polities,
+                &peace(),
+                chronicle,
+                &data,
+                0,
+            );
         };
 
         // Leerer Markt: kein Fortschritt, kein Geld, aber gemeldete Nachfrage.
@@ -769,6 +901,7 @@ mod tests {
             &mut economy,
             &mut fleets,
             &polities,
+            &peace(),
             &mut chronicle,
             &data,
             0,

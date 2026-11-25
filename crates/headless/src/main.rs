@@ -3,11 +3,12 @@
 
 mod battle;
 mod fleets;
+mod war;
 
 use clap::{Parser, Subcommand};
 use sim::GameData;
 use sim::clock::{DAYS_PER_YEAR, date_of_tick};
-use sim::harness::{Headless, RunSummary, run_ai_game, summarize, sweep};
+use sim::harness::{Headless, RunSummary, ScriptedEvent, run_scripted, summarize, sweep_scripted};
 use sim::state::{SaveGame, SimConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,6 +40,14 @@ enum Command {
         /// Nur die Zusammenfassung, keine Chronik.
         #[arg(long)]
         quiet: bool,
+        /// Krieg nach Drehbuch, beliebig oft: Zu Beginn des Jahres erklärt Gemeinschaft A
+        /// (Nummer ab 0) der Gemeinschaft B den Krieg und schickt ihre Flotten im
+        /// Blockadeauftrag in deren Heimatsystem.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
+        war: Vec<ScriptedEvent>,
+        /// Frieden nach Drehbuch, beliebig oft: Zu Beginn des Jahres schließt A mit B Frieden.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
+        peace: Vec<ScriptedEvent>,
     },
     /// Viele Seeds parallel laufen lassen und Kennzahlen als Tabelle ausgeben.
     Sweep {
@@ -53,6 +62,12 @@ enum Command {
         /// Ergebnis zusätzlich als CSV schreiben.
         #[arg(long)]
         csv: Option<PathBuf>,
+        /// Krieg nach Drehbuch in jedem Lauf, wie bei `run`.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
+        war: Vec<ScriptedEvent>,
+        /// Frieden nach Drehbuch in jedem Lauf, wie bei `run`.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
+        peace: Vec<ScriptedEvent>,
     },
     /// Zustandsprüfsummen ausgeben. Zwei Aufrufe mit gleichem Seed müssen gleich sein.
     Hash {
@@ -66,6 +81,12 @@ enum Command {
         /// Jeden Takt rechnen statt Leertakte zu überspringen (muss dasselbe ergeben).
         #[arg(long)]
         exact: bool,
+        /// Krieg nach Drehbuch, wie bei `run`: So gehen auch Gefechte in die Prüfsummen ein.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
+        war: Vec<ScriptedEvent>,
+        /// Frieden nach Drehbuch, wie bei `run`.
+        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
+        peace: Vec<ScriptedEvent>,
     },
     /// Volkswirtschaftliche Kennzahlen im Jahresabstand, zum Auswuchten der Balance.
     Economy {
@@ -120,15 +141,26 @@ fn main() -> ExitCode {
             years,
             save,
             quiet,
+            war,
+            peace,
         } => {
-            let sim = run_ai_game(&data, seed, years * DAYS_PER_YEAR);
+            let script = war::script(&war, &peace);
+            let (sim, violation) = run_scripted(&data, seed, years * DAYS_PER_YEAR, &script);
             if !quiet {
                 for entry in &sim.world().resource::<sim::chronicle::Chronicle>().entries {
                     println!("{}  {}", date_of_tick(entry.tick), entry.text);
                 }
                 println!();
             }
-            print_summary(&summarize(&sim));
+            if !script.is_empty() {
+                war::print_aftermath(&sim);
+            }
+            let summary = summarize(&sim);
+            print_summary(&summary);
+            if let Some(violation) = violation.or(summary.violation) {
+                eprintln!("INVARIANTE VERLETZT: {violation}");
+                return ExitCode::FAILURE;
+            }
             if let Some(path) = save {
                 if let Err(error) = SaveGame::write(&sim.save(), &path) {
                     eprintln!("{error}");
@@ -142,7 +174,10 @@ fn main() -> ExitCode {
             years,
             jobs,
             csv,
+            war,
+            peace,
         } => {
+            let script = war::script(&war, &peace);
             let seeds: Vec<u64> = (seeds.0..seeds.1).collect();
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism()
@@ -150,10 +185,10 @@ fn main() -> ExitCode {
                     .unwrap_or(1)
             });
             let started = std::time::Instant::now();
-            let runs = sweep(&data, &seeds, years * DAYS_PER_YEAR, jobs);
+            let runs = sweep_scripted(&data, &seeds, years * DAYS_PER_YEAR, jobs, &script);
             println!(
-                "{:>6} {:>18} {:>6} {:>8} {:>12}  größte Gemeinschaft",
-                "Seed", "Hash", "frei", "lebend", "Bevölk. Mio"
+                "{:>6} {:>18} {:>6} {:>8} {:>12} {:>8} {:>8}  größte Gemeinschaft",
+                "Seed", "Hash", "frei", "lebend", "Bevölk. Mio", "Gefechte", "Verluste"
             );
             for run in &runs {
                 let alive = run.polities.iter().filter(|p| p.alive).count();
@@ -171,8 +206,15 @@ fn main() -> ExitCode {
                     })
                     .unwrap_or_default();
                 println!(
-                    "{:>6} {:>18x} {:>6} {:>8} {:>12.0}  {}",
-                    run.seed, run.hash, run.free_planets, alive, total, biggest
+                    "{:>6} {:>18x} {:>6} {:>8} {:>12.0} {:>8} {:>8}  {}",
+                    run.seed,
+                    run.hash,
+                    run.free_planets,
+                    alive,
+                    total,
+                    run.battles,
+                    run.ships_lost,
+                    biggest
                 );
             }
             println!(
@@ -210,6 +252,11 @@ fn main() -> ExitCode {
                 per_polity(|p| p.strength),
                 100.0 * per_polity(|p| p.arrears)
             );
+            println!(
+                "Gefechte je Lauf im Mittel: {:.1} mit {:.1} verlorenen Schiffen",
+                mean(|r| r.battles as f64),
+                mean(|r| r.ships_lost as f64)
+            );
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -219,12 +266,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -243,7 +290,9 @@ fn main() -> ExitCode {
                             polity.fleets,
                             polity.ships,
                             polity.strength,
-                            polity.arrears
+                            polity.arrears,
+                            run.battles,
+                            polity.ships_lost
                         ));
                     }
                 }
@@ -262,19 +311,17 @@ fn main() -> ExitCode {
             days,
             every,
             exact,
+            war,
+            peace,
         } => {
+            let script = war::script(&war, &peace);
             let mut sim = Headless::new(data, SimConfig { seed, player: None });
             let every = every.max(1);
             println!("Tag {:>7}  {:016x}", 0, sim.hash());
             let mut done = 0;
             while done < days {
-                let step = every.min(days - done);
-                if exact {
-                    sim.run_days_exact(step)
-                } else {
-                    sim.run_days(step)
-                }
-                done += step;
+                done += every.min(days - done);
+                script.run_until(&mut sim, done, exact);
                 println!("Tag {:>7}  {:016x}", done, sim.hash());
             }
         }
@@ -558,9 +605,13 @@ fn print_summary(summary: &RunSummary) {
         summary.free_planets,
         summary.hash
     );
+    println!(
+        "Gefechte: {}, darin verlorene Schiffe: {}",
+        summary.battles, summary.ships_lost
+    );
     for polity in &summary.polities {
         println!(
-            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner  {:>2} {:<7}  {:>3} Schiffe  Stärke {:>5.0}{}{}",
+            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner  {:>2} {:<7}  {:>3} Schiffe  Stärke {:>5.0}{}{}{}",
             polity.name,
             polity.planets,
             polity.population,
@@ -577,7 +628,20 @@ fn print_summary(summary: &RunSummary) {
             } else {
                 String::new()
             },
+            if polity.ships_lost > 0 {
+                format!("  {} Schiffe verloren", polity.ships_lost)
+            } else {
+                String::new()
+            },
             if polity.alive { "" } else { "  (erloschen)" }
+        );
+        println!(
+            "  {:<24} Staatskasse {:>8.0}  Kriegsmüdigkeit {:>3.0}  Zusammenhalt {:>3.0}  Soldrückstand {:>3.0} %",
+            "",
+            polity.treasury,
+            polity.war_weariness,
+            polity.cohesion,
+            100.0 * polity.arrears
         );
     }
 }

@@ -42,7 +42,9 @@ fn percent(share: f32) -> String {
 
 /// Stand eines Auftrags in der Warteschlange seiner Werft.
 fn order_state(order: &BuildOrder, position: usize, slots: u32) -> &'static str {
-    if position >= slots as usize {
+    if order.progress >= 1.0 - 1e-6 {
+        "fertig, bleibt im Dock: feindliche Flotten im System"
+    } else if position >= slots as usize {
         "wartet auf einen Bauplatz"
     } else if order.stalled {
         "stockt: Bauteile oder Geld fehlen"
@@ -230,7 +232,11 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
                 classes.join(", "),
                 fleet.formation.label(),
                 fleet.doctrine.label(),
-                if fleet.in_battle { "  im Gefecht" } else { "" }
+                match (fleet.in_battle, fleet.regroup_until) {
+                    (true, _) => "  im Gefecht".to_string(),
+                    (false, Some(day)) => format!("  sammelt sich bis {}", Date::from_day(day)),
+                    (false, None) => String::new(),
+                }
             );
             if args.ships {
                 for ship in &fleet.ships {

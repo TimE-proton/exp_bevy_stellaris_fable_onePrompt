@@ -144,9 +144,13 @@ fn advance_clock(mut clock: ResMut<SimClock>) {
 }
 
 /// Braucht die Simulation gerade jeden Takt? Sonst darf ein Headless-Lauf direkt zum
-/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts.
+/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts. Jeden
+/// Takt braucht sie, solange Befehle warten oder ein Gefecht läuft.
 pub fn needs_fine_ticks(world: &World) -> bool {
     world
         .get_resource::<command::CommandQueue>()
         .is_some_and(|queue| !queue.pending.is_empty())
+        || world
+            .get_resource::<fleet::Battles>()
+            .is_some_and(|battles| !battles.active.is_empty())
 }

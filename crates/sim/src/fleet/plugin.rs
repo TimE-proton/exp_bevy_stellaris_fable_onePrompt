@@ -1,13 +1,15 @@
 use super::{
-    Fleets, advance_yards, move_fleets, pay_upkeep, repair_fleets, resolve_skirmishes,
-    resupply_fleets, update_blockades,
+    Battles, Fleets, advance_battles, advance_yards, move_fleets, open_battles, pay_upkeep,
+    repair_fleets, resupply_fleets, update_blockades,
 };
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::Economy;
+use crate::finance::Finance;
 use crate::galaxy::Galaxy;
+use crate::logistics::Logistics;
 use crate::polity::Polities;
 use crate::state::SimConfig;
 use crate::{SimSet, sim_schedule};
@@ -32,7 +34,8 @@ impl Plugin for FleetPlugin {
                 )
                     .chain()
                     .in_set(SimSet::Fleets),
-                combat.in_set(SimSet::SpaceCombat).run_if(day_start),
+                // Gefechte rechnen jeden Takt, nicht nur am Tagesanfang.
+                combat.in_set(SimSet::SpaceCombat),
             ),
         );
     }
@@ -69,6 +72,7 @@ fn service(
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
+    diplomacy: Res<Diplomacy>,
     mut economy: ResMut<Economy>,
     mut fleets: ResMut<Fleets>,
     mut chronicle: ResMut<Chronicle>,
@@ -80,12 +84,15 @@ fn service(
         &mut economy,
         &mut fleets,
         &polities,
+        &diplomacy,
         &mut chronicle,
         &data,
         clock.tick,
     );
 }
 
+/// Gefechte und Blockaden. Am Tagesanfang beginnen Gefechte und greifen Verstärkungen
+/// ein; jeden Takt rücken die laufenden Gefechte um einen Schritt vor.
 fn combat(
     data: Res<GameData>,
     config: Res<SimConfig>,
@@ -93,17 +100,45 @@ fn combat(
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
     diplomacy: Res<Diplomacy>,
+    logistics: Res<Logistics>,
     mut fleets: ResMut<Fleets>,
+    mut battles: ResMut<Battles>,
+    mut finance: ResMut<Finance>,
     mut chronicle: ResMut<Chronicle>,
 ) {
-    resolve_skirmishes(
+    let day_start = clock.is_day_start();
+    if !day_start && battles.active.is_empty() {
+        return;
+    }
+    if day_start {
+        // Tägliches Netz: Die Stärke folgt den Schiffen, eine Flotte ohne Schiffe besteht
+        // nicht mehr, auch wenn sich ihre Schiffe außerhalb eines Gefechts geändert haben.
+        fleets.refresh(&data);
+        open_battles(
+            &galaxy,
+            &mut fleets,
+            &mut battles,
+            &diplomacy,
+            &finance,
+            &mut chronicle,
+            &data,
+            config.seed,
+            clock.tick,
+        );
+    }
+    advance_battles(
+        &galaxy,
         &mut fleets,
+        &mut battles,
         &diplomacy,
+        &mut finance,
+        &logistics,
         &polities,
         &mut chronicle,
         &data,
-        config.seed,
         clock.tick,
     );
-    update_blockades(&galaxy, &mut fleets, &diplomacy);
+    if day_start {
+        update_blockades(&galaxy, &mut fleets, &diplomacy);
+    }
 }

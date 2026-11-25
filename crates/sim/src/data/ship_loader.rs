@@ -499,6 +499,32 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
                 && military.fuel_goods >= 0.0
                 && military.fuel_goods.is_finite(),
         ),
+        (
+            "morale_per_arrears muss in 0..100 liegen",
+            (0.0..=100.0).contains(&military.morale_per_arrears),
+        ),
+        (
+            // Ohne Sammelfrist stünde eine geschlagene Flotte am nächsten Morgen wieder im
+            // Gefecht, ohne Gefechtspause begänne ein unentschiedenes sofort von vorn.
+            "regroup_days und battle_pause_days müssen mindestens 1 sein",
+            military.regroup_days >= 1 && military.battle_pause_days >= 1,
+        ),
+        (
+            "weariness_per_navy_lost muss in 0..100 liegen",
+            (0.0..=100.0).contains(&military.weariness_per_navy_lost),
+        ),
+        (
+            "heavy_defeat_share muss über 0 und höchstens 1 sein",
+            military.heavy_defeat_share > 0.0 && military.heavy_defeat_share <= 1.0,
+        ),
+        (
+            "defeat_shock muss über 0 und höchstens 1 sein",
+            military.defeat_shock > 0.0 && military.defeat_shock <= 1.0,
+        ),
+        (
+            "debris_fade_per_month muss über 0 und höchstens 1 sein",
+            military.debris_fade_per_month > 0.0 && military.debris_fade_per_month <= 1.0,
+        ),
     ];
     for (message, ok) in checks {
         if !ok {

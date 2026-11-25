@@ -35,6 +35,8 @@ pub fn day_travel(
 /// Flotten rücken entlang ihrer Route vor und verbrauchen dabei Treibstoff: je
 /// Streckeneinheit denselben Anteil jedes Tanks.
 pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData) {
+    // ANSCHLUSS FORSCHUNG: Der Aufschlag auf die Flottenfahrt einer Gemeinschaft
+    // (`TechEffect::FleetSpeed`) gehört hierher und in `Fleet::day_range`.
     let speed = data.balance.fleets.speed;
     let balance = &data.balance.military;
     for fleet in &mut fleets.list {
@@ -60,6 +62,8 @@ pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData) {
             ship.fuel = (ship.fuel - burned).max(0.0);
         }
         if arrived {
+            // Die Flotte merkt sich, woher sie kam: ihr Rückweg nach einem verlorenen Gefecht.
+            fleet.came_from = Some(fleet.system);
             fleet.system = fleet.route.remove(0);
             fleet.progress = 0.0;
         } else {
@@ -70,7 +74,8 @@ pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData) {
 
 /// Ein System ist blockiert, wenn eine feindliche Flotte im Blockadeauftrag dort steht
 /// und der Besitzer keine eigene Flotte im Orbit hat: Erst die orbitale Überlegenheit,
-/// dann die Sperre.
+/// dann die Sperre. Wer im Gefecht steht oder sich nach einem Rückzug sammelt, sperrt
+/// nicht; wer sich sammelt, hält auch keinen Orbit.
 pub fn update_blockades(galaxy: &Galaxy, fleets: &mut Fleets, diplomacy: &Diplomacy) {
     let mut blockaded = Vec::new();
     for system in &galaxy.systems {
@@ -79,10 +84,12 @@ pub fn update_blockades(galaxy: &Galaxy, fleets: &mut Fleets, diplomacy: &Diplom
         };
         let defended = fleets
             .docked_in(system.id)
-            .any(|fleet| fleet.owner == owner);
-        let besieged = fleets
-            .docked_in(system.id)
-            .any(|fleet| fleet.stance == Stance::Blockade && diplomacy.at_war(fleet.owner, owner));
+            .any(|fleet| fleet.owner == owner && !fleet.is_regrouping());
+        let besieged = fleets.docked_in(system.id).any(|fleet| {
+            fleet.is_ready()
+                && fleet.stance == Stance::Blockade
+                && diplomacy.at_war(fleet.owner, owner)
+        });
         if besieged && !defended {
             blockaded.push(system.id);
         }
@@ -227,5 +234,62 @@ mod tests {
         travel(&galaxy, &mut fleets, &data, FleetId(1));
         update_blockades(&galaxy, &mut fleets, &diplomacy);
         assert!(fleets.is_blockaded(target));
+    }
+
+    #[test]
+    fn fleets_in_battle_or_regrouping_neither_blockade_nor_hold_an_orbit() {
+        let (_, galaxy, polities, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
+        let away = galaxy.neighbors(target)[0].system;
+        let blockaded = |fleets: &mut Fleets| {
+            update_blockades(&galaxy, fleets, &diplomacy);
+            fleets.is_blockaded(target)
+        };
+        // Der Verteidiger ist fort, der Angreifer liegt im Blockadeauftrag im System.
+        fleets.list[1].system = away;
+        fleets.list[0].system = target;
+        fleets.list[0].stance = Stance::Blockade;
+        assert!(blockaded(&mut fleets));
+
+        // Steht der Angreifer im Gefecht oder sammelt er sich, ist das System offen.
+        fleets.list[0].in_battle = true;
+        assert!(!blockaded(&mut fleets));
+        fleets.list[0].in_battle = false;
+        fleets.list[0].regroup_until = Some(40);
+        assert!(!blockaded(&mut fleets));
+        fleets.list[0].regroup_until = None;
+        assert!(blockaded(&mut fleets));
+
+        // Ein Verteidiger im Orbit verhindert die Sperre, auch wenn er gerade kämpft;
+        // einer, der sich nur sammelt, hält den Orbit nicht.
+        fleets.list[1].system = target;
+        assert!(!blockaded(&mut fleets));
+        fleets.list[1].in_battle = true;
+        assert!(!blockaded(&mut fleets));
+        fleets.list[1].in_battle = false;
+        fleets.list[1].regroup_until = Some(40);
+        assert!(blockaded(&mut fleets));
+    }
+
+    #[test]
+    fn a_fleet_remembers_the_system_it_came_from() {
+        let (data, galaxy, _, mut fleets) = setup();
+        let home = fleets.list[0].system;
+        assert_eq!(fleets.list[0].came_from, None);
+        let first = galaxy.neighbors(home)[0].system;
+        order_move(&galaxy, &mut fleets, PolityId(0), FleetId(0), first).unwrap();
+        travel(&galaxy, &mut fleets, &data, FleetId(0));
+        assert_eq!(fleets.list[0].came_from, Some(home));
+        // Zurück: Jetzt kommt sie aus dem Nachbarsystem.
+        order_move(&galaxy, &mut fleets, PolityId(0), FleetId(0), home).unwrap();
+        travel(&galaxy, &mut fleets, &data, FleetId(0));
+        assert_eq!(fleets.list[0].came_from, Some(first));
+        // Wer im Gefecht steht, marschiert nicht und nimmt keinen Marschbefehl an.
+        fleets.list[0].in_battle = true;
+        let error = order_move(&galaxy, &mut fleets, PolityId(0), FleetId(0), first).unwrap_err();
+        assert!(error.contains("Rückzug"), "{error}");
+        assert!(fleets.list[0].route.is_empty());
     }
 }

@@ -6,18 +6,22 @@
 //! Schiffe entstehen in Werften aus echten Bauteilen vom Markt, fassen Munition und
 //! Treibstoff nach, wo ihre Gemeinschaft zu Hause ist, und kosten jeden Monat Sold.
 //!
-//! Gefechte löst vorläufig noch die grobe Tagesregel in `skirmish` auf; der taktische
-//! Rechner aus [`crate::battle`] ersetzt sie.
+//! Treffen Flotten verfeindeter Gemeinschaften in einem System aufeinander, rechnet der
+//! taktische Rechner aus [`crate::battle`] das Gefecht Takt für Takt; `battles` stellt es
+//! auf und schreibt das Ergebnis in die Flotten zurück.
 
+mod battles;
 mod movement;
 mod plugin;
-mod skirmish;
 mod supply;
 mod yard;
 
+pub use battles::{
+    BattlePause, BattleReport, Battles, Debris, SideReport, advance_battles, combat_modifiers,
+    crew_morale, open_battles, order_retreat, relay_orders, retreat_target,
+};
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
-pub use skirmish::resolve_skirmishes;
 pub use supply::{monthly_upkeep, pay_upkeep, repair_fleets, resupply_fleets};
 pub use yard::{
     BuildOrder, advance_yards, arms_capital, cancel_order, design_buildable, order_ship, yard_slots,
@@ -27,7 +31,7 @@ use crate::battle::{Doctrine, Formation, ShipSpec};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
-use crate::ids::{FleetId, PlanetId, PolityId, ShipId, SystemId};
+use crate::ids::{BattleId, FleetId, PlanetId, PolityId, ShipId, SystemId};
 use crate::polity::Polities;
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
@@ -164,6 +168,16 @@ pub fn combat_value(data: &GameData, ship: &Ship) -> f64 {
     body * ship.condition(data) as f64 + craft * fighters as f64
 }
 
+/// Bauwert eines Schiffs in Credits, wie es dasteht: das Schiff selbst und die Bordjäger,
+/// die es noch führt. Der Zustand zählt nicht. Maß für Verluste im Gefecht.
+pub fn material_value(data: &GameData, ship: &Ship) -> f64 {
+    let (body, craft) = value_parts(data, ship.design);
+    let fighters = ship
+        .fighters
+        .min(data.designs[ship.design as usize].stats.fighters);
+    body + craft * fighters as f64
+}
+
 /// Stärke einer Flotte: Kampfwert ihrer Schiffe, geeicht an der Startflotte
 /// (`fleets.start_strength`).
 pub fn fleet_strength(data: &GameData, fleet: &Fleet) -> f32 {
@@ -202,12 +216,35 @@ pub struct Fleet {
     pub formation: Formation,
     #[serde(default)]
     pub doctrine: Doctrine,
+    /// Gefecht, in dem die Flotte steht. `in_battle` sagt dasselbe als Wahrheitswert.
+    #[serde(default)]
+    pub battle: Option<BattleId>,
+    /// System, aus dem die Flotte in ihr jetziges kam. Dorthin weicht sie aus, wenn sie
+    /// ein Gefecht verliert.
+    #[serde(default)]
+    pub came_from: Option<SystemId>,
+    /// Tag, an dem die Flotte nach dem Abzug aus einem Gefecht wieder einsatzbereit ist.
+    /// Bis dahin sammelt sie sich: Sie beginnt kein Gefecht, tritt keinem bei und zählt
+    /// weder für Blockade noch für Kaperfahrt oder Geleitschutz.
+    #[serde(default)]
+    pub regroup_until: Option<u64>,
 }
 
 impl Fleet {
     /// Steht die Flotte in einem System (und ist nicht auf einer Sprungroute)?
     pub fn is_docked(&self) -> bool {
         self.alive && (self.route.is_empty() || self.progress <= 0.0)
+    }
+
+    /// Sammelt sich die Flotte nach dem Abzug aus einem Gefecht?
+    pub fn is_regrouping(&self) -> bool {
+        self.regroup_until.is_some()
+    }
+
+    /// Einsatzbereit: weder im Gefecht noch beim Sammeln. Nur solche Flotten beginnen
+    /// Gefechte, treten ihnen bei, blockieren, kapern oder geben Geleit.
+    pub fn is_ready(&self) -> bool {
+        self.alive && !self.in_battle && !self.is_regrouping()
     }
 
     /// Bauwert aller Schiffe in Credits, ohne Rücksicht auf ihren Zustand.
@@ -384,6 +421,9 @@ impl Fleets {
             ships: Vec::new(),
             formation: Formation::default(),
             doctrine: Doctrine::default(),
+            battle: None,
+            came_from: None,
+            regroup_until: None,
         });
         id
     }
@@ -398,6 +438,8 @@ impl Fleets {
             if fleet.ships.is_empty() {
                 fleet.alive = false;
                 fleet.in_battle = false;
+                fleet.battle = None;
+                fleet.regroup_until = None;
                 fleet.route.clear();
                 fleet.progress = 0.0;
                 fleet.strength = 0.0;
@@ -418,7 +460,8 @@ impl Fleets {
         let mut raiders = 0.0;
         let mut escorts = 0.0;
         let mut raider = None;
-        for fleet in self.docked_in(system) {
+        // Wer kämpft oder sich sammelt, kapert nicht und gibt kein Geleit.
+        for fleet in self.docked_in(system).filter(|fleet| fleet.is_ready()) {
             if fleet.stance == Stance::Raid && diplomacy.at_war(fleet.owner, victim) {
                 raiders += fleet.strength;
                 raider.get_or_insert(fleet.owner);
@@ -543,6 +586,12 @@ pub fn order_move(
         return Err("Zielsystem unbekannt".into());
     }
     let fleet = own_fleet(fleets, polity, fleet)?;
+    if fleet.in_battle {
+        return Err(format!(
+            "{} steht im Gefecht; erst den Rückzug befehlen",
+            fleet.name
+        ));
+    }
     if !fleet.is_docked() {
         // Unterwegs gilt der neue Befehl ab dem nächsten System.
         let next = fleet.route[0];
@@ -630,7 +679,11 @@ pub fn merge_fleets(
         return Err("beide Flotten müssen im selben System liegen".into());
     }
     let ships = std::mem::take(&mut source.ships);
-    fleets.list[into.index()].ships.extend(ships);
+    let regrouping = source.regroup_until;
+    let target = &mut fleets.list[into.index()];
+    target.ships.extend(ships);
+    // Die Sammelfrist geht mit: Vereinigt ist die Flotte erst bereit, wenn es beide wären.
+    target.regroup_until = target.regroup_until.max(regrouping);
     fleets.refresh(data);
     Ok(())
 }
@@ -661,11 +714,13 @@ pub fn split_fleet(
     if ships.len() >= parent.ships.len() {
         return Err("mindestens ein Schiff muss in der Flotte bleiben".into());
     }
-    let (system, stance, formation, doctrine) = (
+    let (system, stance, formation, doctrine, came_from, regroup_until) = (
         parent.system,
         parent.stance,
         parent.formation,
         parent.doctrine,
+        parent.came_from,
+        parent.regroup_until,
     );
     // Die Schiffe behalten ihre Reihenfolge aus der alten Flotte.
     let (taken, kept): (Vec<Ship>, Vec<Ship>) = std::mem::take(&mut parent.ships)
@@ -678,6 +733,9 @@ pub fn split_fleet(
     created.stance = stance;
     created.formation = formation;
     created.doctrine = doctrine;
+    // Auch Herkunft und Sammelfrist gehen mit: Teilen macht keine Flotte kampfbereit.
+    created.came_from = came_from;
+    created.regroup_until = regroup_until;
     fleets.refresh(data);
     Ok(id)
 }
@@ -979,10 +1037,77 @@ mod tests {
                    route:[],progress:0.0,alive:true,in_battle:false)],blockaded:[])";
         let fleets: Fleets = ron::from_str(old).expect("altes Format lesbar");
         assert!(fleets.list[0].ships.is_empty() && fleets.orders.is_empty());
-        // Als Zustand einer Partie taugt das nicht: Deshalb lehnt `SaveGame` Format 1 ab.
+        // Auch die Felder der Gefechte fehlen dort und nehmen ihre Vorgabewerte an.
+        assert!(fleets.list[0].battle.is_none() && fleets.list[0].regroup_until.is_none());
+        // Als Zustand einer Partie taugt das nicht: Deshalb lehnt `SaveGame` die alten
+        // Formate ab.
         let data = GameData::load_workspace().unwrap();
         assert!(fleets.find_anomaly(&data).is_some());
-        assert_eq!(crate::state::SAVE_FORMAT, 2);
+        let mut save = crate::state::SaveGame {
+            format: 1,
+            data_hash: data.hash,
+            state: crate::state::SimState::default(),
+        };
+        for format in 1..crate::state::SAVE_FORMAT {
+            save.format = format;
+            let text = save.to_ron().unwrap();
+            assert!(crate::state::SaveGame::from_ron(&text).is_err(), "{format}");
+        }
+        save.format = crate::state::SAVE_FORMAT;
+        assert!(crate::state::SaveGame::from_ron(&save.to_ron().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn the_regroup_period_survives_splitting_and_merging() {
+        let (data, _, polities, mut fleets) = setup();
+        let me = PolityId(0);
+        fleets.list[0].regroup_until = Some(50);
+        fleets.list[0].came_from = Some(SystemId(3));
+        let part: Vec<ShipId> = fleets.list[0].ships[..2]
+            .iter()
+            .map(|ship| ship.id)
+            .collect();
+        // Teilen macht keine Flotte kampfbereit: Auch der abgelöste Teil sammelt sich noch
+        // und weiß, woher er kam.
+        let second = split_fleet(&data, &polities, &mut fleets, me, FleetId(0), &part).unwrap();
+        let detached = &fleets.list[second.index()];
+        assert_eq!(detached.regroup_until, Some(50));
+        assert_eq!(detached.came_from, Some(SystemId(3)));
+        assert!(!detached.is_ready() && detached.is_regrouping());
+        // Vereinigen ebenso wenig: Die längere Sammelfrist gilt für die ganze Flotte.
+        fleets.list[0].regroup_until = Some(20);
+        merge_fleets(&data, &mut fleets, me, second, FleetId(0)).unwrap();
+        assert_eq!(fleets.list[0].regroup_until, Some(50));
+        let third = split_fleet(&data, &polities, &mut fleets, me, FleetId(0), &part).unwrap();
+        fleets.list[0].regroup_until = None;
+        assert!(fleets.list[0].is_ready());
+        merge_fleets(&data, &mut fleets, me, third, FleetId(0)).unwrap();
+        assert_eq!(fleets.list[0].regroup_until, Some(50));
+        // Die aufgelöste Flotte trägt keine Frist mehr.
+        assert_eq!(fleets.list[third.index()].regroup_until, None);
+        assert_eq!(fleets.find_anomaly(&data), None);
+    }
+
+    #[test]
+    fn only_ready_fleets_raid_or_escort() {
+        let (_, _, _, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let system = fleets.list[1].system;
+        fleets.list[0].system = system;
+        fleets.list[0].stance = Stance::Raid;
+        fleets.list[1].stance = Stance::Escort;
+        let (raider, escort) = (fleets.list[0].strength, fleets.list[1].strength);
+        let pressure = |fleets: &Fleets| fleets.raid_pressure(&diplomacy, system, PolityId(1));
+        assert_eq!(pressure(&fleets), (raider, escort, Some(PolityId(0))));
+        // Im Gefecht kapert niemand; wer sich sammelt, gibt kein Geleit.
+        fleets.list[0].in_battle = true;
+        assert_eq!(pressure(&fleets), (0.0, escort, None));
+        fleets.list[0].in_battle = false;
+        fleets.list[1].regroup_until = Some(12);
+        assert_eq!(pressure(&fleets), (raider, 0.0, Some(PolityId(0))));
+        assert!(!fleets.list[1].is_ready() && fleets.list[1].is_regrouping());
+        assert!(fleets.list[0].is_ready());
     }
 
     #[test]
