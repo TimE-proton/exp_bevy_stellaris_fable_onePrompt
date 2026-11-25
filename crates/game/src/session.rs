@@ -67,6 +67,10 @@ impl Plugin for SessionPlugin {
 
 /// `--seed` und `--load` überspringen das Hauptmenü, aber nur beim Programmstart.
 fn start_from_args(mut args: ResMut<Args>, mut requests: MessageWriter<SessionRequest>) {
+    if args.practice {
+        // Mit `--practice` gehört der Seed der Gefechtsübung, nicht einer Partie.
+        return;
+    }
     if let Some(path) = args.load.take() {
         requests.write(SessionRequest::Load(path));
     } else if let Some(seed) = args.seed.take() {

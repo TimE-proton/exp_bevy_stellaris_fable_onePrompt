@@ -1,6 +1,7 @@
 //! KONFLUENZ – Bevy-App. Zeigt den Simulationskern an und schickt ihm Befehle.
 
 mod args;
+mod battle_view;
 mod history;
 mod map;
 mod selftest;
@@ -57,6 +58,7 @@ fn main() -> AppExit {
             map::GalaxyViewPlugin,
             traffic::TrafficPlugin,
             history::HistoryPlugin,
+            battle_view::BattleViewPlugin,
             ui::UiPlugin,
             selftest::SelftestPlugin,
         ))

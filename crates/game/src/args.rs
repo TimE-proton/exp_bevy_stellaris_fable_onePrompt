@@ -10,9 +10,15 @@ Aufruf: game [Optionen]
 
   --seed N            Sofort eine neue Partie mit diesem Seed starten (ohne Hauptmenü)
   --load DATEI        Sofort diesen Spielstand laden
+  --practice          Sofort eine Gefechtsübung starten; --seed wählt dann ihren Verlauf
+  --fleet-a LISTE     Flotte des blauen Verbands, z. B. speer:4,waechter:6
+  --fleet-b LISTE     Flotte des roten Verbands
+  --lineup            Mit --practice: je ein Schiff jeder Klasse nebeneinander zeigen
   --data-dir PFAD     Verzeichnis der RON-Spieldaten (Standard: assets/data)
-  --selftest [N]      Selbsttest: Partie starten, N Frames laufen lassen (Standard 240), beenden
-  --screenshot DATEI  Im Selbsttest kurz vor Ende ein Bildschirmfoto speichern
+  --selftest [N]      Selbsttest: Partie (oder mit --practice eine Gefechtsübung) starten,
+                      höchstens N Frames laufen lassen (Standard 240), beenden
+  --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
+                      nummeriert sie (DATEI_1.png, DATEI_2.png, …)
   --help              Diese Hilfe";
 
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
@@ -22,6 +28,11 @@ pub struct Args {
     pub data_dir: Option<PathBuf>,
     pub selftest: Option<u32>,
     pub screenshot: Option<PathBuf>,
+    /// Gefechtsübung statt Partie.
+    pub practice: bool,
+    pub fleet_a: Option<String>,
+    pub fleet_b: Option<String>,
+    pub lineup: bool,
     pub help: bool,
 }
 
@@ -42,6 +53,10 @@ impl Args {
                 "--load" => parsed.load = Some(PathBuf::from(value("--load")?)),
                 "--data-dir" => parsed.data_dir = Some(PathBuf::from(value("--data-dir")?)),
                 "--screenshot" => parsed.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+                "--practice" => parsed.practice = true,
+                "--fleet-a" => parsed.fleet_a = Some(value("--fleet-a")?),
+                "--fleet-b" => parsed.fleet_b = Some(value("--fleet-b")?),
+                "--lineup" => parsed.lineup = true,
                 "--selftest" => {
                     let frames = match args.peek() {
                         Some(next) if !next.starts_with("--") => {
@@ -57,8 +72,34 @@ impl Args {
                 other => return Err(format!("Unbekannte Option `{other}`")),
             }
         }
+        if !parsed.practice {
+            for (given, name) in [
+                (parsed.fleet_a.is_some(), "--fleet-a"),
+                (parsed.fleet_b.is_some(), "--fleet-b"),
+                (parsed.lineup, "--lineup"),
+            ] {
+                if given {
+                    return Err(format!("{name} gilt nur zusammen mit --practice"));
+                }
+            }
+        } else if parsed.load.is_some() {
+            return Err("--practice und --load schließen einander aus".into());
+        }
         Ok(parsed)
     }
+}
+
+/// Dateiname eines nummerierten Bildschirmfotos: aus `bild.png` wird `bild_2.png`.
+pub fn numbered(path: &std::path::Path, number: u32) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bild".into());
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "png".into());
+    path.with_file_name(format!("{stem}_{number}.{extension}"))
 }
 
 #[cfg(test)]
@@ -76,6 +117,7 @@ mod tests {
         assert_eq!(args.data_dir, Some(PathBuf::from("d")));
         assert_eq!(args.selftest, Some(30));
         assert_eq!(args.screenshot, Some(PathBuf::from("s.png")));
+        assert!(!args.practice);
     }
 
     #[test]
@@ -89,5 +131,33 @@ mod tests {
         assert!(parse("--bogus").is_err());
         assert!(parse("--seed").is_err());
         assert!(parse("--seed x").is_err());
+    }
+
+    #[test]
+    fn parses_practice_options() {
+        let args = parse("--practice --fleet-a speer:4,waechter:6 --fleet-b bastion:2 --seed 9")
+            .unwrap();
+        assert!(args.practice);
+        assert_eq!(args.fleet_a.as_deref(), Some("speer:4,waechter:6"));
+        assert_eq!(args.fleet_b.as_deref(), Some("bastion:2"));
+        assert_eq!(args.seed, Some(9));
+        assert!(parse("--practice --lineup --selftest").unwrap().lineup);
+        // Flottenlisten ohne Übung sind ein Versehen und werden gemeldet.
+        assert!(parse("--fleet-a speer:4").is_err());
+        assert!(parse("--lineup").is_err());
+        assert!(parse("--fleet-b").is_err());
+        assert!(parse("--practice --load spiel.ron").is_err());
+    }
+
+    #[test]
+    fn numbers_screenshot_files() {
+        assert_eq!(
+            numbered(std::path::Path::new("/tmp/x/gefecht.png"), 2),
+            PathBuf::from("/tmp/x/gefecht_2.png")
+        );
+        assert_eq!(
+            numbered(std::path::Path::new("bild"), 1),
+            PathBuf::from("bild_1.png")
+        );
     }
 }

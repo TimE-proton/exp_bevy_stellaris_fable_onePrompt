@@ -51,8 +51,9 @@ impl Plugin for TimeControlPlugin {
             .add_systems(
                 Update,
                 (
+                    // In der Partie und in der Gefechtsübung dieselben Tasten.
                     keyboard
-                        .run_if(in_state(AppState::InGame))
+                        .run_if(in_state(AppState::InGame).or_else(in_state(AppState::Practice)))
                         .run_if(not(egui_wants_any_keyboard_input)),
                     apply_speed,
                 )

@@ -11,6 +11,8 @@ pub enum AppState {
     Loading,
     MainMenu,
     InGame,
+    /// Gefechtsübung: ein einzelnes Gefecht außerhalb einer Partie.
+    Practice,
     /// Die Partie ist entschieden (ab Meilenstein 6 erreichbar).
     #[allow(dead_code)]
     GameOver,

@@ -4,11 +4,13 @@
 mod economy;
 mod finance;
 mod fleets;
-mod format;
-mod panels;
+pub(crate) mod format;
+pub(crate) mod panels;
 
 pub use panels::{SimRefs, UiAction};
 
+use crate::battle_view::BattleViewShown;
+use crate::battle_view::practice::{PracticeSetup, StartPractice};
 use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
 use crate::session::{Notice, SessionRequest, quicksave_path};
@@ -46,6 +48,8 @@ pub struct UiState {
     pub seed_text: String,
     pub menu_open: bool,
     pub help_open: bool,
+    /// Aufstellungsdialog der Gefechtsübung im Hauptmenü.
+    pub practice_open: bool,
     pub tab: LeftTab,
     pub flows_open: bool,
     pub chains_open: bool,
@@ -70,6 +74,7 @@ impl Default for UiState {
             seed_text: "1".into(),
             menu_open: false,
             help_open: false,
+            practice_open: false,
             tab: LeftTab::default(),
             flows_open: false,
             chains_open: false,
@@ -101,6 +106,14 @@ pub struct SimParams<'w> {
     logistics: Res<'w, Logistics>,
     fleets: Res<'w, Fleets>,
     diplomacy: Res<'w, Diplomacy>,
+}
+
+/// Was nur das Hauptmenü und die Schlachtansicht brauchen.
+#[derive(SystemParam)]
+pub struct PracticeParams<'w> {
+    setup: ResMut<'w, PracticeSetup>,
+    start: MessageWriter<'w, StartPractice>,
+    battle_view: Res<'w, BattleViewShown>,
 }
 
 pub struct UiPlugin;
@@ -151,6 +164,7 @@ fn draw_ui(
     mut session: MessageWriter<SessionRequest>,
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
+    mut practice: PracticeParams,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -168,6 +182,11 @@ fn draw_ui(
     );
     let mut actions = Vec::new();
     match (app_state.get(), &sim) {
+        (AppState::InGame, _) if practice.battle_view.0 => {
+            // In der Schlachtansicht zeichnet diese ihre eigenen Tafeln; von der Partie
+            // bleibt nur das Menü.
+            panels::battle_menu(&mut root, &mut ui_state, &mut actions);
+        }
         (AppState::InGame | AppState::GameOver, Some(sim)) => {
             let refs = SimRefs {
                 data: &data,
@@ -199,6 +218,14 @@ fn draw_ui(
                 quicksave_path().is_file(),
                 &mut actions,
             );
+            if let Some(config) = crate::battle_view::practice::setup_dialog(
+                root.ctx(),
+                &data,
+                &mut practice.setup,
+                &mut ui_state.practice_open,
+            ) {
+                practice.start.write(StartPractice(config));
+            }
         }
         _ => {}
     }

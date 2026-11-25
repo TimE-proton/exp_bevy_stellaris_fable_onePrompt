@@ -115,6 +115,13 @@ pub fn main_menu(
                 {
                     actions.push(UiAction::Session(SessionRequest::Load(quicksave_path())));
                 }
+                if ui
+                    .button("Gefechtsübung")
+                    .on_hover_text("Ein einzelnes Gefecht mit frei gewählten Flotten, in 3D.")
+                    .clicked()
+                {
+                    state.practice_open = true;
+                }
                 if ui.button("Beenden").clicked() {
                     actions.push(UiAction::Quit);
                 }
@@ -168,7 +175,14 @@ pub fn in_game(
         pause_menu(root.ctx(), state, actions);
     }
     if state.help_open {
-        help_window(root.ctx(), state);
+        help_window(root.ctx(), &mut state.help_open, false);
+    }
+}
+
+/// Was von der Oberfläche der Partie bleibt, solange die Schlachtansicht gezeigt wird.
+pub fn battle_menu(root: &mut egui::Ui, state: &mut UiState, actions: &mut Vec<UiAction>) {
+    if state.menu_open {
+        pause_menu(root.ctx(), state, actions);
     }
 }
 
@@ -684,38 +698,68 @@ fn pause_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiActi
         });
 }
 
-fn help_window(ctx: &egui::Context, state: &mut UiState) {
-    let mut open = state.help_open;
+/// Tasten der Galaxiekarte.
+const MAP_KEYS: [(&str, &str); 9] = [
+    ("Linksklick", "System wählen"),
+    ("Rechte/mittlere Maustaste ziehen", "Karte verschieben"),
+    ("W A S D / Pfeile", "Karte verschieben"),
+    ("Mausrad", "Zoomen"),
+    ("Leertaste", "Pause"),
+    ("1 – 6", "Geschwindigkeit ½× bis 25×"),
+    ("+ / −", "schneller / langsamer"),
+    ("F5 / F9", "Schnellspeichern / Schnellladen"),
+    ("Esc", "Menü"),
+];
+
+/// Tasten der Schlachtansicht.
+pub const BATTLE_KEYS: [(&str, &str); 16] = [
+    ("W A S D", "Kamera vor, zurück, seitwärts"),
+    ("E / Q", "Kamera steigen / sinken"),
+    ("Rechte Maustaste halten", "Umsehen"),
+    ("M", "Umsehen ein- und ausschalten, ohne die Maustaste zu halten"),
+    ("Umschalt links", "schneller fliegen"),
+    ("Mausrad", "Fluggeschwindigkeit ändern"),
+    ("Ziffernblock 7 / 1 / 3", "Blick von oben / von vorn / von der Seite (mit Strg: Gegenseite)"),
+    ("U", "Übersicht über das ganze Feld"),
+    ("G", "Zum Schwerpunkt des Gefechts"),
+    ("Linksklick", "Schiff wählen (ins Leere: Auswahl aufheben)"),
+    ("F", "Gewähltes Schiff heranholen (ohne Auswahl: Gefechtsschwerpunkt)"),
+    ("V", "Gewähltes Schiff verfolgen"),
+    ("T", "Taktische Einblendung: Flottenanker, Reichweiten, Ziellinie"),
+    ("N", "Namen an nahen Schiffen"),
+    ("Leertaste, 1 – 6, + / −", "Pause und Geschwindigkeit wie in der Partie"),
+    ("Esc", "Gefechtsübung verlassen (in der Partie: Menü)"),
+];
+
+/// Hilfefenster. In der Schlachtansicht (`battle`) zeigt es deren Bedienung.
+pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
+    let keys: &[(&str, &str)] = if battle { &BATTLE_KEYS } else { &MAP_KEYS };
     egui::Window::new("Hilfe")
-        .open(&mut open)
+        .open(open)
         .resizable(false)
         .show(ctx, |ui| {
             egui::Grid::new("hilfe")
                 .num_columns(2)
                 .striped(true)
                 .show(ui, |ui| {
-                    for (keys, what) in [
-                        ("Linksklick", "System wählen"),
-                        ("Rechte/mittlere Maustaste ziehen", "Karte verschieben"),
-                        ("W A S D / Pfeile", "Karte verschieben"),
-                        ("Mausrad", "Zoomen"),
-                        ("Leertaste", "Pause"),
-                        ("1 – 6", "Geschwindigkeit ½× bis 25×"),
-                        ("+ / −", "schneller / langsamer"),
-                        ("F5 / F9", "Schnellspeichern / Schnellladen"),
-                        ("Esc", "Menü"),
-                    ] {
-                        ui.label(RichText::new(keys).strong());
-                        ui.label(what);
+                    for (keys, what) in keys {
+                        ui.label(RichText::new(*keys).strong());
+                        ui.label(*what);
                         ui.end_row();
                     }
                 });
             ui.add_space(6.0);
-            ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
-        ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
-        ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
+            if battle {
+                ui.label("Kleine Markierungen stehen für Schiffe, die aus der Ferne kaum zu sehen sind:");
+                ui.label("Dreieck = Jäger und Korvette, Raute = Fregatte, Pfeil = Kreuzer,");
+                ui.label("Sechseck = Schlachtschiff, Rechteck = Träger. Hohl = auf dem Rückzug, grau = treibt.");
+                ui.label("Ein Klick auf ein Schiff zeigt Rumpf, Schild, Panzerung und jedes Modul.");
+            } else {
+                ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
+                ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
+                ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
+            }
         });
-    state.help_open = open;
 }
 
 pub fn notice(root: &mut egui::Ui, notice: &Notice) {
