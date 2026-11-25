@@ -92,6 +92,9 @@ pub struct ViewFrame {
     /// Ort (Welt) und Kurs jedes Schiffs, Index wie im Gefecht.
     pub poses: Vec<(Vec3, f32)>,
     pub projector: camera::Projector,
+    /// Fluggeschwindigkeit der Kamera als Vielfaches der Grundgeschwindigkeit (das Mausrad
+    /// ändert sie; die Kopfleiste zeigt sie an).
+    pub fly_speed: f32,
 }
 
 impl ViewFrame {

@@ -272,30 +272,53 @@ fn busy_exchange(battle: &Battle, feed: &BattleFeed, relaxed: bool) -> Option<(V
         .map(|(_, from, to, shooter)| (from, to, shooter))
 }
 
+/// Ein Wrack mit seiner Umgebung, wie das Foto des Trümmerfelds sie braucht.
+#[derive(Clone, Copy, Debug)]
+struct WreckSite {
+    position: Vec3,
+    /// Abstand, aus dem das Wrack und seine nächsten Nachbarn ins Bild passen.
+    reach: f32,
+    /// Sekunden seit der Zerstörung.
+    age: f32,
+}
+
 /// Das Wrack, um das herum am meisten liegt; bevorzugt ein auseinandergebrochenes
-/// Großkampfschiff, dessen Hälften schon ein Stück getrieben sind. Liefert Ort, Radius und
-/// Alter des Wracks.
-fn wreck_cluster(battle: &Battle) -> Option<(Vec3, f32, f32)> {
+/// Großkampfschiff, dessen Hälften schon ein Stück getrieben sind.
+fn wreck_cluster(battle: &Battle) -> Option<WreckSite> {
     battle
         .wrecks
         .iter()
         .map(|wreck| {
-            let neighbours = battle
+            let mut distances: Vec<f32> = battle
                 .wrecks
                 .iter()
-                .filter(|other| other.pos.distance(wreck.pos) < 320.0)
-                .count();
-            let mut score = neighbours.min(15) as f32;
+                .map(|other| other.pos.distance(wreck.pos))
+                .filter(|distance| *distance > 0.0 && *distance < 320.0)
+                .collect();
+            distances.sort_by(f32::total_cmp);
+            let mut score = distances.len().min(15) as f32;
             if wreck.class.is_capital() {
                 score += 40.0;
                 if wreck.age > 3.0 {
                     score += 20.0;
                 }
             }
-            (score, to_world(wreck.pos), wreck.radius, wreck.age)
+            // So weit zurück, dass auch die drei nächsten Wracks zu sehen sind, aber nicht so
+            // weit, dass das Wrack selbst zum Punkt wird.
+            let company = distances
+                .get(2)
+                .or(distances.last())
+                .copied()
+                .unwrap_or(0.0);
+            let site = WreckSite {
+                position: to_world(wreck.pos),
+                reach: (wreck.radius * 6.0).max(company).clamp(45.0, 260.0),
+                age: wreck.age,
+            };
+            (score, site)
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, position, radius, age)| (position, radius, age))
+        .map(|(_, site)| site)
 }
 
 fn drive_practice(
@@ -370,8 +393,10 @@ fn drive_practice(
             }
         }
         Phase::Overview => {
-            // Einige Sekunden nach dem ersten Schuss, wenn Geschosse unterwegs sind.
-            let ripe = since_contact.is_some_and(|time| time >= 8.0) && battle.shots.len() >= 6;
+            // Einige Sekunden nach dem ersten Schuss, wenn nicht nur die Vorhut feuert: Die
+            // Zahl der Geschosse im Flug muss zur Größe der Flotten passen.
+            let ripe = since_contact.is_some_and(|time| time >= 8.0)
+                && battle.shots.len() >= (in_play / 12).max(6);
             if ripe
                 || since_contact.is_some_and(|time| time >= 25.0)
                 || battle.finished
@@ -427,19 +452,19 @@ fn drive_practice(
             let cluster = wreck_cluster(battle);
             // Ein eben erst zerbrochenes Schiff glüht noch und liegt eng beisammen; ein paar
             // Sekunden später ist daraus ein Trümmerfeld geworden.
-            let fresh = cluster.is_some_and(|(_, _, age)| age < 5.0)
-                && battle.time - test.phase_since < 30.0;
+            let fresh =
+                cluster.is_some_and(|site| site.age < 5.0) && battle.time - test.phase_since < 30.0;
             let ready = enough && late && !fresh;
             if ready || battle.finished || out_of_time {
                 selected.0 = None;
                 // Ist das Gefecht schon vorbei, verdeckt sonst die Bilanz das Trümmerfeld.
                 options.summary = false;
                 match cluster {
-                    Some((position, radius, _)) => {
-                        let reach = (radius * 6.0).clamp(45.0, 380.0);
+                    Some(site) => {
                         camera.write(CameraRequest::Place {
-                            eye: position + Vec3::new(-0.55, 0.6, 1.0).normalize() * reach,
-                            target: position,
+                            eye: site.position
+                                + Vec3::new(-0.55, 0.6, 1.0).normalize() * site.reach,
+                            target: site.position,
                         });
                     }
                     None => {

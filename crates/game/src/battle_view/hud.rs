@@ -165,31 +165,20 @@ pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudActi
     let Some(battle) = refs.feed.battle() else {
         return;
     };
-    let t0 = std::time::Instant::now();
     markers(root.ctx(), refs, battle);
-    let t1 = std::time::Instant::now();
     egui::Panel::top("gefechtsleiste").show(root, |ui| top_bar(ui, refs, battle, actions));
-    let t2 = std::time::Instant::now();
     let ctx = root.ctx().clone();
     for side in 0..battle.combatants.len() {
         side_panel(&ctx, refs, battle, side, actions);
     }
-    let t3 = std::time::Instant::now();
     if let Some(ship) = refs
         .selected
         .and_then(|index| battle.ships.get(index as usize).map(|ship| (index, ship)))
     {
         inspector(&ctx, refs, battle, ship.0, ship.1, actions);
     }
-    let t4 = std::time::Instant::now();
     if battle.finished && refs.options.summary {
         summary(&ctx, refs, battle, actions);
-    }
-    let t5 = std::time::Instant::now();
-    let parts = [(t1 - t0), (t2 - t1), (t3 - t2), (t4 - t3), (t5 - t4)];
-    let total = t5 - t0;
-    if total.as_micros() > 2500 {
-        eprintln!("HUDSPIKE tick={} total={} markers={} top={} sides={} inspector={} summary={}", battle.tick, total.as_micros(), parts[0].as_micros(), parts[1].as_micros(), parts[2].as_micros(), parts[3].as_micros(), parts[4].as_micros());
     }
 }
 
@@ -287,6 +276,13 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
             {
                 actions.push(HudAction::Camera(CameraRequest::Overview));
             }
+            // Das Mausrad ändert die Fluggeschwindigkeit; ohne diese Anzeige sähe man davon
+            // nichts.
+            ui.label(
+                RichText::new(format!("Flug {}×", decimal(refs.frame.fly_speed as f64, 1)))
+                    .color(MUTED),
+            )
+            .on_hover_text("Fluggeschwindigkeit der Kamera. Das Mausrad ändert sie.");
         });
     });
 }
@@ -444,11 +440,19 @@ fn inspector(
 ) {
     let design = &refs.data.designs[ship.design as usize];
     let side_color = color32(refs.feed.side_color(ship.side as usize));
+    // Die Tafel steht unten auf der Seite, auf der nicht die (höhere) Lagetafel des Spielers
+    // mit ihren Befehlen steht; in niedrigen Fenstern schrumpft die Modulliste.
+    let (anchor, offset) = if refs.feed.info.player_side == Some(1) {
+        (Align2::LEFT_BOTTOM, [8.0, -8.0])
+    } else {
+        (Align2::RIGHT_BOTTOM, [-8.0, -8.0])
+    };
+    let list_height = (ctx.content_rect().height() - 710.0).clamp(60.0, 190.0);
     egui::Window::new("schiff")
         .title_bar(false)
         .resizable(false)
         .default_height(640.0)
-        .anchor(Align2::LEFT_BOTTOM, [8.0, -8.0])
+        .anchor(anchor, offset)
         .show(ctx, |ui| {
             ui.set_width(330.0);
             ui.horizontal(|ui| {
@@ -571,7 +575,7 @@ fn inspector(
 
             ui.label(RichText::new("Module").strong());
             egui::ScrollArea::vertical()
-                .max_height(190.0)
+                .max_height(list_height)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     egui::Grid::new("module")
@@ -983,6 +987,7 @@ mod tests {
                 })
                 .collect(),
             projector: Projector::new(camera, super::super::camera::FOV, Vec2::new(1600.0, 900.0)),
+            fly_speed: 1.0,
         }
     }
 

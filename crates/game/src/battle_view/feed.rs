@@ -320,8 +320,10 @@ fn carry_lives<T>(
     lives.extend(new[kept..].iter().map(&ttl));
 }
 
-/// Kopiert den sichtbaren Zustand und verwendet dabei den vorhandenen Speicher wieder:
-/// Bei schnellem Vorlauf geschieht das viele Male je Frame.
+/// Kopiert den Zustand und verwendet dabei den vorhandenen Speicher wieder: Bei schnellem
+/// Vorlauf geschieht das viele Male je Frame. Jedes öffentliche Feld des Gefechts steht
+/// hier einzeln; ein Test vergleicht die Kopie über die Prüfsumme des Kerns mit dem
+/// Original und meldet, wenn eines fehlt.
 fn copy_state(held: &mut Battle, source: &Battle) {
     held.id = source.id;
     held.system = source.system;
@@ -502,6 +504,14 @@ mod tests {
                 assert_eq!(copy.hull, ship.hull);
                 assert_eq!(copy.modules, ship.modules);
             }
+            // Die Prüfsumme umfasst jedes Feld, das der Kern speichert. Kommt dort eines
+            // hinzu und fehlt es in `copy_state`, schlägt dieser Vergleich an.
+            assert_eq!(
+                sim::hash::hash_value(held),
+                sim::hash::hash_value(&battle),
+                "Kopie im Feed weicht in Takt {} vom Gefecht ab",
+                battle.tick
+            );
             for side in 0..2 {
                 assert_eq!(held.active_by_class(side), battle.active_by_class(side));
                 assert_eq!(

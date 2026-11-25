@@ -548,11 +548,13 @@ fn pick_on_click(
 fn update_projector(
     mut timings: ResMut<ViewTimings>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<&Transform, With<BattleCamera>>,
+    camera: Single<(&Transform, &FreeCameraState), With<BattleCamera>>,
     mut frame: ResMut<ViewFrame>,
 ) {
     let _span = timings.span(Part::Overlay);
-    frame.projector = Projector::new(&camera, FOV, window.size());
+    let (transform, flight) = *camera;
+    frame.projector = Projector::new(transform, FOV, window.size());
+    frame.fly_speed = flight.speed_multiplier;
 }
 
 #[cfg(test)]
@@ -761,6 +763,7 @@ mod tests {
                 .map(|ship| (to_world(ship.pos), ship.heading))
                 .collect(),
             projector: Projector::new(&view, FOV, Vec2::new(1600.0, 900.0)),
+            fly_speed: 1.0,
         };
         let mut world = World::new();
         world.insert_resource(data);

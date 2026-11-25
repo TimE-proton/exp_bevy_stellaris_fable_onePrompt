@@ -384,6 +384,7 @@ mod tests {
                 })
                 .collect(),
             projector: Default::default(),
+            fly_speed: 1.0,
         }
     }
 

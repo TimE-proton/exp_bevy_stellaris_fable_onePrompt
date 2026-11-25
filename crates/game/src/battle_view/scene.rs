@@ -229,7 +229,7 @@ impl SideKit {
             .collect();
         Self {
             classes,
-            glow: materials.add(additive(scaled(mix(side, white, 0.3), 3.2))),
+            glow: materials.add(additive(scaled(mix(side, white, 0.3), 2.6))),
             tracer: materials.add(glowing(scaled(mix(side, white, 0.4), 9.0))),
             missile: materials.add(glowing(scaled(mix(side, white, 0.55), 7.0))),
             beam_light: materials.add(glowing(scaled(mix(side, white, 0.15), 11.0))),

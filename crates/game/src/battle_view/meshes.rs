@@ -557,12 +557,12 @@ impl ClassModel {
             let center = Vec3::new(engine.at.x + 1.0, engine.at.y, engine.at.z);
             let section = |back: f32, scale: f32| {
                 let radius = engine.radius * scale;
-                ring(center - Vec3::X * (length * back), 6, radius, radius, 0.0)
+                ring(center - Vec3::X * (length * back), 8, radius, radius, 0.0)
             };
             mesh.append(&MeshData::loft_painted(&[
                 (section(1.0, 0.0), GLOW_COLD),
-                (section(0.4, 0.62), GLOW_WARM),
-                (section(0.0, 0.85), GLOW_HOT),
+                (section(0.45, 0.72), GLOW_WARM),
+                (section(0.0, 0.9), GLOW_HOT),
             ]));
         }
         mesh
