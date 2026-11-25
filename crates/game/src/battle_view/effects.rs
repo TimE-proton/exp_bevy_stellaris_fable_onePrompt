@@ -382,13 +382,28 @@ mod tests {
         }
     }
 
-    fn side_assets(materials: &mut Assets<StandardMaterial>, epoch: u32) -> SideAssets {
-        SideAssets {
+    /// Assets der Schlacht und zweier Parteien, ohne Fenster und Grafikkarte.
+    struct Stores {
+        assets: BattleAssets,
+        sides: SideAssets,
+        meshes: Assets<Mesh>,
+        materials: Assets<StandardMaterial>,
+    }
+
+    fn stores(epoch: u32) -> Stores {
+        let (assets, mut meshes, mut materials) = assets();
+        let sides = SideAssets {
             epoch: Some(epoch),
-            sides: vec![
-                SideMaterials::build((0.3, 0.6, 1.0), materials),
-                SideMaterials::build((1.0, 0.4, 0.3), materials),
-            ],
+            sides: [(0.3, 0.6, 1.0), (1.0, 0.4, 0.3)]
+                .into_iter()
+                .map(|color| SideMaterials::build(color, &assets, &mut meshes, &mut materials))
+                .collect(),
+        };
+        Stores {
+            assets,
+            sides,
+            meshes,
+            materials,
         }
     }
 
@@ -413,13 +428,9 @@ mod tests {
     #[test]
     fn every_effect_of_the_battle_gets_a_slot() {
         let data = data();
-        let (mut assets_and_stores, mut materials) = {
-            let (assets, meshes, materials) = assets();
-            ((assets, meshes), materials)
-        };
-        let sides = side_assets(&mut materials, 1);
+        let stores = stores(1);
         let mut pools = EffectPools::default();
-        pools.rebuild(&assets_and_stores.0, &sides);
+        pools.rebuild(&stores.assets, &stores.sides);
         assert_eq!(pools.pools.len(), 2 * PER_SIDE + FLASH_LEVELS + SHIELD_LEVELS);
 
         let (mut battle, mut feed) = stepped(&data, MIXED, 0);
@@ -435,15 +446,22 @@ mod tests {
             // Jedes Geschoss und jeder Strahl des Gefechts ist einem Platz zugewiesen.
             assert_eq!(stats.shots, battle.shots.len());
             assert_eq!(stats.beams, battle.beams.len());
-            let tracers: usize = (0..2).map(|side| pools.pools[side * PER_SIDE + TRACER].items.len()).sum();
-            let missiles: usize = (0..2).map(|side| pools.pools[side * PER_SIDE + MISSILE].items.len()).sum();
-            assert_eq!(tracers + missiles, battle.shots.len());
-            let flash_items: usize = (0..FLASH_LEVELS).map(|level| pools.flash_pool(level).items.len()).sum();
+            let count = |pools: &EffectPools, kind: usize| -> usize {
+                (0..2)
+                    .map(|side| pools.pools[side * PER_SIDE + kind].items.len())
+                    .sum()
+            };
+            assert_eq!(count(&pools, TRACER) + count(&pools, MISSILE), battle.shots.len());
+            let flash_items: usize = (0..FLASH_LEVELS)
+                .map(|level| pools.flash_pool(level).items.len())
+                .sum();
             assert_eq!(flash_items, battle.impacts.len());
             most_shots = most_shots.max(stats.shots);
             most_beams = most_beams.max(stats.beams);
             flashes += flash_items;
-            shields += (0..SHIELD_LEVELS).map(|level| pools.shield_pool(level).items.len()).sum::<usize>();
+            shields += (0..SHIELD_LEVELS)
+                .map(|level| pools.shield_pool(level).items.len())
+                .sum::<usize>();
             for pool in &pools.pools {
                 for item in &pool.items {
                     assert!(item.translation.is_finite() && item.scale.is_finite());
@@ -454,20 +472,14 @@ mod tests {
         }
         assert!(most_shots > 10 && most_beams > 5, "{most_shots} Geschosse, {most_beams} Strahlen");
         assert!(flashes > 50 && shields > 20, "{flashes} Einschläge, {shields} Schildtreffer");
-        let _ = &mut assets_and_stores;
     }
 
     #[test]
     fn tracers_point_along_their_flight_and_beams_reach_their_end() {
         let data = data();
-        let (_, mut materials) = {
-            let (assets, _, materials) = assets();
-            (assets, materials)
-        };
-        let (assets, _, _) = assets();
-        let sides = side_assets(&mut materials, 1);
+        let stores = stores(1);
         let mut pools = EffectPools::default();
-        pools.rebuild(&assets, &sides);
+        pools.rebuild(&stores.assets, &stores.sides);
         let (mut battle, mut feed) = stepped(&data, MIXED, 0);
         let mut checked = 0;
         for _ in 0..500 {
@@ -517,12 +529,11 @@ mod tests {
     /// Welt ohne Fenster: nur das, was die Effekte brauchen.
     fn world_with(feed: BattleFeed) -> World {
         let mut world = World::new();
-        let (assets, meshes, mut materials) = assets();
-        let sides = side_assets(&mut materials, feed.epoch);
-        world.insert_resource(assets);
-        world.insert_resource(meshes);
-        world.insert_resource(materials);
-        world.insert_resource(sides);
+        let stores = stores(feed.epoch);
+        world.insert_resource(stores.assets);
+        world.insert_resource(stores.sides);
+        world.insert_resource(stores.meshes);
+        world.insert_resource(stores.materials);
         world.insert_resource(feed);
         world.insert_resource(ViewFrame::default());
         world.insert_resource(ViewTimings::default());
@@ -609,9 +620,9 @@ mod tests {
         }
         assert_eq!(pool.items.len(), 8);
         // Ein neues Gefecht beginnt mit leeren Vorräten.
-        let (assets, _, mut materials) = assets();
+        let stores = stores(3);
         let mut pools = EffectPools::default();
-        pools.rebuild(&assets, &side_assets(&mut materials, 3));
+        pools.rebuild(&stores.assets, &stores.sides);
         assert_eq!(pools.spawned(), 0);
         assert_eq!(pools.epoch, Some(3));
         assert_eq!(

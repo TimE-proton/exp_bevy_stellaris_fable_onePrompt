@@ -132,6 +132,11 @@ fn handle_requests(world: &mut World) {
                 Err(error) => world.resource_mut::<Notice>().error(error.to_string()),
             },
             SessionRequest::QuitToMenu => {
+                // Erst die Zeit anhalten, dann die Partie entfernen: Ohne Partie darf kein
+                // Takt mehr laufen, sonst lesen die Laufbedingungen des Kerns eine Uhr,
+                // die es nicht mehr gibt.
+                *world.resource_mut::<SimSpeed>() = SimSpeed::default();
+                world.resource_mut::<Time<Virtual>>().pause();
                 SimState::remove(world);
                 world
                     .resource_mut::<NextState<AppState>>()

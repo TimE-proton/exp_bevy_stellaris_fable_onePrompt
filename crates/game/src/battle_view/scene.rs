@@ -6,7 +6,7 @@
 
 use super::camera::{self, BattleCamera, SelectedShip, ViewOptions};
 use super::feed::BattleFeed;
-use super::meshes::{self, ClassModel};
+use super::meshes::{self, ClassModel, MeshData};
 use super::{
     BattleViewSet, BattleViewShown, CameraRequest, Part, ViewFrame, ViewTimings, heading_rotation,
     to_world,
@@ -24,11 +24,11 @@ const DEBRIS_TAU: f32 = 4.5;
 pub const FLASH_LEVELS: usize = 4;
 pub const SHIELD_LEVELS: usize = 3;
 
-/// Meshes einer Schiffsklasse.
+/// Bauteile einer Schiffsklasse, noch ohne Parteifarbe.
 pub struct ClassAssets {
-    pub hull: Handle<Mesh>,
+    pub hull: MeshData,
     /// Vorder- und Achterteil eines Großkampfschiffs.
-    pub halves: Option<(Handle<Mesh>, Handle<Mesh>)>,
+    pub halves: Option<(MeshData, MeshData)>,
     pub glow: Handle<Mesh>,
 }
 
@@ -37,6 +37,10 @@ pub struct ClassAssets {
 pub struct BattleAssets {
     /// Index wie `ShipClass::index()`.
     pub classes: Vec<ClassAssets>,
+    /// Rumpfmaterial nach Zustand: kämpfend, auf dem Rückzug (matter), treibend (dunkel).
+    /// Die Farben der Parteien stecken in den Meshes; so teilen sich alle Schiffe drei
+    /// Materialien.
+    pub hull_materials: [Handle<StandardMaterial>; 3],
     pub tracer: Handle<Mesh>,
     pub missile: Handle<Mesh>,
     pub beam: Handle<Mesh>,
@@ -61,10 +65,13 @@ fn glowing(color: LinearRgba) -> StandardMaterial {
     }
 }
 
-/// Wie [`glowing`], aber addiert auf das, was dahinter liegt.
+/// Wie [`glowing`], aber addiert auf das, was dahinter liegt, und von beiden Seiten zu
+/// sehen.
 fn additive(color: LinearRgba) -> StandardMaterial {
     StandardMaterial {
         alpha_mode: AlphaMode::Add,
+        cull_mode: None,
+        double_sided: true,
         ..glowing(color)
     }
 }
@@ -75,22 +82,24 @@ impl BattleAssets {
             .iter()
             .map(|class| {
                 let model = ClassModel::of(*class);
-                let halves = class.is_capital().then(|| {
-                    let (fore, aft) = model.halves();
-                    (meshes.add(fore.to_mesh()), meshes.add(aft.to_mesh()))
-                });
                 ClassAssets {
-                    hull: meshes.add(model.hull.to_mesh()),
-                    halves,
+                    halves: class.is_capital().then(|| model.halves()),
                     glow: meshes.add(model.glow().to_mesh()),
+                    hull: model.hull,
                 }
             })
             .collect();
         // Sternenhimmel: feste Zufallsfolge, bei jedem Start derselbe Himmel.
         let mut random = Cosmetic::new(0x51a7);
-        let stars = meshes::star_field(1500, 1.0, || random.unit());
+        let stars = meshes::star_field(1800, 1.0, || random.unit());
+        let plating = |brightness: f32| StandardMaterial {
+            base_color: Color::linear_rgb(brightness, brightness, brightness * 1.03),
+            perceptual_roughness: 0.5,
+            metallic: 0.25,
+            ..default()
+        };
         let wreck = |glow: LinearRgba| StandardMaterial {
-            base_color: Color::srgb(0.16, 0.15, 0.15),
+            base_color: Color::linear_rgb(0.3, 0.28, 0.27),
             emissive: glow,
             perceptual_roughness: 0.85,
             ..default()
@@ -103,53 +112,56 @@ impl BattleAssets {
                 alpha,
             ))
         };
-        let shield = |alpha: f32| StandardMaterial {
-            cull_mode: None,
-            double_sided: true,
-            ..additive(LinearRgba::new(0.5, 1.1, 2.6, alpha))
-        };
         Self {
             classes,
+            hull_materials: [
+                materials.add(plating(1.0)),
+                materials.add(plating(0.4)),
+                materials.add(plating(0.2)),
+            ],
             tracer: meshes.add(meshes::tracer().to_mesh()),
             missile: meshes.add(meshes::missile().to_mesh()),
             beam: meshes.add(meshes::beam().to_mesh()),
-            flash: meshes.add(Sphere::new(1.0).mesh().ico(2).expect("Kugel")),
+            flash: meshes.add(meshes::glow_disc().to_mesh()),
             shield: meshes.add(meshes::shield_cap().to_mesh()),
-            debris: meshes::debris().map(|piece| meshes.add(piece.to_mesh())),
+            debris: meshes::debris().map(|piece| meshes.add(piece.tinted([1.0; 3]).to_mesh())),
             stars: meshes.add(stars.to_mesh()),
             wreck: [
-                materials.add(wreck(LinearRgba::rgb(5.0, 1.6, 0.3))),
-                materials.add(wreck(LinearRgba::rgb(0.9, 0.22, 0.04))),
+                materials.add(wreck(LinearRgba::rgb(3.2, 0.9, 0.16))),
+                materials.add(wreck(LinearRgba::rgb(0.5, 0.11, 0.02))),
                 materials.add(wreck(LinearRgba::BLACK)),
             ],
             debris_material: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.3, 0.3, 0.32),
+                base_color: Color::linear_rgb(0.34, 0.33, 0.33),
                 perceptual_roughness: 0.8,
                 ..default()
             }),
             flash_materials: [
-                materials.add(flash((1.0, 0.92, 0.75), 5.0, 1.0)),
-                materials.add(flash((1.0, 0.6, 0.25), 3.0, 0.8)),
-                materials.add(flash((1.0, 0.33, 0.1), 1.6, 0.55)),
-                materials.add(flash((0.8, 0.18, 0.06), 0.9, 0.3)),
+                materials.add(flash((1.0, 0.9, 0.7), 6.0, 1.0)),
+                materials.add(flash((1.0, 0.62, 0.26), 3.4, 0.85)),
+                materials.add(flash((1.0, 0.36, 0.1), 1.8, 0.6)),
+                materials.add(flash((0.9, 0.2, 0.06), 1.0, 0.3)),
             ],
             shield_materials: [
-                materials.add(shield(0.6)),
-                materials.add(shield(0.34)),
-                materials.add(shield(0.14)),
+                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.55))),
+                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.3))),
+                materials.add(additive(LinearRgba::new(0.35, 0.8, 2.2, 0.12))),
             ],
             star_material: materials.add(glowing(LinearRgba::WHITE)),
         }
     }
 }
 
-/// Materialien einer Partei.
+/// Rumpf-Meshes einer Klasse im Anstrich einer Partei.
+pub struct SideClass {
+    pub hull: Handle<Mesh>,
+    pub halves: Option<(Handle<Mesh>, Handle<Mesh>)>,
+}
+
+/// Was eine Partei an eigenen Meshes und Materialien braucht.
 pub struct SideMaterials {
-    pub hull: Handle<StandardMaterial>,
-    /// Auf dem Rückzug: matter und grauer.
-    pub routing: Handle<StandardMaterial>,
-    /// Ohne Energie treibend.
-    pub disabled: Handle<StandardMaterial>,
+    /// Index wie `ShipClass::index()`.
+    pub classes: Vec<SideClass>,
     pub glow: Handle<StandardMaterial>,
     pub tracer: Handle<StandardMaterial>,
     pub missile: Handle<StandardMaterial>,
@@ -158,7 +170,8 @@ pub struct SideMaterials {
     pub beam_pd: Handle<StandardMaterial>,
 }
 
-/// Materialien aller Parteien des gezeigten Gefechts; entstehen mit jedem neuen Gefecht.
+/// Meshes und Materialien aller Parteien des gezeigten Gefechts; entstehen mit jedem
+/// neuen Gefecht.
 #[derive(Resource, Default)]
 pub struct SideAssets {
     pub epoch: Option<u32>,
@@ -177,27 +190,48 @@ fn scaled(color: LinearRgba, factor: f32) -> LinearRgba {
     LinearRgba::rgb(color.red * factor, color.green * factor, color.blue * factor)
 }
 
+/// Parteifarbe als Anstrich: linear, auf gleiche Helligkeit gebracht, damit dunkle und
+/// helle Parteifarben gleich gut zu sehen sind.
+pub fn side_tint(color: Rgb) -> [f32; 3] {
+    let linear = LinearRgba::from(Color::srgb(color.0, color.1, color.2));
+    let peak = linear.red.max(linear.green).max(linear.blue).max(1e-3);
+    [linear.red / peak, linear.green / peak, linear.blue / peak]
+}
+
 impl SideMaterials {
-    pub fn build(color: Rgb, materials: &mut Assets<StandardMaterial>) -> Self {
-        let side = LinearRgba::from(Color::srgb(color.0, color.1, color.2));
-        let steel = LinearRgba::rgb(0.42, 0.44, 0.48);
+    pub fn build(
+        color: Rgb,
+        assets: &BattleAssets,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Self {
+        let tint = side_tint(color);
+        let side = LinearRgba::rgb(tint[0], tint[1], tint[2]);
         let white = LinearRgba::WHITE;
-        let plating = |base: LinearRgba| StandardMaterial {
-            base_color: base.into(),
-            perceptual_roughness: 0.52,
-            metallic: 0.2,
-            ..default()
-        };
+        let classes = assets
+            .classes
+            .iter()
+            .map(|class| SideClass {
+                hull: meshes.add(class.hull.tinted(tint).to_mesh()),
+                halves: class.halves.as_ref().map(|(fore, aft)| {
+                    (
+                        meshes.add(fore.tinted(tint).to_mesh()),
+                        meshes.add(aft.tinted(tint).to_mesh()),
+                    )
+                }),
+            })
+            .collect();
         Self {
-            hull: materials.add(plating(mix(steel, side, 0.62))),
-            routing: materials.add(plating(scaled(mix(steel, side, 0.3), 0.42))),
-            disabled: materials.add(plating(scaled(mix(steel, side, 0.18), 0.22))),
-            glow: materials.add(glowing(scaled(mix(side, white, 0.45), 7.0))),
+            classes,
+            glow: materials.add(glowing(scaled(mix(side, white, 0.35), 4.5))),
             tracer: materials.add(glowing(scaled(mix(side, white, 0.4), 9.0))),
             missile: materials.add(glowing(scaled(mix(side, white, 0.55), 7.0))),
             beam_light: materials.add(glowing(scaled(mix(side, white, 0.15), 11.0))),
             beam_heavy: materials.add(glowing(scaled(mix(side, white, 0.45), 20.0))),
-            beam_pd: materials.add(glowing(scaled(mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6), 6.0))),
+            beam_pd: materials.add(glowing(scaled(
+                mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6),
+                6.0,
+            ))),
         }
     }
 }
@@ -258,9 +292,9 @@ struct StarField;
 /// Aussehen eines Schiffs nach seinem Zustand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Look {
-    Active,
-    Routing,
-    Disabled,
+    Active = 0,
+    Routing = 1,
+    Disabled = 2,
 }
 
 impl Look {
@@ -272,12 +306,8 @@ impl Look {
         }
     }
 
-    fn material(self, side: &SideMaterials) -> &Handle<StandardMaterial> {
-        match self {
-            Look::Active => &side.hull,
-            Look::Routing => &side.routing,
-            Look::Disabled => &side.disabled,
-        }
+    fn material(self, assets: &BattleAssets) -> &Handle<StandardMaterial> {
+        &assets.hull_materials[self as usize]
     }
 }
 
@@ -371,7 +401,7 @@ pub(super) fn show_view(
         SceneProp,
         DirectionalLight {
             color: Color::srgb(1.0, 0.96, 0.9),
-            illuminance: 11_000.0,
+            illuminance: 3_400.0,
             shadow_maps_enabled: false,
             ..default()
         },
@@ -381,7 +411,7 @@ pub(super) fn show_view(
         SceneProp,
         DirectionalLight {
             color: Color::srgb(0.55, 0.7, 1.0),
-            illuminance: 2_600.0,
+            illuminance: 650.0,
             shadow_maps_enabled: false,
             ..default()
         },
@@ -430,6 +460,8 @@ pub(super) fn rebuild_on_epoch(
     feed: Res<BattleFeed>,
     mut state: ResMut<SceneState>,
     mut sides: ResMut<SideAssets>,
+    assets: Res<BattleAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut selected: ResMut<SelectedShip>,
     mut requests: MessageWriter<CameraRequest>,
@@ -450,7 +482,9 @@ pub(super) fn rebuild_on_epoch(
     *sides = SideAssets {
         epoch: Some(feed.epoch),
         sides: (0..count)
-            .map(|side| SideMaterials::build(feed.side_color(side), &mut materials))
+            .map(|side| {
+                SideMaterials::build(feed.side_color(side), &assets, &mut meshes, &mut materials)
+            })
             .collect(),
     };
     selected.0 = None;
@@ -520,9 +554,7 @@ fn sync_ships(
         let look = Look::of(ship.status);
         if look != visual.look {
             visual.look = look;
-            if let Some(side) = sides.sides.get(ship.side as usize) {
-                material.0 = look.material(side).clone();
-            }
+            material.0 = look.material(&assets).clone();
         }
     }
 
@@ -562,7 +594,7 @@ fn sync_ships(
         if !ship.status.in_play() {
             continue;
         }
-        let class = &assets.classes[ship.class.index()];
+        let class = ship.class.index();
         let look = Look::of(ship.status);
         commands.spawn((
             BattleVisual,
@@ -571,8 +603,8 @@ fn sync_ships(
                 look,
                 roll: 0.0,
             },
-            Mesh3d(class.hull.clone()),
-            MeshMaterial3d(look.material(side).clone()),
+            Mesh3d(side.classes[class].hull.clone()),
+            MeshMaterial3d(look.material(&assets).clone()),
             Transform {
                 translation: *position,
                 rotation: heading_rotation(*heading),
@@ -580,7 +612,7 @@ fn sync_ships(
             },
             children![(
                 EngineGlow { ship: index as u32 },
-                Mesh3d(class.glow.clone()),
+                Mesh3d(assets.classes[class].glow.clone()),
                 MeshMaterial3d(side.glow.clone()),
                 Transform::from_xyz(-1.0, 0.0, 0.0),
             )],
@@ -605,6 +637,7 @@ fn sync_wrecks(
     mut commands: Commands,
     feed: Res<BattleFeed>,
     assets: Res<BattleAssets>,
+    sides: Res<SideAssets>,
     mut state: ResMut<SceneState>,
 ) {
     let _span = timings.span(Part::Scene);
@@ -612,7 +645,10 @@ fn sync_wrecks(
         return;
     };
     for index in state.wrecks_seen..battle.wrecks.len() {
-        spawn_wreck(&mut commands, &assets, feed.epoch, index, &battle.wrecks[index]);
+        let wreck = &battle.wrecks[index];
+        if let Some(side) = sides.sides.get(wreck.side as usize) {
+            spawn_wreck(&mut commands, &assets, side, feed.epoch, index, wreck);
+        }
     }
     state.wrecks_seen = battle.wrecks.len();
 }
@@ -622,12 +658,13 @@ fn sync_wrecks(
 fn spawn_wreck(
     commands: &mut Commands,
     assets: &BattleAssets,
+    side: &SideMaterials,
     epoch: u32,
     index: usize,
     wreck: &Wreck,
 ) {
     let mut random = Cosmetic::new(epoch.wrapping_mul(7919).wrapping_add(index as u32));
-    let class = &assets.classes[wreck.class.index()];
+    let class = &side.classes[wreck.class.index()];
     let base = heading_rotation(wreck.heading);
     let forward = base * Vec3::X;
     let radius = wreck.radius;
@@ -795,26 +832,68 @@ mod tests {
 
     #[test]
     fn assets_share_handles_per_class_and_side() {
-        let (assets, meshes, mut materials) = testing::assets();
+        let (assets, mut meshes, mut materials) = testing::assets();
         assert_eq!(assets.classes.len(), ShipClass::ALL.len());
         for class in ShipClass::ALL {
             let entry = &assets.classes[class.index()];
-            assert!(meshes.get(&entry.hull).is_some());
             assert!(meshes.get(&entry.glow).is_some());
             assert_eq!(entry.halves.is_some(), class.is_capital());
         }
-        let before = materials.len();
-        let side = SideMaterials::build((0.2, 0.6, 1.0), &mut materials);
-        assert_eq!(materials.len(), before + 9);
+        let (mesh_count, material_count) = (meshes.len(), materials.len());
+        let side = SideMaterials::build((0.2, 0.6, 1.0), &assets, &mut meshes, &mut materials);
+        // Je Partei ein Rumpf je Klasse, dazu zwei Hälften je Großkampfschiff, und sechs
+        // Leuchtfarben. Mehr entsteht nicht, egal wie viele Schiffe kämpfen.
+        assert_eq!(meshes.len(), mesh_count + 6 + 2 * 3);
+        assert_eq!(materials.len(), material_count + 6);
+        for class in ShipClass::ALL {
+            let entry = &side.classes[class.index()];
+            assert!(meshes.get(&entry.hull).is_some());
+            assert_eq!(entry.halves.is_some(), class.is_capital());
+        }
         // Fliehende und treibende Schiffe sind dunkler als kämpfende.
         let brightness = |handle: &Handle<StandardMaterial>| {
             let color = LinearRgba::from(materials.get(handle).unwrap().base_color);
             color.red + color.green + color.blue
         };
-        assert!(brightness(&side.routing) < brightness(&side.hull) * 0.6);
-        assert!(brightness(&side.disabled) < brightness(&side.routing));
+        let [active, routing, disabled] = &assets.hull_materials;
+        assert!(brightness(routing) < brightness(active) * 0.6);
+        assert!(brightness(disabled) < brightness(routing));
         // Leuchtendes strahlt über: Werte über 1 für den Bloom.
         assert!(brightness(&side.beam_heavy) > 20.0);
+    }
+
+    #[test]
+    fn side_colour_shows_in_the_hull_paint() {
+        use bevy::mesh::VertexAttributeValues;
+        let (assets, mut meshes, mut materials) = testing::assets();
+        let blue = SideMaterials::build((0.2, 0.5, 1.0), &assets, &mut meshes, &mut materials);
+        let red = SideMaterials::build((1.0, 0.3, 0.2), &assets, &mut meshes, &mut materials);
+        let colors = |handle: &Handle<Mesh>| {
+            let Some(VertexAttributeValues::Float32x4(colors)) =
+                meshes.get(handle).unwrap().attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("Farben fehlen");
+            };
+            colors.clone()
+        };
+        for class in ShipClass::ALL {
+            let (blue, red) = (
+                colors(&blue.classes[class.index()].hull),
+                colors(&red.classes[class.index()].hull),
+            );
+            assert_eq!(blue.len(), red.len());
+            // Jeder Rumpf trägt Abzeichen in voller Parteifarbe und blanke, dunkle Teile,
+            // die bei beiden Parteien gleich aussehen.
+            let bluish = blue.iter().filter(|c| c[2] > 0.8 && c[0] < 0.2).count();
+            let reddish = red.iter().filter(|c| c[0] > 0.8 && c[2] < 0.2).count();
+            assert!(bluish >= 12 && bluish == reddish, "{}: {bluish} / {reddish}", class.label());
+            let same = blue.iter().zip(&red).filter(|(a, b)| a == b).count();
+            assert!(same >= 12, "{}: keine neutralen Teile", class.label());
+            assert!(blue.iter().chain(&red).all(|c| c[3] == 1.0), "Rümpfe sind deckend");
+        }
+        assert_eq!(side_tint((0.5, 0.5, 0.5)), [1.0, 1.0, 1.0]);
+        let tint = side_tint((1.0, 0.4, 0.3));
+        assert!(tint[0] == 1.0 && tint[1] < 0.2 && tint[2] < tint[1]);
     }
 
     #[test]

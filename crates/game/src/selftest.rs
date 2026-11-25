@@ -318,7 +318,7 @@ fn drive_practice(
         return;
     }
 
-    let mut hold = |test: &mut PracticeTest, photo: u32, next: Phase, resume: Option<usize>| {
+    let hold = |test: &mut PracticeTest, photo: u32, next: Phase, resume: Option<usize>| {
         test.pending = Some(Pending {
             frames_left: 2 * SETTLE_FRAMES,
             photo,

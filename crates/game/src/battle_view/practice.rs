@@ -20,6 +20,7 @@ use bevy_egui::input::egui_wants_any_keyboard_input;
 use sim::GameData;
 use sim::battle::matchup::{self, Side};
 use sim::battle::{Battle, Doctrine, Formation, V2};
+use sim::clock::SimClock;
 use sim::data::{Rgb, ShipClass};
 
 /// Namen und Farben der beiden Übungsparteien.
@@ -302,6 +303,11 @@ fn start_requested(
     feed.begin(&battle, feed_info(&config));
     options.labels = config.lineup;
     commands.insert_resource(PracticeBattle { battle, config });
+    // Die Laufbedingungen des Kerns (`day_start`, `month_start`) lesen die Uhr der Partie,
+    // sobald der feste Takt läuft, auch wenn die Simulation selbst ruht. Ohne Partie gibt
+    // es keine Uhr; die Übung stellt deshalb eine leere hin und räumt sie beim Verlassen
+    // wieder ab.
+    commands.init_resource::<SimClock>();
     // Wie eine Partie beginnt die Übung pausiert: erst umsehen, dann die Zeit laufen lassen.
     *speed = SimSpeed::default();
     ui_state.practice_open = false;
@@ -332,6 +338,7 @@ fn handle_view_requests(
     practice: Option<ResMut<PracticeBattle>>,
     mut feed: ResMut<BattleFeed>,
     mut speed: ResMut<SimSpeed>,
+    mut time: ResMut<Time<Virtual>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(mut practice) = practice else {
@@ -340,7 +347,13 @@ fn handle_view_requests(
     };
     for request in requests.read() {
         match request {
-            BattleViewRequest::Leave => next.set(AppState::MainMenu),
+            BattleViewRequest::Leave => {
+                // Die Zeit hält sofort an, nicht erst beim Zustandswechsel im nächsten
+                // Frame: Danach darf kein Takt mehr laufen, denn die Uhr verschwindet.
+                *speed = SimSpeed::default();
+                time.pause();
+                next.set(AppState::MainMenu);
+            }
             BattleViewRequest::Restart => {
                 practice.battle = practice.config.build(&data);
                 feed.begin(&practice.battle, feed_info(&practice.config));
@@ -401,6 +414,7 @@ fn leave(
     mut ui_state: ResMut<UiState>,
 ) {
     commands.remove_resource::<PracticeBattle>();
+    commands.remove_resource::<SimClock>();
     feed.clear();
     *speed = SimSpeed::default();
     ui_state.help_open = false;

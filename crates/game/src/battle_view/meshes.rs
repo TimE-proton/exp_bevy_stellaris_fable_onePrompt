@@ -13,14 +13,20 @@ use bevy::prelude::*;
 use sim::data::ShipClass;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_6, TAU};
 
-/// Farbe einer Ecke (linear). Sie wird mit der Farbe des Materials multipliziert und
-/// dient als Anstrich: helle Platten, dunkle Öffnungen.
+/// Farbe einer Ecke (linear). Bei Rümpfen ist sie ein Anstrich: Die ersten drei Werte
+/// sind die Grundfarbe, der vierte sagt, wie stark die Farbe der Partei durchschlägt
+/// (0 = blanker Stahl, 1 = volle Parteifarbe). [`MeshData::tinted`] rechnet das für eine
+/// Partei aus. Bei Effekten ist der vierte Wert die Deckkraft.
 pub type Paint = [f32; 4];
 
-pub const HULL: Paint = [0.92, 0.93, 0.96, 1.0];
-pub const PLATE: Paint = [0.58, 0.60, 0.65, 1.0];
-pub const DARK: Paint = [0.14, 0.15, 0.18, 1.0];
-pub const TRIM: Paint = [1.25, 1.22, 1.15, 1.0];
+/// Rumpfplatten: Stahl mit einem Hauch Parteifarbe.
+pub const HULL: Paint = [0.62, 0.64, 0.68, 0.22];
+/// Aufbauten und Panzerplatten: dunkler abgesetzt.
+pub const PLATE: Paint = [0.36, 0.38, 0.42, 0.12];
+/// Öffnungen, Rohre, Düsen.
+pub const DARK: Paint = [0.055, 0.06, 0.075, 0.0];
+/// Abzeichen: Streifen, Leitwerke und Kuppeln in voller Parteifarbe.
+pub const TRIM: Paint = [0.95, 0.95, 0.95, 1.0];
 
 /// Unter dieser doppelten Fläche gilt ein Dreieck als entartet und wird verworfen.
 const MIN_DOUBLE_AREA: f32 = 1e-9;
@@ -146,9 +152,18 @@ impl MeshData {
         result
     }
 
-    pub fn repainted(mut self, paint: Paint) -> MeshData {
-        self.colors.fill(paint);
-        self
+    /// Rechnet den Anstrich eines Rumpfs für eine Partei aus: Jede Ecke bekommt ihre
+    /// Grundfarbe, je nach Anteil mit der Parteifarbe `tint` (linear) eingefärbt.
+    pub fn tinted(&self, tint: [f32; 3]) -> MeshData {
+        let mut result = self.clone();
+        for color in &mut result.colors {
+            let amount = color[3].clamp(0.0, 1.0);
+            for channel in 0..3 {
+                color[channel] *= 1.0 + (tint[channel] - 1.0) * amount;
+            }
+            color[3] = 1.0;
+        }
+        result
     }
 
     /// Kleinste und größte Koordinaten.
@@ -675,8 +690,14 @@ fn corvette() -> ClassModel {
             radius: 0.092,
         },
     ];
+    let band = cuboid(
+        Vec3::new(-0.74, 0.0, 0.305),
+        Vec3::new(-0.6, 0.089, 0.435),
+        TRIM,
+    );
     let hull = body
         .with(&pod.both_sides())
+        .with(&band.both_sides())
         .with(&pylon.both_sides())
         .with(&bridge)
         .with(&fin)
@@ -808,8 +829,14 @@ fn cruiser() -> ClassModel {
             radius: 0.058,
         },
     ];
+    let stripe = cuboid(
+        Vec3::new(-0.4, 0.075, 0.16),
+        Vec3::new(0.28, 0.081, 0.245),
+        TRIM,
+    );
     let hull = body
         .with(&sponson.both_sides())
+        .with(&stripe.both_sides())
         .with(&guns.both_sides())
         .with(&tower)
         .with(&mast)
@@ -904,8 +931,14 @@ fn battleship() -> ClassModel {
     for engine in &engines {
         nozzles.append(&nozzle(engine.at, engine.radius, 0.06));
     }
+    let stripe = cuboid(
+        Vec3::new(-0.5, 0.085, 0.285),
+        Vec3::new(0.3, 0.091, 0.35),
+        TRIM,
+    );
     let hull = body
         .with(&belt.both_sides())
+        .with(&stripe.both_sides())
         .with(&barbette)
         .with(&front)
         .with(&raised)
@@ -1070,24 +1103,14 @@ pub fn beam() -> MeshData {
     )
 }
 
-/// Schildschimmer: offene Halbkugel (Radius 1) um +x. Am Scheitel deckend, zum Rand hin
-/// durchsichtig, damit nur die getroffene Seite aufleuchtet.
-pub fn shield_cap() -> MeshData {
-    let (steps, sides) = (5, 16);
-    let rings: Vec<(Vec<Vec3>, f32)> = (0..=steps)
-        .map(|step| {
-            let angle = FRAC_PI_2 * step as f32 / steps as f32;
-            let radius = angle.cos();
-            (
-                ring(Vec3::X * angle.sin(), sides, radius, radius, 0.0),
-                (step as f32 / steps as f32).powf(1.6),
-            )
-        })
-        .collect();
+/// Verbindet Ringe gleicher Eckenzahl zu einer offenen Fläche; jeder Ring hat seine
+/// eigene Deckkraft, dazwischen verläuft sie.
+fn band(rings: &[(Vec<Vec3>, f32)]) -> MeshData {
     let mut mesh = MeshData::default();
     let paint = |alpha: f32| [1.0, 1.0, 1.0, alpha];
     for pair in rings.windows(2) {
         let ((back, back_alpha), (front, front_alpha)) = (&pair[0], &pair[1]);
+        let sides = back.len();
         for index in 0..sides {
             let next = (index + 1) % sides;
             mesh.tri_painted(
@@ -1101,6 +1124,45 @@ pub fn shield_cap() -> MeshData {
         }
     }
     mesh
+}
+
+/// Schildschimmer: Kappe einer Kugel (Radius 1) um +x, gut 60° weit. In der Mitte deckend,
+/// zum Rand hin durchsichtig, damit nur die getroffene Stelle aufleuchtet.
+pub fn shield_cap() -> MeshData {
+    let (steps, sides) = (5, 18);
+    let widest = 64f32.to_radians();
+    let rings: Vec<(Vec<Vec3>, f32)> = (0..=steps)
+        .map(|step| {
+            let inward = step as f32 / steps as f32;
+            let angle = widest * (1.0 - inward);
+            let radius = angle.sin();
+            (
+                ring(Vec3::X * angle.cos(), sides, radius, radius, 0.0),
+                inward.powf(1.5),
+            )
+        })
+        .collect();
+    band(&rings)
+}
+
+/// Leuchtscheibe für Einschläge: Kreis mit Radius 1 in der x-y-Ebene, Vorderseite nach +z.
+/// In der Mitte deckend, zum Rand hin weich auslaufend. Wird stets der Kamera zugewandt.
+pub fn glow_disc() -> MeshData {
+    let sides = 20;
+    let circle = |radius: f32| -> Vec<Vec3> {
+        (0..sides)
+            .map(|index| {
+                let angle = TAU * index as f32 / sides as f32;
+                Vec3::new(radius * angle.cos(), radius * angle.sin(), 0.0)
+            })
+            .collect()
+    };
+    band(&[
+        (circle(1.0), 0.0),
+        (circle(0.62), 0.16),
+        (circle(0.3), 0.6),
+        (circle(0.0), 1.0),
+    ])
 }
 
 /// Drei unregelmäßige Trümmerstücke, jedes etwa eine Einheit groß.
@@ -1161,7 +1223,7 @@ pub fn star_field(count: usize, radius: f32, mut sample: impl FnMut() -> f32) ->
         let ring_radius = (1.0 - height * height).max(0.0).sqrt();
         let direction = Vec3::new(ring_radius * angle.cos(), height, ring_radius * angle.sin());
         // Wenige helle, viele schwache Sterne; leichte Farbstiche.
-        let brightness = 0.25 + 2.2 * sample().powi(5);
+        let brightness = 0.16 + 2.4 * sample().powi(6);
         let warmth = sample();
         let paint = [
             brightness * (0.85 + 0.3 * warmth),
@@ -1169,7 +1231,7 @@ pub fn star_field(count: usize, radius: f32, mut sample: impl FnMut() -> f32) ->
             brightness * (1.15 - 0.3 * warmth),
             1.0,
         ];
-        let size = radius * (0.0011 + 0.0016 * sample().powi(3));
+        let size = radius * (0.00045 + 0.0008 * sample().powi(3));
         let side = direction.any_orthonormal_vector();
         let up = direction.cross(side);
         let center = direction * radius;
@@ -1256,7 +1318,19 @@ mod tests {
             assert!(mesh.signed_volume() > 0.0, "{what}: Flächen zeigen nach innen");
         }
         check(&missile(), "Lenkwaffe");
-        check(&shield_cap(), "Schild");
+        // Schild und Leuchtscheibe sind offene Flächen mit auslaufender Deckkraft.
+        let shield = shield_cap();
+        check(&shield, "Schild");
+        let (min, max) = shield.bounds();
+        assert!(min.x > 0.4 && (max.x - 1.0).abs() < 1e-5, "Kappe um +x");
+        let disc = glow_disc();
+        check(&disc, "Leuchtscheibe");
+        assert!(disc.normals.iter().all(|normal| normal.z > 0.999), "Scheibe zeigt nach +z");
+        for mesh in [&shield, &disc] {
+            let alphas: Vec<f32> = mesh.colors.iter().map(|color| color[3]).collect();
+            assert!(alphas.iter().any(|alpha| *alpha == 0.0), "Rand läuft aus");
+            assert!(alphas.iter().any(|alpha| *alpha == 1.0), "Mitte deckt");
+        }
         for piece in debris() {
             check(&piece, "Trümmer");
             assert!(piece.signed_volume() > 0.0);
