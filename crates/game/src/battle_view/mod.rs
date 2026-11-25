@@ -147,9 +147,16 @@ pub struct ViewTimings {
     /// Gemessene Frames und ihre Summe je Teil.
     pub frames: u32,
     pub total: [Duration; 4],
-    /// Teuerstes Frame, alle Teile zusammen.
+    /// Teuerstes Frame, alle Teile zusammen, und wie es sich auf die Teile verteilt.
     pub worst: Duration,
+    pub worst_parts: [Duration; 4],
+    /// Rechenzeit der letzten Frames in Mikrosekunden, für den Median: Er zeigt, was ein
+    /// gewöhnliches Frame kostet, auch wenn einzelne Ausreißer den Mittelwert heben.
+    samples: Vec<u32>,
 }
+
+/// So viele Frames gehen höchstens in den Median ein.
+const MAX_SAMPLES: usize = 20_000;
 
 impl ViewTimings {
     /// Misst von jetzt bis zum Ende des umgebenden Blocks.
@@ -168,7 +175,14 @@ impl ViewTimings {
             for (total, current) in self.total.iter_mut().zip(self.current) {
                 *total += current;
             }
-            self.worst = self.worst.max(sum);
+            if sum > self.worst {
+                self.worst = sum;
+                self.worst_parts = self.current;
+            }
+            if self.samples.len() < MAX_SAMPLES {
+                self.samples
+                    .push(sum.as_micros().min(u32::MAX as u128) as u32);
+            }
         }
         self.current = [Duration::ZERO; 4];
     }
@@ -183,8 +197,23 @@ impl ViewTimings {
         self.total[part].as_secs_f64() * 1e6 / self.frames.max(1) as f64
     }
 
+    /// Rechenzeit eines gewöhnlichen Frames in Mikrosekunden (Median).
+    pub fn median_micros(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.samples.clone();
+        let middle = sorted.len() / 2;
+        *sorted.select_nth_unstable(middle).1 as f64
+    }
+
     pub fn worst_micros(&self) -> f64 {
         self.worst.as_secs_f64() * 1e6
+    }
+
+    /// Anteil eines Teils am teuersten Frame in Mikrosekunden.
+    pub fn worst_part_micros(&self, part: usize) -> f64 {
+        self.worst_parts[part].as_secs_f64() * 1e6
     }
 
     pub fn reset(&mut self) {
@@ -286,7 +315,20 @@ mod tests {
         timings.end_frame();
         assert_eq!(timings.frames, 2);
         assert!((timings.average_micros() - 300.0).abs() < 1e-6);
-        assert!((timings.worst_micros() - 500.0).abs() < 1e-6);
         assert!((timings.part_micros(Part::Hud as usize) - 100.0).abs() < 1e-6);
+        // Das teuerste Frame und wie es sich verteilt.
+        assert!((timings.worst_micros() - 500.0).abs() < 1e-6);
+        assert!((timings.worst_part_micros(Part::Scene as usize) - 300.0).abs() < 1e-6);
+        assert!((timings.worst_part_micros(Part::Effects as usize)).abs() < 1e-6);
+        // Median: Ein einzelner Ausreißer verschiebt ihn nicht, wohl aber den Mittelwert.
+        for micros in [120, 130, 125, 90_000] {
+            timings.current[Part::Hud as usize] = Duration::from_micros(micros);
+            timings.end_frame();
+        }
+        assert_eq!(timings.median_micros(), 130.0);
+        assert!(timings.average_micros() > 10_000.0);
+        timings.reset();
+        assert_eq!(timings.frames, 0);
+        assert_eq!(timings.median_micros(), 0.0);
     }
 }

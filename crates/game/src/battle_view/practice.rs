@@ -5,8 +5,8 @@
 //! [`BattleFeed`] ab und führt die Befehle des Spielers unmittelbar aus. Dasselbe wird
 //! später die Partie für ihre Gefechte tun.
 
-use super::camera::ViewOptions;
 use super::BattleFeedSet;
+use super::camera::ViewOptions;
 use super::feed::{BattleFeed, BattleOrder, BattleViewRequest, FeedInfo, SideInfo};
 use crate::args::Args;
 use crate::session::Notice;
@@ -687,6 +687,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn practice_steps_its_battle_and_obeys_orders_at_once() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let data = data();
+        let config = PracticeSetup::default().resolve(&data).unwrap();
+        let battle = config.build(&data);
+        let mut feed = BattleFeed::default();
+        feed.begin(&battle, feed_info(&config));
+        let mut world = World::new();
+        world.insert_resource(data);
+        world.insert_resource(feed);
+        world.insert_resource(PracticeBattle::new(battle, config));
+        world.init_resource::<Messages<BattleOrder>>();
+
+        // Ein Takt rechnet das Gefecht weiter und legt den Zustand im Feed ab.
+        for _ in 0..30 {
+            world.run_system_once(step).unwrap();
+        }
+        assert_eq!(world.resource::<PracticeBattle>().battle.tick, 30);
+        assert_eq!(world.resource::<PracticeBattle>().ticks, 30);
+        assert_eq!(world.resource::<BattleFeed>().battle().unwrap().tick, 30);
+
+        // Befehle wirken ohne weiteren Takt, also auch in der Pause, und stehen sofort im
+        // Feed, aus dem die Tafeln lesen.
+        world
+            .resource_mut::<Messages<BattleOrder>>()
+            .write(BattleOrder::SetOrders {
+                side: 0,
+                formation: Formation::Wedge,
+                doctrine: Doctrine::Defensive,
+            });
+        world.run_system_once(apply_orders).unwrap();
+        let shown = world.resource::<BattleFeed>().battle().unwrap();
+        assert_eq!(shown.tick, 30);
+        assert_eq!(shown.combatants[0].formation, Formation::Wedge);
+        assert_eq!(shown.combatants[0].doctrine, Doctrine::Defensive);
+        assert_eq!(shown.combatants[1].formation, Formation::Line);
+        assert!(!shown.combatants[0].retreating);
+
+        world
+            .resource_mut::<Messages<BattleOrder>>()
+            .write(BattleOrder::Retreat { side: 0 });
+        world.run_system_once(apply_orders).unwrap();
+        let shown = world.resource::<BattleFeed>().battle().unwrap();
+        assert!(shown.combatants[0].retreating);
+        assert!(
+            shown
+                .ships
+                .iter()
+                .filter(|ship| ship.side == 0)
+                .all(|ship| ship.status != ShipStatus::Active)
+        );
+        // Nach dem Rückzug der einen Seite läuft das Gefecht aus und bleibt dann stehen.
+        for _ in 0..12_000 {
+            world.run_system_once(step).unwrap();
+            if world.resource::<PracticeBattle>().battle.finished {
+                break;
+            }
+        }
+        let ended = world.resource::<PracticeBattle>().battle.tick;
+        assert!(world.resource::<PracticeBattle>().battle.finished);
+        world.run_system_once(step).unwrap();
+        assert_eq!(world.resource::<PracticeBattle>().battle.tick, ended);
+        assert!(world.resource::<BattleFeed>().battle().unwrap().finished);
+    }
+
+    #[test]
+    fn lineup_is_a_still_image() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let data = data();
+        let config = PracticeConfig::lineup(&data);
+        let battle = config.build(&data);
+        let info = feed_info(&config);
+        assert!(info.still && !info.can_restart && info.player_side.is_none());
+        let mut feed = BattleFeed::default();
+        feed.begin(&battle, info);
+        let mut world = World::new();
+        world.insert_resource(data);
+        world.insert_resource(feed);
+        world.insert_resource(PracticeBattle::new(battle, config));
+        for _ in 0..5 {
+            world.run_system_once(step).unwrap();
+        }
+        assert_eq!(world.resource::<PracticeBattle>().battle.tick, 0);
     }
 
     #[test]

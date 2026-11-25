@@ -99,7 +99,7 @@ impl BattleAssets {
             ..default()
         };
         let wreck = |glow: LinearRgba| StandardMaterial {
-            base_color: Color::linear_rgb(0.13, 0.12, 0.118),
+            base_color: Color::linear_rgb(0.2, 0.185, 0.18),
             emissive: glow,
             perceptual_roughness: 0.85,
             ..default()
@@ -127,9 +127,11 @@ impl BattleAssets {
             debris: meshes::debris().map(|piece| meshes.add(piece.tinted([1.0; 3]).to_mesh())),
             stars: meshes.add(stars.to_mesh()),
             wreck: [
-                materials.add(wreck(LinearRgba::rgb(3.2, 0.9, 0.16))),
-                materials.add(wreck(LinearRgba::rgb(0.5, 0.11, 0.02))),
-                materials.add(wreck(LinearRgba::BLACK)),
+                materials.add(wreck(LinearRgba::rgb(0.95, 0.24, 0.04))),
+                materials.add(wreck(LinearRgba::rgb(0.22, 0.05, 0.008))),
+                // Auch ausgekühlt glimmt ein Wrack schwach nach, sonst verschwände es vor dem
+                // schwarzen Himmel.
+                materials.add(wreck(LinearRgba::rgb(0.012, 0.004, 0.002))),
             ],
             debris_material: materials.add(StandardMaterial {
                 base_color: Color::linear_rgb(0.16, 0.155, 0.155),
@@ -159,7 +161,7 @@ pub struct SideClass {
 }
 
 /// Was eine Partei an eigenen Meshes und Materialien braucht.
-pub struct SideMaterials {
+pub struct SideKit {
     /// Index wie `ShipClass::index()`.
     pub classes: Vec<SideClass>,
     pub glow: Handle<StandardMaterial>,
@@ -175,7 +177,7 @@ pub struct SideMaterials {
 #[derive(Resource, Default)]
 pub struct SideAssets {
     pub epoch: Option<u32>,
-    pub sides: Vec<SideMaterials>,
+    pub sides: Vec<SideKit>,
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
@@ -202,7 +204,7 @@ pub fn side_tint(color: Rgb) -> [f32; 3] {
     [linear.red / peak, linear.green / peak, linear.blue / peak]
 }
 
-impl SideMaterials {
+impl SideKit {
     pub fn build(
         color: Rgb,
         assets: &BattleAssets,
@@ -487,9 +489,7 @@ pub(super) fn rebuild_on_epoch(
     *sides = SideAssets {
         epoch: Some(feed.epoch),
         sides: (0..count)
-            .map(|side| {
-                SideMaterials::build(feed.side_color(side), &assets, &mut meshes, &mut materials)
-            })
+            .map(|side| SideKit::build(feed.side_color(side), &assets, &mut meshes, &mut materials))
             .collect(),
     };
     selected.0 = None;
@@ -672,7 +672,7 @@ fn sync_wrecks(
 fn spawn_wreck(
     commands: &mut Commands,
     assets: &BattleAssets,
-    side: &SideMaterials,
+    side: &SideKit,
     epoch: u32,
     index: usize,
     wreck: &Wreck,
@@ -854,7 +854,7 @@ mod tests {
             assert_eq!(entry.halves.is_some(), class.is_capital());
         }
         let (mesh_count, material_count) = (meshes.len(), materials.len());
-        let side = SideMaterials::build((0.2, 0.6, 1.0), &assets, &mut meshes, &mut materials);
+        let side = SideKit::build((0.2, 0.6, 1.0), &assets, &mut meshes, &mut materials);
         // Je Partei ein Rumpf je Klasse, dazu zwei Hälften je Großkampfschiff, und sechs
         // Leuchtfarben. Mehr entsteht nicht, egal wie viele Schiffe kämpfen.
         assert_eq!(meshes.len(), mesh_count + 6 + 2 * 3);
@@ -880,8 +880,8 @@ mod tests {
     fn side_colour_shows_in_the_hull_paint() {
         use bevy::mesh::VertexAttributeValues;
         let (assets, mut meshes, mut materials) = testing::assets();
-        let blue = SideMaterials::build((0.2, 0.5, 1.0), &assets, &mut meshes, &mut materials);
-        let red = SideMaterials::build((1.0, 0.3, 0.2), &assets, &mut meshes, &mut materials);
+        let blue = SideKit::build((0.2, 0.5, 1.0), &assets, &mut meshes, &mut materials);
+        let red = SideKit::build((1.0, 0.3, 0.2), &assets, &mut meshes, &mut materials);
         let colors = |handle: &Handle<Mesh>| {
             let Some(VertexAttributeValues::Float32x4(colors)) =
                 meshes.get(handle).unwrap().attribute(Mesh::ATTRIBUTE_COLOR)

@@ -726,7 +726,7 @@ pub const BATTLE_KEYS: [(&str, &str); 16] = [
         "Ziffernblock 7 / 1 / 3",
         "Blick von oben / von vorn / von der Seite (mit Strg: Gegenseite)",
     ),
-    ("U", "Übersicht über das ganze Feld"),
+    ("U", "Übersicht: alle Schiffe auf dem Feld im Blick"),
     ("G", "Zum Schwerpunkt des Gefechts"),
     ("Linksklick", "Schiff wählen (ins Leere: Auswahl aufheben)"),
     (

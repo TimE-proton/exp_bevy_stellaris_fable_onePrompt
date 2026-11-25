@@ -13,6 +13,7 @@ use crate::map::{FocusSystem, Selection};
 use crate::session::SessionRequest;
 use crate::state::AppState;
 use crate::time_control::{SPEEDS, SimSpeed};
+use crate::ui::format::decimal;
 use crate::ui::{LeftTab, UiState};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -52,8 +53,7 @@ impl Plugin for SelftestPlugin {
             shot_taken: false,
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
-        .add_systems(Update, (drive, probe_drive).run_if(in_state(AppState::InGame)))
-        .add_systems(FixedUpdate, probe_step.in_set(crate::battle_view::BattleFeedSet::Campaign).run_if(resource_exists::<ProbeBattle>));
+        .add_systems(Update, drive.run_if(in_state(AppState::InGame)));
     }
 }
 
@@ -117,55 +117,6 @@ fn drive(
     }
 }
 
-// --- PROBE (temporär) ---
-#[derive(Resource)]
-struct ProbeBattle(sim::battle::Battle);
-
-fn probe_step(data: Res<sim::GameData>, mut probe: ResMut<ProbeBattle>, mut feed: ResMut<BattleFeed>) {
-    probe.0.step(&data);
-    feed.refresh(&probe.0);
-}
-
-fn probe_drive(
-    mut commands: Commands,
-    args: Res<Args>,
-    test: Res<Selftest>,
-    data: Res<sim::GameData>,
-    mut feed: ResMut<BattleFeed>,
-    mut next: ResMut<NextState<crate::state::ViewState>>,
-    mut ui_state: ResMut<UiState>,
-) {
-    use crate::battle_view::feed::{FeedInfo, SideInfo};
-    if test.frame == 40 {
-        let config = crate::battle_view::practice::PracticeSetup::default().resolve(&data).unwrap();
-        let battle = config.build(&data);
-        feed.begin(&battle, FeedInfo {
-            title: "Gefecht bei Probe".into(),
-            sides: vec![
-                SideInfo { name: "Karawane".into(), color: (0.95, 0.8, 0.2) },
-                SideInfo { name: "Liga".into(), color: (0.3, 0.6, 1.0) },
-            ],
-            player_side: Some(0),
-            can_restart: false,
-            still: false,
-        });
-        commands.insert_resource(ProbeBattle(battle));
-        next.set(crate::state::ViewState::Battle);
-    }
-    if test.frame == 150 {
-        ui_state.menu_open = true;
-    }
-    if test.frame == 160 && let Some(path) = args.screenshot.as_deref() {
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(numbered(path, 1)));
-    }
-    if test.frame == 170 {
-        ui_state.menu_open = false;
-        commands.remove_resource::<ProbeBattle>();
-        feed.clear();
-        next.set(crate::state::ViewState::Galaxy);
-    }
-}
-
 // --- Gefechtsübung ---------------------------------------------------------------------
 
 /// Frames, die nach einem Kamerasprung vergehen, bevor fotografiert wird, und danach,
@@ -217,6 +168,8 @@ struct PracticeTest {
     pending: Option<Pending>,
     /// Gefechtszeit des ersten Schusses.
     contact: Option<f32>,
+    /// Gefechtszeit, zu der die laufende Phase begann.
+    phase_since: f32,
     photos: u32,
     peak_in_play: usize,
 }
@@ -234,6 +187,7 @@ impl PracticeTest {
             },
             pending: None,
             contact: None,
+            phase_since: 0.0,
             photos: 0,
             peak_in_play: 0,
         }
@@ -319,8 +273,9 @@ fn busy_exchange(battle: &Battle, feed: &BattleFeed, relaxed: bool) -> Option<(V
 }
 
 /// Das Wrack, um das herum am meisten liegt; bevorzugt ein auseinandergebrochenes
-/// Großkampfschiff, dessen Hälften schon ein Stück getrieben sind.
-fn wreck_cluster(battle: &Battle) -> Option<(Vec3, f32)> {
+/// Großkampfschiff, dessen Hälften schon ein Stück getrieben sind. Liefert Ort, Radius und
+/// Alter des Wracks.
+fn wreck_cluster(battle: &Battle) -> Option<(Vec3, f32, f32)> {
     battle
         .wrecks
         .iter()
@@ -337,10 +292,10 @@ fn wreck_cluster(battle: &Battle) -> Option<(Vec3, f32)> {
                     score += 20.0;
                 }
             }
-            (score, to_world(wreck.pos), wreck.radius)
+            (score, to_world(wreck.pos), wreck.radius, wreck.age)
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, position, radius)| (position, radius))
+        .map(|(_, position, radius, age)| (position, radius, age))
 }
 
 fn drive_practice(
@@ -390,6 +345,7 @@ fn drive_practice(
         }
         if pending.frames_left == 0 {
             test.phase = pending.next;
+            test.phase_since = battle.time;
             test.pending = None;
             if let Some(level) = pending.resume {
                 speed.level = level;
@@ -406,7 +362,8 @@ fn drive_practice(
 
     match test.phase {
         Phase::Approach => {
-            if !battle.shots.is_empty() || !battle.beams.is_empty() || battle.finished {
+            let contact = !battle.shots.is_empty() || !battle.beams.is_empty();
+            if contact || battle.finished || out_of_time {
                 test.contact = Some(battle.time);
                 speed.level = FIGHT_SPEED;
                 test.phase = Phase::Overview;
@@ -425,10 +382,11 @@ fn drive_practice(
             }
         }
         Phase::CloseUp => {
-            let relaxed = since_contact.is_some_and(|time| time >= 30.0) || out_of_time;
+            // Erst auf einen dichten Schusswechsel um ein Großkampfschiff warten; kommt
+            // einige Sekunden lang keiner, genügt jeder frische Strahl.
+            let relaxed = battle.time - test.phase_since >= 6.0 || out_of_time;
             let found = busy_exchange(battle, &feed, relaxed);
-            let give_up =
-                battle.finished || since_contact.is_some_and(|time| time >= 70.0) || out_of_time;
+            let give_up = battle.finished || out_of_time;
             if let Some((from, to, shooter)) = found {
                 let radius = battle.ships[shooter as usize].radius;
                 let along = (to - from).normalize_or_zero();
@@ -466,13 +424,19 @@ fn drive_practice(
                 .sum();
             let enough = battle.wrecks.len() as u32 >= (initial / 5).max(4);
             let late = since_contact.is_some_and(|time| time >= 20.0);
-            if (enough && late) || battle.finished || out_of_time {
+            let cluster = wreck_cluster(battle);
+            // Ein eben erst zerbrochenes Schiff glüht noch und liegt eng beisammen; ein paar
+            // Sekunden später ist daraus ein Trümmerfeld geworden.
+            let fresh = cluster.is_some_and(|(_, _, age)| age < 5.0)
+                && battle.time - test.phase_since < 30.0;
+            let ready = enough && late && !fresh;
+            if ready || battle.finished || out_of_time {
                 selected.0 = None;
                 // Ist das Gefecht schon vorbei, verdeckt sonst die Bilanz das Trümmerfeld.
                 options.summary = false;
-                match wreck_cluster(battle) {
-                    Some((position, radius)) => {
-                        let reach = (radius * 5.5).clamp(110.0, 380.0);
+                match cluster {
+                    Some((position, radius, _)) => {
+                        let reach = (radius * 6.0).clamp(45.0, 380.0);
                         camera.write(CameraRequest::Place {
                             eye: position + Vec3::new(-0.55, 0.6, 1.0).normalize() * reach,
                             target: position,
@@ -558,6 +522,11 @@ fn drive_practice(
                 .enumerate()
                 .map(|(part, label)| format!("{label} {:.0}", timings.part_micros(part)))
                 .collect();
+            let worst_parts: Vec<String> = PART_LABELS
+                .iter()
+                .enumerate()
+                .map(|(part, label)| format!("{label} {:.0}", timings.worst_part_micros(part)))
+                .collect();
             let per_tick = practice.as_ref().map_or(String::new(), |practice| {
                 let ticks = practice.ticks.max(1) as f64;
                 format!(
@@ -568,11 +537,11 @@ fn drive_practice(
             });
             let verdict = if complete { "OK" } else { "FEHLER" };
             println!(
-                "SELBSTTEST {verdict}: Gefechtsübung, {frame} Frames, Gefechtszeit {:.1} s ({ended}), \
+                "SELBSTTEST {verdict}: Gefechtsübung, {frame} Frames, Gefechtszeit {} s ({ended}), \
                  {} Schiffe ({} zugleich im Feld), {} Wracks, höchstens {} Geschosse und {} Strahlen gezeigt, \
-                 {} Effektplätze, {} Fotos, Ansicht {:.0} µs im Mittel und {:.0} µs höchstens je Frame \
-                 ({}; {} Frames gemessen){per_tick}",
-                battle.time,
+                 {} Effektplätze, {} Fotos, Ansicht {:.0} µs im Mittel (Median {:.0} µs) und {:.0} µs höchstens je Frame \
+                 (im Mittel: {}; im teuersten Frame: {}; {} Frames gemessen){per_tick}",
+                decimal(battle.time as f64, 1),
                 battle.ships.len(),
                 test.peak_in_play,
                 battle.wrecks.len(),
@@ -581,8 +550,10 @@ fn drive_practice(
                 stats.entities,
                 test.photos,
                 timings.average_micros(),
+                timings.median_micros(),
                 timings.worst_micros(),
                 parts.join(", "),
+                worst_parts.join(", "),
                 timings.frames,
             );
             exit.write(if complete {

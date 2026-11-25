@@ -56,7 +56,7 @@ impl Default for ViewOptions {
 /// Bitte an die Kamera.
 #[derive(Message, Clone, Copy, Debug, PartialEq)]
 pub enum CameraRequest {
-    /// Über das ganze Feld.
+    /// So weit zurück, dass alle Schiffe auf dem Feld im Bild sind.
     Overview,
     /// Zum gewählten Schiff; ohne Auswahl zum Schwerpunkt des Gefechts.
     Focus,
@@ -371,28 +371,37 @@ fn tame_free_camera(
     }
 }
 
+/// Tasten der Ansicht. Keine davon ist anderswo belegt (Zeitsteuerung, Menü, Hilfe,
+/// Schnellspeichern, Freiflug); ein Test wacht darüber.
+const KEY_OVERVIEW: KeyCode = KeyCode::KeyU;
+const KEY_FOCUS: KeyCode = KeyCode::KeyF;
+const KEY_FIGHT: KeyCode = KeyCode::KeyG;
+const KEY_FOLLOW: KeyCode = KeyCode::KeyV;
+const KEY_OVERLAY: KeyCode = KeyCode::KeyT;
+const KEY_LABELS: KeyCode = KeyCode::KeyN;
+
 fn hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     mut options: ResMut<ViewOptions>,
     selected: Res<SelectedShip>,
     mut requests: MessageWriter<CameraRequest>,
 ) {
-    if keys.just_pressed(KeyCode::KeyU) {
+    if keys.just_pressed(KEY_OVERVIEW) {
         requests.write(CameraRequest::Overview);
     }
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KEY_FOCUS) {
         requests.write(CameraRequest::Focus);
     }
-    if keys.just_pressed(KeyCode::KeyG) {
+    if keys.just_pressed(KEY_FIGHT) {
         requests.write(CameraRequest::FocusFight);
     }
-    if keys.just_pressed(KeyCode::KeyV) {
+    if keys.just_pressed(KEY_FOLLOW) {
         options.follow = !options.follow && selected.0.is_some();
     }
-    if keys.just_pressed(KeyCode::KeyT) {
+    if keys.just_pressed(KEY_OVERLAY) {
         options.overlay = !options.overlay;
     }
-    if keys.just_pressed(KeyCode::KeyN) {
+    if keys.just_pressed(KEY_LABELS) {
         options.labels = !options.labels;
     }
 }
@@ -731,6 +740,304 @@ mod tests {
         let mut empty = start.clone();
         empty.ships.clear();
         assert_eq!(overview_extent(&empty, field), 650.0);
+    }
+
+    /// Welt ohne Fenster und Grafikkarte: ein Gefecht im Feed, die Schlachtkamera und ein
+    /// Fenster, das nur seine Größe und den Mauszeiger kennt.
+    fn world(ticks: u32) -> (World, Entity) {
+        use super::super::feed::testing::{MIXED, data, stepped};
+        use bevy::ecs::message::Messages;
+
+        let data = data();
+        let (battle, feed) = stepped(&data, MIXED, ticks);
+        let view = overview_transform(overview_extent(&battle, 2400.0));
+        let frame = ViewFrame {
+            alpha: 1.0,
+            time: battle.time,
+            tick_seconds: 0.1,
+            poses: battle
+                .ships
+                .iter()
+                .map(|ship| (to_world(ship.pos), ship.heading))
+                .collect(),
+            projector: Projector::new(&view, FOV, Vec2::new(1600.0, 900.0)),
+        };
+        let mut world = World::new();
+        world.insert_resource(data);
+        world.insert_resource(feed);
+        world.insert_resource(frame);
+        world.insert_resource(ViewTimings::default());
+        world.init_resource::<SelectedShip>();
+        world.init_resource::<ViewOptions>();
+        world.init_resource::<FollowAnchor>();
+        world.init_resource::<Messages<CameraRequest>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        let camera = world
+            .spawn((BattleCamera, view, FreeCameraState::default()))
+            .id();
+        let mut window = Window::default();
+        window.resolution.set(1600.0, 900.0);
+        world.spawn((window, PrimaryWindow));
+        (world, camera)
+    }
+
+    fn click(world: &mut World, at: Option<Vec2>) {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut windows = world.query::<&mut Window>();
+        windows.single_mut(world).unwrap().set_cursor_position(at);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.run_system_once(pick_on_click).unwrap();
+        let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
+        buttons.release(MouseButton::Left);
+        buttons.clear();
+    }
+
+    #[test]
+    fn a_click_selects_the_ship_under_the_cursor() {
+        let (mut world, camera) = world(120);
+        let view = *world.get::<Transform>(camera).unwrap();
+        let projector = Projector::new(&view, FOV, Vec2::new(1600.0, 900.0));
+        let battle = world.resource::<BattleFeed>().battle().unwrap().clone();
+        // Jedes Schiff auf dem Feld lässt sich an seinem Ort im Bild anklicken.
+        let mut chosen = 0;
+        for (index, ship) in battle.ships.iter().enumerate() {
+            if !ship.status.in_play() {
+                continue;
+            }
+            let (screen, _) = projector.project(to_world(ship.pos)).expect("im Bild");
+            click(&mut world, Some(screen));
+            let picked = world
+                .resource::<SelectedShip>()
+                .0
+                .expect("ein Schiff gewählt");
+            // Liegen zwei Schiffe im Bild übereinander, gewinnt eines von beiden; es steht
+            // dann aber an derselben Stelle.
+            let other = &battle.ships[picked as usize];
+            assert!(
+                picked as usize == index
+                    || other.pos.distance(ship.pos) <= other.radius.max(ship.radius) * 1.6,
+                "Klick auf {index} wählte {picked}"
+            );
+            chosen += 1;
+        }
+        assert!(chosen > 10);
+        // Ein Klick ins Leere hebt die Auswahl auf; ohne Mauszeiger im Fenster bleibt sie.
+        click(&mut world, Some(Vec2::new(1590.0, 890.0)));
+        assert_eq!(world.resource::<SelectedShip>().0, None);
+        world.resource_mut::<SelectedShip>().0 = Some(3);
+        click(&mut world, None);
+        assert_eq!(world.resource::<SelectedShip>().0, Some(3));
+    }
+
+    #[test]
+    fn keys_request_camera_moves_and_toggle_options() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut world, _) = world(60);
+        let press = |world: &mut World, key: KeyCode| {
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(key);
+            world.run_system_once(hotkeys).unwrap();
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(key);
+            keys.clear();
+            world
+                .resource_mut::<Messages<CameraRequest>>()
+                .drain()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            press(&mut world, KeyCode::KeyU),
+            vec![CameraRequest::Overview]
+        );
+        assert_eq!(
+            press(&mut world, KeyCode::KeyG),
+            vec![CameraRequest::FocusFight]
+        );
+        assert_eq!(press(&mut world, KeyCode::KeyF), vec![CameraRequest::Focus]);
+        let before = *world.resource::<ViewOptions>();
+        assert!(press(&mut world, KeyCode::KeyT).is_empty());
+        assert!(press(&mut world, KeyCode::KeyN).is_empty());
+        let after = *world.resource::<ViewOptions>();
+        assert_eq!(after.overlay, !before.overlay);
+        assert_eq!(after.labels, !before.labels);
+        // Verfolgen braucht ein gewähltes Schiff.
+        press(&mut world, KeyCode::KeyV);
+        assert!(!world.resource::<ViewOptions>().follow);
+        world.resource_mut::<SelectedShip>().0 = Some(0);
+        press(&mut world, KeyCode::KeyV);
+        assert!(world.resource::<ViewOptions>().follow);
+        press(&mut world, KeyCode::KeyV);
+        assert!(!world.resource::<ViewOptions>().follow);
+        // Tasten der Zeitsteuerung und des Menüs lösen hier nichts aus.
+        for key in [
+            KeyCode::Space,
+            KeyCode::Digit3,
+            KeyCode::Escape,
+            KeyCode::F1,
+        ] {
+            assert!(press(&mut world, key).is_empty());
+        }
+        assert_eq!(
+            *world.resource::<ViewOptions>(),
+            ViewOptions {
+                follow: false,
+                ..after
+            }
+        );
+    }
+
+    #[test]
+    fn requests_move_the_camera_and_following_keeps_the_ship_in_view() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut world, camera) = world(200);
+        let ship = world
+            .resource::<BattleFeed>()
+            .battle()
+            .unwrap()
+            .ships
+            .iter()
+            .position(|ship| ship.status.in_play())
+            .unwrap();
+        let position = world.resource::<ViewFrame>().poses[ship].0;
+        let centered = |world: &World| {
+            let view = world.get::<Transform>(camera).unwrap();
+            let projector = Projector::new(view, FOV, Vec2::new(1600.0, 900.0));
+            projector.project(world.resource::<ViewFrame>().poses[ship].0)
+        };
+
+        // Heranholen: Das Schiff steht danach in der Bildmitte, nah genug, um es zu sehen.
+        world
+            .resource_mut::<Messages<CameraRequest>>()
+            .write(CameraRequest::FocusShip(ship as u32));
+        world.run_system_once(apply_requests).unwrap();
+        let (screen, depth) = centered(&world).unwrap();
+        assert!((screen - Vec2::new(800.0, 450.0)).length() < 0.5);
+        assert!(depth > 40.0 && depth < 650.0);
+        // Die Steuerung der Engine kennt die neue Blickrichtung.
+        let view = *world.get::<Transform>(camera).unwrap();
+        let flight = world.get::<FreeCameraState>(camera).unwrap();
+        let (yaw, pitch, _) = view.rotation.to_euler(EulerRot::YXZ);
+        assert!((flight.yaw - yaw).abs() < 1e-5 && (flight.pitch - pitch).abs() < 1e-5);
+
+        // Verfolgen: Wandert das Schiff, wandert die Kamera mit; es bleibt in der Mitte.
+        world.resource_mut::<SelectedShip>().0 = Some(ship as u32);
+        world.resource_mut::<ViewOptions>().follow = true;
+        world.run_system_once(follow_selected).unwrap();
+        for step in 1..=5 {
+            world.resource_mut::<ViewFrame>().poses[ship].0 =
+                position + Vec3::new(12.0, 0.0, -7.0) * step as f32;
+            world.run_system_once(follow_selected).unwrap();
+            let (screen, _) = centered(&world).unwrap();
+            assert!((screen - Vec2::new(800.0, 450.0)).length() < 0.5);
+        }
+        // Ohne Auswahl endet das Verfolgen, die Kamera bleibt stehen.
+        world.resource_mut::<SelectedShip>().0 = None;
+        let before = *world.get::<Transform>(camera).unwrap();
+        world.resource_mut::<ViewFrame>().poses[ship].0 += Vec3::X * 500.0;
+        world.run_system_once(follow_selected).unwrap();
+        assert!(!world.resource::<ViewOptions>().follow);
+        assert_eq!(*world.get::<Transform>(camera).unwrap(), before);
+
+        // Übersicht und Gefechtsschwerpunkt zeigen von oben auf das Feld.
+        for request in [CameraRequest::Overview, CameraRequest::FocusFight] {
+            world
+                .resource_mut::<Messages<CameraRequest>>()
+                .write(request);
+            world.run_system_once(apply_requests).unwrap();
+            let view = world.get::<Transform>(camera).unwrap();
+            assert!(
+                view.translation.y > 100.0 && view.forward().y < -0.3,
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_do_not_collide() {
+        use bevy::camera_controller::free_camera::FreeCamera;
+        use std::collections::BTreeSet;
+
+        let own = [
+            KEY_OVERVIEW,
+            KEY_FOCUS,
+            KEY_FIGHT,
+            KEY_FOLLOW,
+            KEY_OVERLAY,
+            KEY_LABELS,
+        ];
+        // Was die Freiflugkamera der Engine belegt.
+        let flight = FreeCamera::default();
+        let engine = [
+            flight.key_forward,
+            flight.key_back,
+            flight.key_left,
+            flight.key_right,
+            flight.key_up,
+            flight.key_down,
+            flight.key_run,
+            flight.keyboard_key_toggle_cursor_grab,
+            flight.key_snap_reverse,
+            flight.axis_top,
+            flight.axis_right,
+            flight.axis_front,
+        ];
+        // Was im ganzen Spiel gilt: Pause, Geschwindigkeit, Hilfe, Schnellspeichern, Menü.
+        let global = [
+            KeyCode::Space,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::NumpadAdd,
+            KeyCode::NumpadSubtract,
+            KeyCode::Equal,
+            KeyCode::Minus,
+            KeyCode::BracketRight,
+            KeyCode::Slash,
+            KeyCode::F1,
+            KeyCode::F5,
+            KeyCode::F9,
+            KeyCode::Escape,
+        ];
+        let all: Vec<String> = own
+            .iter()
+            .chain(&engine)
+            .chain(&global)
+            .map(|key| format!("{key:?}"))
+            .collect();
+        let distinct: BTreeSet<&String> = all.iter().collect();
+        assert_eq!(distinct.len(), all.len(), "doppelt belegte Taste: {all:?}");
+        // Die Hilfe nennt jede Taste der Ansicht.
+        let help: String = crate::ui::panels::BATTLE_KEYS
+            .iter()
+            .map(|(keys, _)| format!(" {keys} "))
+            .collect();
+        for key in own {
+            let name = format!("{key:?}").replace("Key", "");
+            assert!(
+                help.contains(&format!(" {name} ")),
+                "Taste {name} fehlt in der Hilfe"
+            );
+        }
+        for word in [
+            "W A S D",
+            "E / Q",
+            "Maustaste",
+            "Mausrad",
+            "Umschalt",
+            "Esc",
+        ] {
+            assert!(help.contains(word), "{word} fehlt in der Hilfe");
+        }
     }
 
     #[test]

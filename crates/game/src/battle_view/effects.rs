@@ -366,7 +366,7 @@ fn assign(
 #[cfg(test)]
 mod tests {
     use super::super::feed::testing::{MIXED, data, info, stepped};
-    use super::super::scene::{SideMaterials, testing::assets};
+    use super::super::scene::{SideKit, testing::assets};
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use sim::battle::matchup::{self, Side};
@@ -401,7 +401,7 @@ mod tests {
             epoch: Some(epoch),
             sides: [(0.3, 0.6, 1.0), (1.0, 0.4, 0.3)]
                 .into_iter()
-                .map(|color| SideMaterials::build(color, &assets, &mut meshes, &mut materials))
+                .map(|color| SideKit::build(color, &assets, &mut meshes, &mut materials))
                 .collect(),
         };
         Stores {
@@ -636,6 +636,67 @@ mod tests {
         let (all, visible) = slots(&mut world);
         assert_eq!(all, high_water);
         assert_eq!(visible, 0);
+    }
+
+    #[test]
+    fn effects_of_a_third_side_have_their_own_pools() {
+        use sim::battle::matchup::{self, Side};
+
+        let data = data();
+        let fleets = ["speer:3,waechter:2", "bastion:1,speer:2", "speer:2,dolch:3"];
+        let sides: Vec<Side> = fleets
+            .iter()
+            .map(|fleet| Side::parse(&data, fleet).unwrap())
+            .collect();
+        let mut battle = matchup::build(&data, 9, &sides);
+        let mut feed = BattleFeed::default();
+        feed.begin(&battle, info(3));
+
+        let (assets, mut meshes, mut materials) = assets();
+        let kits = SideAssets {
+            epoch: Some(feed.epoch),
+            sides: (0..3)
+                .map(|side| {
+                    SideKit::build(feed.side_color(side), &assets, &mut meshes, &mut materials)
+                })
+                .collect(),
+        };
+        let mut pools = EffectPools::default();
+        pools.rebuild(&assets, &kits);
+        assert_eq!(
+            pools.pools.len(),
+            3 * PER_SIDE + FLASH_LEVELS + SHIELD_LEVELS
+        );
+
+        let mut third_side_shots = 0;
+        for _ in 0..600 {
+            battle.step(&data);
+            feed.refresh(&battle);
+            let stats = pools.collect(&feed, &frame_for(&feed, 0.5));
+            if battle.finished {
+                break;
+            }
+            assert_eq!(stats.shots, battle.shots.len());
+            third_side_shots += pools.pools[2 * PER_SIDE + TRACER].items.len();
+        }
+        assert!(third_side_shots > 0, "die dritte Partei hat geschossen");
+
+        // Kennt die Ansicht eine Partei nicht (weniger Materialien als Parteien), bleiben
+        // deren Effekte weg, statt etwas Falsches zu zeigen oder abzustürzen.
+        let two = SideAssets {
+            epoch: Some(feed.epoch),
+            sides: kits.sides.into_iter().take(2).collect(),
+        };
+        pools.rebuild(&assets, &two);
+        let (mut battle, mut feed) = (matchup::build(&data, 9, &sides), BattleFeed::default());
+        feed.begin(&battle, info(3));
+        for _ in 0..400 {
+            battle.step(&data);
+            feed.refresh(&battle);
+            let stats = pools.collect(&feed, &frame_for(&feed, 0.5));
+            let known = battle.shots.iter().filter(|shot| shot.side < 2).count();
+            assert_eq!(stats.shots, known);
+        }
     }
 
     #[test]

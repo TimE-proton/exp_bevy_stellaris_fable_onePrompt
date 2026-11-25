@@ -212,12 +212,15 @@ fn draw_ui(
             );
         }
         (AppState::MainMenu, _) => {
-            panels::main_menu(
-                &mut root,
-                &mut ui_state,
-                quicksave_path().is_file(),
-                &mut actions,
-            );
+            // Der Aufstellungsdialog der Gefechtsübung tritt an die Stelle des Menüs.
+            if !ui_state.practice_open {
+                panels::main_menu(
+                    &mut root,
+                    &mut ui_state,
+                    quicksave_path().is_file(),
+                    &mut actions,
+                );
+            }
             if let Some(config) = crate::battle_view::practice::setup_dialog(
                 root.ctx(),
                 &data,

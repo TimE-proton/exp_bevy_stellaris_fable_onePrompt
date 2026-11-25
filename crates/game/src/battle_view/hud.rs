@@ -165,20 +165,31 @@ pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudActi
     let Some(battle) = refs.feed.battle() else {
         return;
     };
+    let t0 = std::time::Instant::now();
     markers(root.ctx(), refs, battle);
+    let t1 = std::time::Instant::now();
     egui::Panel::top("gefechtsleiste").show(root, |ui| top_bar(ui, refs, battle, actions));
+    let t2 = std::time::Instant::now();
     let ctx = root.ctx().clone();
     for side in 0..battle.combatants.len() {
         side_panel(&ctx, refs, battle, side, actions);
     }
+    let t3 = std::time::Instant::now();
     if let Some(ship) = refs
         .selected
         .and_then(|index| battle.ships.get(index as usize).map(|ship| (index, ship)))
     {
         inspector(&ctx, refs, battle, ship.0, ship.1, actions);
     }
+    let t4 = std::time::Instant::now();
     if battle.finished && refs.options.summary {
         summary(&ctx, refs, battle, actions);
+    }
+    let t5 = std::time::Instant::now();
+    let parts = [(t1 - t0), (t2 - t1), (t3 - t2), (t4 - t3), (t5 - t4)];
+    let total = t5 - t0;
+    if total.as_micros() > 2500 {
+        eprintln!("HUDSPIKE tick={} total={} markers={} top={} sides={} inspector={} summary={}", battle.tick, total.as_micros(), parts[0].as_micros(), parts[1].as_micros(), parts[2].as_micros(), parts[3].as_micros(), parts[4].as_micros());
     }
 }
 
@@ -271,7 +282,7 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
             }
             if ui
                 .button("Übersicht")
-                .on_hover_text("Über das ganze Feld (U)")
+                .on_hover_text("Alle Schiffe auf dem Feld im Blick (U)")
                 .clicked()
             {
                 actions.push(HudAction::Camera(CameraRequest::Overview));
@@ -441,7 +452,7 @@ fn inspector(
         .show(ctx, |ui| {
             ui.set_width(330.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&design.name).strong().size(16.0));
+                ui.label(RichText::new(&design.name).strong().color(ACCENT));
                 ui.label(RichText::new(ship.class.label()).color(MUTED));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
@@ -622,7 +633,7 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
             ui.label(
                 RichText::new(outcome_text(refs.feed, battle, &outcome))
                     .strong()
-                    .size(16.0),
+                    .color(ACCENT),
             );
             ui.label(
                 RichText::new(format!("Dauer {} Minuten Gefechtszeit", clock(battle.time)))
@@ -684,13 +695,13 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
             ui.horizontal(|ui| {
                 if refs.feed.info.can_restart
                     && ui
-                        .button(RichText::new("Neu starten").size(15.0))
+                        .button(RichText::new("Neu starten").strong())
                         .on_hover_text("Dasselbe Gefecht noch einmal von vorn")
                         .clicked()
                 {
                     actions.push(HudAction::Request(BattleViewRequest::Restart));
                 }
-                if ui.button(RichText::new("Zurück").size(15.0)).clicked() {
+                if ui.button(RichText::new("Zurück").strong()).clicked() {
                     actions.push(HudAction::Request(BattleViewRequest::Leave));
                 }
                 if ui
@@ -1192,6 +1203,72 @@ mod tests {
         assert_eq!(own.alpha, 0.0);
         assert!(own.points.is_empty());
         assert!(own.pixels > 200.0);
+    }
+
+    #[test]
+    fn battles_with_three_sides_and_unnamed_sides_draw() {
+        use super::super::feed::testing::info;
+        use sim::battle::matchup::Side;
+
+        let data = data();
+        let sides: Vec<Side> = [
+            "speer:2,waechter:2",
+            "bastion:1,dolch:3",
+            "horst:1,waechter:2",
+        ]
+        .iter()
+        .map(|fleet| Side::parse(&data, fleet).unwrap())
+        .collect();
+        let mut battle = matchup::build(&data, 3, &sides);
+        // Einmal mit drei benannten Parteien, einmal ohne jede Angabe zu den Parteien:
+        // Die Tafeln fallen dann auf Ersatznamen und Grau zurück.
+        for named in [3, 0] {
+            let mut feed = BattleFeed::default();
+            feed.begin(&battle, info(named));
+            for _ in 0..300 {
+                battle.step(&data);
+                feed.refresh(&battle);
+            }
+            let camera = super::super::camera::overview_transform(2400.0);
+            let frame_data = view_frame(&feed, &camera);
+            let speed = SimSpeed::default();
+            let options = ViewOptions::default();
+            for selected in [None, Some(0), Some(battle.ships.len() as u32 - 1)] {
+                let refs = HudRefs {
+                    feed: &feed,
+                    data: &data,
+                    frame: &frame_data,
+                    speed: &speed,
+                    selected,
+                    options: &options,
+                };
+                let mut actions = Vec::new();
+                frame(|ui| battle_hud(ui, &refs, &mut actions));
+                assert!(actions.is_empty());
+            }
+            assert_eq!(
+                collect_markers(&battle, &frame_data, &frame_data.projector).len(),
+                {
+                    battle
+                        .ships
+                        .iter()
+                        .filter(|ship| ship.status.in_play())
+                        .count()
+                }
+            );
+        }
+        assert_eq!(BattleFeed::default().side_name(0), "Unbekannt");
+    }
+
+    #[test]
+    fn help_draws_for_the_battle_view() {
+        let mut open = true;
+        frame(|ui| panels::help_window(ui.ctx(), &mut open, true));
+        assert!(open);
+        // Jede Zeile der Hilfe hat eine Taste und eine Erklärung.
+        for (keys, what) in panels::BATTLE_KEYS {
+            assert!(!keys.is_empty() && !what.is_empty());
+        }
     }
 
     #[test]
