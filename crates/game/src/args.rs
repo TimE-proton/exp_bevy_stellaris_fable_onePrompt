@@ -15,8 +15,8 @@ Aufruf: game [Optionen]
   --fleet-b LISTE     Flotte des roten Verbands
   --lineup            Mit --practice: je ein Schiff jeder Klasse nebeneinander zeigen
   --data-dir PFAD     Verzeichnis der RON-Spieldaten (Standard: assets/data)
-  --selftest [N]      Selbsttest: Partie (oder mit --practice eine Gefechtsübung) starten,
-                      höchstens N Frames laufen lassen (Standard 240), beenden
+  --selftest [N]      Selbsttest: Partie starten, N Frames laufen lassen (Standard 240),
+                      beenden; mit --practice eine Gefechtsübung, höchstens N Frames
   --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
                       nummeriert sie (DATEI_1.png, DATEI_2.png, …)
   --help              Diese Hilfe";
