@@ -7,6 +7,7 @@ use sim::GameData;
 use sim::battle::matchup::Side;
 use sim::clock::{DAYS_PER_YEAR, Date};
 use sim::command::{CommandOutcome, SimCommand};
+use sim::data::GoodTier;
 use sim::economy::{Economy, to_credits};
 use sim::fleet::{BuildOrder, Fleets, arms_capital, monthly_upkeep, yard_slots};
 use sim::harness::{Headless, check_invariants};
@@ -116,16 +117,17 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             );
         }
     }
-    let supply_goods: [(&str, GoodId); 5] = [
-        ("Munition", military.ammo_good_id),
-        ("Treibstoff", data.balance.economy.fuel_id),
-        ("Rumpfsegmente", military.hull_good_id),
-        (
-            "Waffensysteme",
-            data.good_id("waffensysteme").unwrap_or_default(),
-        ),
-        ("Antriebe", data.good_id("antriebe").unwrap_or_default()),
-    ];
+    // Wovon Flotten und Werften leben: Treibstoff und alle Rüstungsgüter.
+    let fuel = data.balance.economy.fuel_id;
+    let supply_goods: Vec<GoodId> = std::iter::once(fuel)
+        .chain(
+            data.goods
+                .iter()
+                .enumerate()
+                .filter(|(_, good)| good.tier == GoodTier::Military)
+                .map(|(index, _)| GoodId::from_index(index)),
+        )
+        .collect();
     for polity in &polities.list {
         if args.polity.is_some_and(|only| PolityId(only) != polity.id) {
             continue;
@@ -151,9 +153,10 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             let market = economy.market(planet.system);
             let stock: Vec<String> = supply_goods
                 .iter()
-                .map(|(name, good)| {
+                .map(|good| {
                     format!(
-                        "{name} {:.1} zu {:.0}",
+                        "{} {:.1} zu {:.0}",
+                        data.good(*good).name,
                         market.stock_of(*good),
                         market.price_of(*good)
                     )
