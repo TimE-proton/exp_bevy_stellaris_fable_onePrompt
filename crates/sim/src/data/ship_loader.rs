@@ -306,6 +306,7 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     }
 
     // --- Hangars: Bordjäger auflösen und ihre Kosten aufschlagen ---
+    let standoff = data.balance.battle.carrier_standoff;
     for index in 0..data.designs.len() {
         let file = "designs.ron";
         let key = data.designs[index].key.clone();
@@ -374,8 +375,9 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             return Err(invalid(file, format!("`{key}`: Jäger ohne Waffe")));
         }
         // Träger halten Abstand: Ihre Hauptwaffe sind die Jäger.
+        stats.gun_range = stats.main_range;
         if stats.fighters > 0 {
-            stats.main_range = stats.main_range.max(900.0);
+            stats.main_range = stats.main_range.max(standoff);
         }
     }
     for module in &mut data.modules {
@@ -429,6 +431,28 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
         return Err(invalid(
             "balance.ron",
             "battle: dt, grid_cell oder Radien unplausibel".into(),
+        ));
+    }
+    let share = |value: f32| (0.0..=1.0).contains(&value);
+    let doctrine_shares =
+        |values: (f32, f32, f32)| share(values.0) && share(values.1) && share(values.2);
+    if !(battle.damage_scale > 0.0
+        && (0.0..=1.0).contains(&battle.point_defense_hit)
+        && (0.0..=1.0).contains(&battle.reactor_breach)
+        && battle.rear_hull_factor >= 1.0
+        && battle.jump_out_time > 0.0
+        && battle.rearm_time > 0.0
+        && battle.stalemate_time > 0.0
+        && battle.time_limit > 0.0
+        && battle.morale_shock_recovery >= 0.0
+        && battle.morale_break < battle.morale_start
+        && doctrine_shares(battle.retreat_loss)
+        && doctrine_shares(battle.retreat_ratio)
+        && battle.retreat_unless_ahead >= 1.0)
+    {
+        return Err(invalid(
+            "balance.ron",
+            "battle: Tempo-, Moral- oder Rückzugswerte außerhalb ihres Bereichs".into(),
         ));
     }
     Ok(())

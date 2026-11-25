@@ -54,14 +54,14 @@
      kind: Weapon((kind: Kinetic, damage: 1.4, range: 150.0, cooldown: 0.4, tracking: 4.0, speed: 430.0,
                    spread: 0.03, ammo: 0.0, vs_shield: 0.5, vs_armor: 0.25, vs_hull: 1.0))),
     (key: "kanone", name: "Schienenkanone", hp: 30.0, power: 2.0, cost: [("waffensysteme", 1.0)],
-     kind: Weapon((kind: Kinetic, damage: 17.0, range: 630.0, cooldown: 2.2, tracking: 1.0, speed: 390.0,
+     kind: Weapon((kind: Kinetic, damage: 17.0, range: 630.0, cooldown: 2.2, tracking: 1.0, speed: 600.0,
                    spread: 0.012, ammo: 1.0, vs_shield: 0.7, vs_armor: 1.4, vs_hull: 1.0))),
     (key: "schwere_kanone", name: "Schwere Schienenkanone", hp: 50.0, power: 5.0, cost: [("waffensysteme", 2.6)],
      kind: Weapon((kind: Kinetic, damage: 64.0, range: 900.0, cooldown: 5.5, tracking: 0.3, speed: 350.0,
                    spread: 0.008, ammo: 4.0, vs_shield: 0.7, vs_armor: 1.5, vs_hull: 1.0))),
     (key: "kanone_2", name: "Spulenkanone", hp: 32.0, power: 3.0, cost: [("waffensysteme", 1.4)],
      tech: Some("waffen_2"),
-     kind: Weapon((kind: Kinetic, damage: 22.0, range: 680.0, cooldown: 2.0, tracking: 1.1, speed: 440.0,
+     kind: Weapon((kind: Kinetic, damage: 22.0, range: 680.0, cooldown: 2.0, tracking: 1.1, speed: 660.0,
                    spread: 0.010, ammo: 1.0, vs_shield: 0.7, vs_armor: 1.5, vs_hull: 1.0))),
 
     // --- Lenkwaffen ---

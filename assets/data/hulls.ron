@@ -31,13 +31,13 @@
     (
         key: "kreuzer", name: "Kreuzer", class: Cruiser,
         hull: 440.0, radius: 20.0, signature: 1.0, speed: 43.0, accel: 16.0, turn: 0.5,
-        armor_split: (0.36, 0.24, 0.16), segments: 14.0, build_days: 200, slots: 14,
+        armor_split: (0.36, 0.24, 0.16), segments: 14.0, build_days: 200, slots: 15,
         ammo: 160.0, fuel: 140.0,
         targets: (fighter: 0.2, corvette: 0.9, frigate: 1.0, cruiser: 0.7, battleship: 0.4, carrier: 0.6),
     ),
     (
         key: "schlachtschiff", name: "Schlachtschiff", class: Battleship,
-        hull: 1150.0, radius: 32.0, signature: 1.8, speed: 30.0, accel: 9.0, turn: 0.28,
+        hull: 1300.0, radius: 32.0, signature: 1.8, speed: 30.0, accel: 9.0, turn: 0.28,
         armor_split: (0.36, 0.25, 0.14), segments: 36.0, build_days: 420, slots: 22,
         ammo: 420.0, fuel: 220.0,
         targets: (fighter: 0.05, corvette: 0.3, frigate: 0.5, cruiser: 1.0, battleship: 0.9, carrier: 0.8),

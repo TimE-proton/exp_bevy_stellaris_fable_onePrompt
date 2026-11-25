@@ -265,8 +265,11 @@ pub struct DesignStats {
     /// Bauwert in Credits zu Richtpreisen; Maß für Kosten und Kampfwert.
     pub value: f64,
     pub build_days: u32,
-    /// Reichweite der Waffengruppe, die den meisten Schaden bringt.
+    /// Reichweite der Waffengruppe, die den meisten Schaden bringt; bei Trägern der
+    /// Abstand, den sie halten, solange sie Jäger haben.
     pub main_range: f32,
+    /// Reichweite der eigenen Waffen (ohne Jäger).
+    pub gun_range: f32,
     /// Anteil der Feuerkraft, der zur Seite wirken kann (0..1): Maß dafür, wie sehr
     /// sich eine Breitseite lohnt.
     pub broadside: f32,
@@ -410,6 +413,38 @@ pub struct BattleBalance {
     pub range_keep: PerDoctrine,
     pub fuel_per_second: f32,
     pub formation_spacing: f32,
+    /// Gemeinsamer Faktor auf jeden Schaden gegen Schiffe: das Tempo der Gefechte.
+    pub damage_scale: f32,
+    /// Trefferchance der Punktverteidigung gegen Lenkwaffen.
+    pub point_defense_hit: f64,
+    /// Aufschlag auf Rumpfschaden durch Treffer ins Heck.
+    pub rear_hull_factor: f32,
+    /// Moralpunkte je Sekunde, um die ein Schreck (Verluste, Treffer von achtern) abklingt.
+    pub morale_shock_recovery: f32,
+    /// Größter Moralabzug, wenn die eigene Seite hoffnungslos unterlegen ist.
+    pub morale_outlook: f32,
+    /// Rückzug, wenn so viel vom Anfangswert verloren ist (je Doktrin) …
+    pub retreat_loss: PerDoctrine,
+    /// … und die eigene Stärke nicht um diesen Faktor über der des Gegners liegt.
+    pub retreat_unless_ahead: f32,
+    /// Fliehende Schiffe springen nach so vielen Sekunden aus dem Gefecht.
+    pub jump_out_time: f32,
+    /// Umlauf der Breitseitenflotten als Anteil ihrer Fahrt, und wie stark der Mittelpunkt
+    /// des Gefechts zur Feldmitte zurückgezogen wird (1/s).
+    pub orbit_share: f32,
+    pub center_pull: f32,
+    /// Sekunden, die ein Jäger beim Träger braucht, um Munition und Treibstoff aufzufüllen.
+    pub rearm_time: f32,
+    /// Abstand, den Träger zum Gegner halten wollen (als ihre Hauptreichweite).
+    pub carrier_standoff: f32,
+    /// Eine Partei, die so viele Sekunden nicht mehr durch die Schilde des Gegners kam,
+    /// bricht das Gefecht ab.
+    pub stalemate_time: f32,
+    /// Ab diesem Verhältnis von Seiten- zu Bugfeuer zeigt ein Schiff dem Ziel die Breitseite
+    /// (und eine Flotte umkreist den Gegner); darunter fährt es mit dem Bug voran.
+    pub broadside_min: f32,
+    /// Winkel zwischen Bug und Ziel in der Breitseite, in Grad.
+    pub broadside_angle: f32,
 }
 
 /// `balance.ron: research`

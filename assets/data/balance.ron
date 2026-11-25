@@ -251,24 +251,28 @@
         // Trefferwahrscheinlichkeit von Strahlwaffen: Nachführung gegen Winkelgeschwindigkeit
         // des Ziels, dazu die Zielgröße (signature) mit diesem Gewicht.
         beam_signature_weight: 0.55,
-        // Anteil eines Rumpftreffers, der zusätzlich ein Modul beschädigt.
+        // Jeder Rumpftreffer beschädigt zusätzlich ein Modul um diesen Anteil des
+        // Rumpfschadens (welches, hängt von der getroffenen Seite ab).
         module_damage: 0.6,
         // Wahrscheinlichkeit, dass ein zerstörter Reaktor das Schiff zerreißt.
         reactor_breach: 0.5,
         // --- Moral (0..100) ---
+        // Moral = Ausgangswert - Rumpfabzug - Schreck - Lage der eigenen Seite.
         morale_start: 72.0,
         // Abzug je Punkt Kriegsmüdigkeit der eigenen Gemeinschaft.
         morale_per_weariness: 0.3,
-        // Abzug, wenn der eigene Rumpf vollständig verloren ginge.
+        // Bleibender Abzug, wenn der eigene Rumpf vollständig verloren ginge (anteilig).
         morale_hull_loss: 45.0,
-        // Abzug, wenn in der Nähe ein eigenes Schiff verloren geht (Großkampfschiff doppelt),
-        // Zuwachs, wenn ein feindliches verloren geht.
+        // Schreck, wenn in der Nähe ein eigenes Schiff verloren geht (Großkampfschiff
+        // doppelt), Auftrieb, wenn ein feindliches verloren geht. Beides klingt ab.
         morale_friend_lost: 3.5,
         morale_enemy_lost: 2.0,
         morale_radius: 650.0,
-        // Treffer ins Heck verunsichern zusätzlich (Faktor auf den Abzug).
-        morale_rear_factor: 1.6,
-        // Unter diesem Wert bricht ein Schiff aus der Formation und flieht.
+        // Treffer ins Heck erschrecken zusätzlich: vorübergehend dieser Faktor mal dem
+        // bleibenden Rumpfabzug des Treffers.
+        morale_rear_factor: 1.5,
+        // Unter diesem Wert bricht ein Schiff aus der Formation und versucht, das Feld zu
+        // verlassen.
         morale_break: 18.0,
         // Eine Flotte zieht sich zurück, wenn ihr verbliebener Kampfwert unter diesen
         // Anteil des gegnerischen fällt (je Doktrin: Offensiv, Ausgewogen, Defensiv).
@@ -279,6 +283,52 @@
         fuel_per_second: 0.02,
         // --- Aufstellung ---
         formation_spacing: 95.0,
+        // --- Tempo ---
+        // Gemeinsamer Faktor auf jeden Schaden gegen Schiffe. Der wichtigste Hebel für die
+        // Dauer der Gefechte: Halbieren verdoppelt sie ungefähr, ohne die Verhältnisse der
+        // Waffen untereinander zu verschieben. Wirkt nicht auf das Abfangen von Lenkwaffen.
+        damage_scale: 0.4,
+        // Trefferchance der Punktverteidigung gegen Lenkwaffen.
+        point_defense_hit: 0.65,
+        // Treffer ins Heck gehen auf die Antriebe: Aufschlag auf den Rumpfschaden.
+        rear_hull_factor: 1.6,
+        // --- Moral und Rückzug ---
+        // Ein Schreck (Verluste in der Nähe, Treffer von achtern) klingt mit dieser Rate ab
+        // (Punkte je Sekunde); der Abzug durch den eigenen Rumpfschaden bleibt.
+        morale_shock_recovery: 0.6,
+        // Größter Abzug, wenn die eigene Seite hoffnungslos unterlegen ist; bei
+        // Gleichstand null.
+        morale_outlook: 18.0,
+        // Rückzug der ganzen Flotte, wenn dieser Anteil des Anfangswerts verloren ist
+        // (offensiv spät, defensiv früh) und sie nicht klar vorn liegt.
+        retreat_loss: (0.65, 0.45, 0.3),
+        retreat_unless_ahead: 1.3,
+        // Nach so vielen Sekunden auf der Flucht springt ein Schiff aus dem Gefecht, auch
+        // wenn es den Rand noch nicht erreicht hat: So haben auch langsame Schiffe eine
+        // Aussicht zu entkommen.
+        jump_out_time: 45.0,
+        // --- Bewegung der Flotten ---
+        // Umlauf in der Breitseite als Anteil der Flottenfahrt (alle Parteien im selben
+        // Drehsinn), und wie stark der Mittelpunkt des Gefechts zur Feldmitte zurückgezogen
+        // wird (je Sekunde).
+        orbit_share: 0.45,
+        center_pull: 0.05,
+        // Jäger kehren zum Träger zurück, wenn die Lenkwaffen verschossen sind, und sind
+        // nach so vielen Sekunden wieder versorgt.
+        rearm_time: 6.0,
+        // Abstand, den Träger zum Gegner halten wollen: Sie schlagen mit ihren Jägern zu,
+        // nicht mit eigenen Geschützen.
+        carrier_standoff: 1250.0,
+        // Eine Flotte, die so viele Sekunden nach dem ersten Kontakt nicht mehr durch die
+        // Schilde des Gegners dringt, bricht ab (statt bis zur Zeitgrenze zu verharren).
+        stalemate_time: 60.0,
+        // Ab diesem Verhältnis von Seiten- zu Bugfeuer dreht ein Schiff dem Ziel die Seite
+        // zu und die Flotte umkreist den Gegner; darunter bleibt der Bug vorn.
+        broadside_min: 1.05,
+        // Winkel zwischen Bug und Ziel in der Breitseite (Grad). Unter 45 Grad trifft das
+        // Ziel noch die Bugpanzerung, und das Heck zeigt schräg vom Gegner weg: Wer in den
+        // Rücken der Linie kommt, trifft es.
+        broadside_angle: 80.0,
     ),
     research: (
         // Anteil der Staatseinnahmen, der anfangs in die Forschung geht.
