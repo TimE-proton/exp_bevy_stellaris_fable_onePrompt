@@ -1,0 +1,28 @@
+[package]
+name = "game"
+description = "Bevy-App: Galaxiekarte, 3D-Schlachten, Oberfläche und Eingabe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+default-run = "game"
+
+[features]
+default = ["x11"]
+# Fenster über X11. Läuft auch auf Wayland-Desktops (XWayland) und braucht keine
+# zusätzlichen Entwicklungspakete.
+x11 = ["bevy/x11"]
+# Natives Wayland: `cargo run --features wayland`. Braucht libwayland-dev und
+# libxkbcommon-dev zur Bauzeit.
+wayland = ["bevy/wayland"]
+# Dynamisches Linken von Bevy für die Entwicklung: `cargo dev`. Nie für Releases.
+dev = ["bevy/dynamic_linking"]
+
+[dependencies]
+sim.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+egui_plot.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = ["crates/sim", "crates/game", "crates/headless"]
+# `cargo run` startet das Spiel (einziges Binary unter den Default-Membern);
+# `cargo test` und `cargo clippy` decken Kern und Spiel ab.
+default-members = ["crates/sim", "crates/game"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+[workspace.dependencies]
+sim = { path = "crates/sim" }
+bevy_app = { version = "0.20.1", default-features = false, features = ["std"] }
+bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+clap = { version = "4.6", features = ["derive"] }
+bevy_egui = { version = "0.43.1", default-features = false, features = ["default_fonts", "render"] }
+egui_plot = "0.37"
+
+# Bevy ohne Audio und ohne Gamepad (brauchen ALSA bzw. libudev). Die Sammel-Features
+# `2d`/`3d`/`ui` ziehen das Gamepad mit, deshalb ist die Liste von Hand zusammengestellt.
+# Die Fenstersysteme (x11, wayland) schaltet das Crate `game` über eigene Features.
+[workspace.dependencies.bevy]
+version = "0.20.1"
+default-features = false
+features = [
+    "default_app",
+    "std",
+    "multi_threaded",
+    "bevy_winit",
+    "default_font",
+    "2d_bevy_render",
+    "3d_bevy_render",
+    "free_camera",
+]
+
+[workspace.lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+# Schnelle Entwicklungs-Builds: eigener Code leicht, Abhängigkeiten voll optimiert.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Der Simulationskern rechnet auch im Dev-Build mit voller Optimierung.
+[profile.dev.package.sim]
+opt-level = 3
+
+[profile.release]
+codegen-units = 4

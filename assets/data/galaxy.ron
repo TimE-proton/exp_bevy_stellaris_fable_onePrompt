@@ -1,0 +1,24 @@
+// Erzeugung der Galaxie. Der Raum ist absichtlich knapp: wenige Cluster, wenige Brücken.
+(
+    clusters: 7,
+    systems_per_cluster: (6, 8),
+    galaxy_radius: 620.0,
+    cluster_radius: 115.0,
+    cluster_spacing: 300.0,
+    system_spacing: 46.0,
+    // Anteil zusätzlicher Routen im Cluster: 0 = nur das Nötigste, 1 = dichtes Netz.
+    lane_density: 0.4,
+    // Brücken zwischen Clustern über das Minimum (clusters - 1) hinaus.
+    extra_bridges: 2,
+    planets_per_system: (1, 3),
+    polities: 6,
+    // Startbevölkerung der Heimatwelten in Millionen.
+    home_population: 4000.0,
+    stars: [
+        (name: "Roter Zwerg",   weight: 4.0, color: (1.00, 0.45, 0.30), radius: 0.8),
+        (name: "Gelbe Sonne",   weight: 3.0, color: (1.00, 0.92, 0.60), radius: 1.0),
+        (name: "Weißer Stern",  weight: 1.5, color: (0.90, 0.95, 1.00), radius: 1.1),
+        (name: "Blauer Riese",  weight: 0.6, color: (0.55, 0.70, 1.00), radius: 1.5),
+        (name: "Oranger Riese", weight: 1.0, color: (1.00, 0.65, 0.30), radius: 1.35),
+    ],
+)

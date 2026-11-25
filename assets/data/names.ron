@@ -1,0 +1,15 @@
+// Bausteine für Systemnamen: prefix + (manchmal middle) + suffix.
+(
+    prefixes: [
+        "Ar", "Bel", "Cor", "Dra", "El", "Fen", "Gal", "Hes", "Ith", "Jor", "Kal", "Lum",
+        "Mer", "Nav", "Or", "Pel", "Quir", "Rha", "Sol", "Tar", "Ul", "Ves", "Wen", "Xan",
+        "Yr", "Zel", "Ash", "Bry", "Cym", "Dor", "Eru", "Tho", "Ny", "Sae", "Vor", "Okh",
+    ],
+    middles: [
+        "a", "e", "i", "o", "u", "an", "en", "ar", "or", "il", "ath", "eth", "un", "ys",
+    ],
+    suffixes: [
+        "dor", "is", "ion", "a", "os", "eth", "ara", "une", "ix", "or", "heim", "mar",
+        "tis", "ys", "oth", "en", "ia", "ax", "und", "ren", "bal", "tor", "wyn", "ka",
+    ],
+)

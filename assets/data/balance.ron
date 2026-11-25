@@ -1,0 +1,15 @@
+// Stellschrauben, die zu keinem einzelnen Katalog gehören.
+(
+    colonization: (
+        // Siedler der ersten Welle in Millionen; sie ziehen von der Hauptwelt um.
+        settlers: 20.0,
+        // Tage zwischen zwei Koloniegründungen derselben Gemeinschaft.
+        cooldown_days: 240,
+        // Unter dieser Bevölkerung gibt die Hauptwelt keine Siedler ab.
+        min_capital_population: 200.0,
+    ),
+    population: (
+        // Jährliche Wachstumsrate weit unter der Tragfähigkeit.
+        growth_per_year: 0.025,
+    ),
+)

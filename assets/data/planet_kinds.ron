@@ -1,0 +1,110 @@
+// Planetentypen. Aus ihnen werden beim Erzeugen der Galaxie die Planeten gewürfelt.
+// weight: Häufigkeit. home: taugt als Heimatwelt.
+// gravity (g), temperature (°C), water (Anteil 0..1), capacity (Mio. Einwohner bei
+// voller Bewohnbarkeit) sind Bereiche (min, max).
+// atmospheres: Liste aus (Art, Gewicht). Art: None | Thin | Breathable | Dense | Toxic | Corrosive
+// deposits: chance = Wahrscheinlichkeit des Vorkommens, richness = Ergiebigkeit (min, max).
+[
+    (
+        key: "gartenwelt", name: "Gartenwelt", weight: 0.7, home: true,
+        color: (0.30, 0.62, 0.36),
+        gravity: (0.85, 1.15), temperature: (6.0, 26.0), water: (0.45, 0.75),
+        atmospheres: [(Breathable, 1.0)],
+        capacity: (7000.0, 11000.0),
+        deposits: [
+            (good: "biomasse",    chance: 1.0,  richness: (0.8, 1.4)),
+            (good: "erz",         chance: 0.8,  richness: (0.3, 0.8)),
+            (good: "silikate",    chance: 0.8,  richness: (0.3, 0.8)),
+            (good: "fluechtige",  chance: 0.6,  richness: (0.2, 0.6)),
+            (good: "seltenerden", chance: 0.25, richness: (0.1, 0.4)),
+        ],
+    ),
+    (
+        key: "ozeanwelt", name: "Ozeanwelt", weight: 0.9,
+        color: (0.18, 0.42, 0.75),
+        gravity: (0.8, 1.4), temperature: (2.0, 32.0), water: (0.85, 1.0),
+        atmospheres: [(Breathable, 0.6), (Dense, 0.4)],
+        capacity: (3000.0, 7000.0),
+        deposits: [
+            (good: "biomasse",    chance: 1.0,  richness: (0.9, 1.6)),
+            (good: "fluechtige",  chance: 0.9,  richness: (0.5, 1.2)),
+            (good: "seltenerden", chance: 0.3,  richness: (0.2, 0.6)),
+        ],
+    ),
+    (
+        key: "steppenwelt", name: "Steppenwelt", weight: 1.2,
+        color: (0.76, 0.62, 0.36),
+        gravity: (0.7, 1.3), temperature: (15.0, 55.0), water: (0.05, 0.3),
+        atmospheres: [(Breathable, 0.4), (Thin, 0.6)],
+        capacity: (2000.0, 6000.0),
+        deposits: [
+            (good: "erz",         chance: 0.9,  richness: (0.5, 1.2)),
+            (good: "silikate",    chance: 1.0,  richness: (0.8, 1.5)),
+            (good: "biomasse",    chance: 0.5,  richness: (0.2, 0.6)),
+            (good: "seltenerden", chance: 0.4,  richness: (0.3, 0.9)),
+            (good: "spaltstoffe", chance: 0.3,  richness: (0.2, 0.8)),
+        ],
+    ),
+    (
+        key: "eiswelt", name: "Eiswelt", weight: 1.3,
+        color: (0.78, 0.88, 0.95),
+        gravity: (0.3, 1.1), temperature: (-160.0, -30.0), water: (0.6, 1.0),
+        atmospheres: [(Thin, 0.5), (None, 0.5)],
+        capacity: (600.0, 2500.0),
+        deposits: [
+            (good: "fluechtige",  chance: 1.0,  richness: (1.0, 1.8)),
+            (good: "erz",         chance: 0.5,  richness: (0.3, 0.8)),
+            (good: "spaltstoffe", chance: 0.35, richness: (0.3, 1.0)),
+        ],
+    ),
+    (
+        key: "felswelt", name: "Felswelt", weight: 1.8,
+        color: (0.55, 0.52, 0.50),
+        gravity: (0.2, 1.6), temperature: (-120.0, 140.0), water: (0.0, 0.05),
+        atmospheres: [(None, 0.7), (Thin, 0.3)],
+        capacity: (400.0, 2000.0),
+        deposits: [
+            (good: "erz",         chance: 1.0,  richness: (0.9, 1.8)),
+            (good: "silikate",    chance: 0.9,  richness: (0.6, 1.4)),
+            (good: "seltenerden", chance: 0.5,  richness: (0.4, 1.3)),
+            (good: "spaltstoffe", chance: 0.4,  richness: (0.3, 1.2)),
+        ],
+    ),
+    (
+        key: "glutwelt", name: "Glutwelt", weight: 0.7,
+        color: (0.85, 0.32, 0.14),
+        gravity: (0.6, 1.8), temperature: (300.0, 900.0), water: (0.0, 0.0),
+        atmospheres: [(Corrosive, 0.5), (Toxic, 0.3), (None, 0.2)],
+        capacity: (150.0, 800.0),
+        deposits: [
+            (good: "erz",         chance: 1.0,  richness: (1.2, 2.2)),
+            (good: "seltenerden", chance: 0.8,  richness: (0.8, 1.8)),
+            (good: "spaltstoffe", chance: 0.7,  richness: (0.8, 1.9)),
+        ],
+    ),
+    (
+        key: "giftwelt", name: "Giftwelt", weight: 0.8,
+        color: (0.62, 0.70, 0.22),
+        gravity: (0.7, 1.5), temperature: (20.0, 220.0), water: (0.1, 0.5),
+        atmospheres: [(Toxic, 0.7), (Corrosive, 0.3)],
+        capacity: (300.0, 1500.0),
+        deposits: [
+            (good: "fluechtige",  chance: 1.0,  richness: (0.8, 1.6)),
+            (good: "biomasse",    chance: 0.5,  richness: (0.3, 1.0)),
+            (good: "silikate",    chance: 0.6,  richness: (0.4, 1.0)),
+            (good: "seltenerden", chance: 0.4,  richness: (0.3, 1.0)),
+        ],
+    ),
+    (
+        // Besiedelt werden Stationen und Monde; die Schwerkraft gilt dort.
+        key: "gasriese", name: "Gasriese", weight: 1.0,
+        color: (0.80, 0.66, 0.50),
+        gravity: (0.1, 0.4), temperature: (-180.0, -60.0), water: (0.0, 0.1),
+        atmospheres: [(None, 1.0)],
+        capacity: (200.0, 900.0),
+        deposits: [
+            (good: "fluechtige",  chance: 1.0,  richness: (1.4, 2.4)),
+            (good: "spaltstoffe", chance: 0.3,  richness: (0.3, 0.9)),
+        ],
+    ),
+]

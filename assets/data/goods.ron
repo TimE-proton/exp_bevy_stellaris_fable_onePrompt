@@ -1,0 +1,31 @@
+// Güter der Galaxie.
+// tier: Raw (Rohstoff aus Vorkommen) | Intermediate | Final | Military
+// base_price: Richtpreis, um den sich lokale Preise bilden.
+// mass: Laderaum je Einheit im Frachter.
+[
+    // --- Rohstoffe ---
+    (key: "erz",          name: "Erz",            tier: Raw, base_price: 8.0,  mass: 1.4),
+    (key: "silikate",     name: "Silikate",       tier: Raw, base_price: 6.0,  mass: 1.2),
+    (key: "fluechtige",   name: "Flüchtige",      tier: Raw, base_price: 7.0,  mass: 1.0),
+    (key: "biomasse",     name: "Biomasse",       tier: Raw, base_price: 5.0,  mass: 1.0),
+    (key: "seltenerden",  name: "Seltene Erden",  tier: Raw, base_price: 22.0, mass: 0.8),
+    (key: "spaltstoffe",  name: "Spaltstoffe",    tier: Raw, base_price: 30.0, mass: 0.6),
+
+    // --- Zwischenprodukte ---
+    (key: "legierungen",  name: "Legierungen",    tier: Intermediate, base_price: 24.0, mass: 1.2),
+    (key: "polymere",     name: "Polymere",       tier: Intermediate, base_price: 20.0, mass: 0.8),
+    (key: "elektronik",   name: "Elektronik",     tier: Intermediate, base_price: 60.0, mass: 0.4),
+    (key: "treibstoff",   name: "Treibstoff",     tier: Intermediate, base_price: 18.0, mass: 1.0),
+    (key: "nahrung",      name: "Nahrung",        tier: Intermediate, base_price: 12.0, mass: 0.8),
+    (key: "maschinen",    name: "Maschinen",      tier: Intermediate, base_price: 85.0, mass: 1.0),
+
+    // --- Endgüter ---
+    (key: "konsumgueter", name: "Konsumgüter",    tier: Final, base_price: 70.0,  mass: 0.6),
+    (key: "medizin",      name: "Medizin",        tier: Final, base_price: 110.0, mass: 0.2),
+
+    // --- Rüstung ---
+    (key: "munition",     name: "Munition",       tier: Military, base_price: 55.0,  mass: 1.0),
+    (key: "rumpfsegmente", name: "Rumpfsegmente", tier: Military, base_price: 140.0, mass: 2.0),
+    (key: "waffensysteme", name: "Waffensysteme", tier: Military, base_price: 260.0, mass: 1.0),
+    (key: "antriebe",     name: "Antriebe",       tier: Military, base_price: 240.0, mass: 1.2),
+]

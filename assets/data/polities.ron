@@ -1,0 +1,20 @@
+// Vorlagen für die Gemeinschaften. Jede Partie zieht daraus so viele, wie galaxy.ron
+// unter `polities` verlangt. color: sRGB 0..1.
+[
+    (key: "halde",     name: "Halde-Konkordat",       short: "Konkordat", color: (0.90, 0.55, 0.15),
+     motto: "Was wir heben, hält uns zusammen."),
+    (key: "vesper",    name: "Vesperbund",            short: "Vesperbund", color: (0.55, 0.40, 0.90),
+     motto: "Am Abend zählt, wer geblieben ist."),
+    (key: "irrlicht",  name: "Irrlicht-Syndikat",     short: "Syndikat", color: (0.20, 0.80, 0.70),
+     motto: "Jeder Weg hat einen Preis."),
+    (key: "thalassa",  name: "Thalassische Liga",     short: "Liga", color: (0.20, 0.50, 0.95),
+     motto: "Ein Meer, viele Ufer."),
+    (key: "tiefenuhr", name: "Orden der Tiefen Uhr",  short: "Orden", color: (0.85, 0.25, 0.30),
+     motto: "Die Zeit arbeitet für die Geduldigen."),
+    (key: "meridian",  name: "Karawane von Meridian", short: "Karawane", color: (0.95, 0.85, 0.25),
+     motto: "Wer rastet, wird überholt."),
+    (key: "aschgrau",  name: "Aschgraue Räte",        short: "Räte", color: (0.60, 0.65, 0.70),
+     motto: "Kein Befehl ohne Beschluss."),
+    (key: "sonnwend",  name: "Sonnwend-Kommune",      short: "Kommune", color: (0.50, 0.85, 0.30),
+     motto: "Nach der längsten Nacht gehört der Tag allen."),
+]

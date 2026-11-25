@@ -1,0 +1,10 @@
+# Kurzbefehle. `cargo run` startet das Spiel, `cargo test` / `cargo clippy` prüfen Kern und Spiel.
+[alias]
+# Entwicklungsstart mit dynamisch gelinktem Bevy (schnelles Neu-Linken). Nie für Releases.
+dev = "run -p game --features dev"
+# KI gegen KI ohne Grafik:  cargo headless run --seed 7 --years 50
+headless = "run --release -p headless --"
+# Viele Seeds für die Balance:  cargo sweep --seeds 0..32 --years 150
+sweep = "run --release -p headless -- sweep"
+# Alles prüfen, Warnungen sind Fehler.
+lint = "clippy --workspace --all-targets -- -D warnings"
