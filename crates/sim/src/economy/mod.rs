@@ -9,7 +9,9 @@ mod plugin;
 pub mod production;
 mod setup;
 
-pub use capital::{invest_and_depreciate, migrate, settle_public_accounts, steer_money_supply};
+pub use capital::{
+    invest_and_depreciate, migrate, pay_households, settle_public_accounts, steer_money_supply,
+};
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
     abandon_dead_colonies, grow_population, produce_and_consume, target_price,
@@ -43,6 +45,61 @@ pub fn pay(from: &mut Money, to: &mut Money, amount: Money) -> Money {
     *from -= moved;
     *to += moved;
     moved
+}
+
+/// Anteil des Marktbestands, den ein einzelner Käufer an einem Tag höchstens abnimmt.
+/// Verhindert, dass der erste Käufer eines Systems den Markt leerkauft.
+pub const BUYER_SHARE: f64 = 0.5;
+
+/// Bucht einen Kauf am Kontor zum Briefkurs: Ware aus dem Bestand, Geld aus `purse` in die
+/// Kasse des Kontors. Gekauft wird höchstens, was vorhanden und bezahlbar ist. Gibt Menge
+/// und gezahlten Betrag zurück.
+pub fn purchase(
+    market: &mut Market,
+    good: GoodId,
+    quantity: f64,
+    purse: &mut Money,
+    spread: f64,
+) -> (f64, Money) {
+    let index = good.index();
+    let ask = market.ask(good, spread);
+    let quantity = quantity
+        .min(market.stock[index])
+        .min(to_credits((*purse).max(0)) / ask)
+        .max(0.0);
+    if quantity <= 0.0 {
+        return (0.0, 0);
+    }
+    let paid = pay(purse, &mut market.cash, to_money(quantity * ask));
+    market.stock[index] = (market.stock[index] - quantity).max(0.0);
+    market.turnover_today += to_credits(paid);
+    (quantity, paid)
+}
+
+/// Einkauf eines Käufers ohne eigenes Lager (der Staat für Nachschub und Instandsetzung):
+/// meldet den Wunsch als Nachfrage und nimmt höchstens den Anteil am Bestand, der einem
+/// einzelnen Käufer zusteht. Gibt Menge und gezahlten Betrag zurück.
+pub fn procure(
+    market: &mut Market,
+    good: GoodId,
+    wanted: f64,
+    purse: &mut Money,
+    spread: f64,
+) -> (f64, Money) {
+    if wanted <= 0.0 {
+        return (0.0, 0);
+    }
+    // Kaufkräftige Nachfrage zählt auch dann, wenn die Ware fehlt: Knappheit hebt den Preis
+    // und zieht Frachter an. Wünsche ohne Geld bewegen keinen Preis.
+    let affordable = to_credits((*purse).max(0)) / market.ask(good, spread);
+    market.demand_today[good.index()] += wanted.min(affordable);
+    purchase(
+        market,
+        good,
+        wanted.min(market.available(good)),
+        purse,
+        spread,
+    )
 }
 
 /// Das Kontor lagert höchstens dieses Vielfache der Soll-Reichweite.
@@ -105,6 +162,12 @@ impl Market {
     pub fn room(&self, good: GoodId, cover_days: f64) -> f64 {
         let cap = (self.demand[good.index()] * cover_days * STOCK_CAP_FACTOR).max(STOCK_CAP_FLOOR);
         (cap - self.stock[good.index()]).max(0.0)
+    }
+
+    /// Was ein einzelner Käufer heute höchstens abnehmen darf.
+    #[inline]
+    pub fn available(&self, good: GoodId) -> f64 {
+        self.stock[good.index()] * BUYER_SHARE
     }
 
     /// Preis, den ein Käufer zahlt.

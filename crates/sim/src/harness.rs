@@ -300,6 +300,12 @@ pub fn check_invariants(world: &World) -> Result<(), String> {
     if let Some(anomaly) = stats.anomaly {
         return Err(anomaly);
     }
+    // Flotten: Schiffe in ihren Grenzen, keine Flotte ohne Schiffe, Nummern eindeutig,
+    // die Stärke passend zu den Schiffen.
+    let fleets = world.resource::<crate::fleet::Fleets>();
+    if let Some(anomaly) = fleets.find_anomaly(world.resource::<GameData>()) {
+        return Err(anomaly);
+    }
     let galaxy = world.resource::<Galaxy>();
     for planet in &galaxy.planets {
         if !planet.population.is_finite() || planet.population < 0.0 {
@@ -339,11 +345,21 @@ pub struct PolitySummary {
     pub alive: bool,
     pub planets: usize,
     pub population: f64,
+    /// Bestehende Flotten und die Schiffe darin.
+    pub fleets: usize,
+    pub ships: usize,
+    /// Summe der Flottenstärken.
+    pub strength: f64,
+    /// Offene Bauaufträge.
+    pub orders: usize,
+    /// Soldrückstand 0..1.
+    pub arrears: f64,
 }
 
 pub fn summarize(sim: &Headless) -> RunSummary {
     let galaxy = sim.galaxy();
     let config = sim.world().resource::<SimConfig>();
+    let fleets = sim.world().resource::<crate::fleet::Fleets>();
     RunSummary {
         seed: config.seed,
         days: sim.clock().day(),
@@ -364,6 +380,14 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 alive: polity.alive,
                 planets: galaxy.planets_of(polity.id).count(),
                 population: galaxy.population_of(polity.id),
+                fleets: fleets.of(polity.id).count(),
+                ships: fleets.ship_count(polity.id),
+                strength: fleets
+                    .of(polity.id)
+                    .map(|fleet| fleet.strength as f64)
+                    .sum(),
+                orders: fleets.orders_of(polity.id).count(),
+                arrears: fleets.arrears_of(polity.id) as f64,
             })
             .collect(),
         economy: economy_stats(sim.world()),

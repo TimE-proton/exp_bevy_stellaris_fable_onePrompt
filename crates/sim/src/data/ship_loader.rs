@@ -412,6 +412,7 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     military.hull_good_id = hull_good;
     military.ammo_good_id = good("balance.ron", "military.ammo_good", &military.ammo_good)?;
     military.starting_fleet_ids.clear();
+    let mut starting_value = 0.0;
     for (key, count) in &military.starting_fleet {
         let index = design_keys
             .iter()
@@ -422,7 +423,87 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
                     format!("military.starting_fleet: unbekannter Entwurf `{key}`"),
                 )
             })?;
+        let stats = &data.designs[index].stats;
+        if *count == 0 || stats.class == ShipClass::Fighter {
+            return Err(invalid(
+                "balance.ron",
+                format!(
+                    "military.starting_fleet: `{key}` braucht eine Anzahl ab 1 und darf kein Bordjäger sein"
+                ),
+            ));
+        }
+        starting_value += stats.value * *count as f64;
         military.starting_fleet_ids.push((index as u16, *count));
+    }
+    // Die Startflotte ist das Maß der Flottenstärke: Ohne sie gäbe es keinen Maßstab.
+    let start_strength = data.balance.fleets.start_strength as f64;
+    if starting_value <= 0.0 || !(start_strength.is_finite() && start_strength > 0.0) {
+        return Err(invalid(
+            "balance.ron",
+            "military.starting_fleet darf nicht leer sein, fleets.start_strength muss positiv sein"
+                .into(),
+        ));
+    }
+    military.strength_per_value = start_strength / starting_value;
+    let unit = 0.0..=1.0;
+    let checks = [
+        (
+            "upkeep_per_month muss in 0..1 liegen",
+            unit.contains(&military.upkeep_per_month),
+        ),
+        (
+            "arrears_smoothing muss über 0 und höchstens 1 sein",
+            military.arrears_smoothing > 0.0 && military.arrears_smoothing <= 1.0,
+        ),
+        (
+            "yard_capital_per_slot muss positiv sein",
+            military.yard_capital_per_slot > 0.0 && military.yard_capital_per_slot.is_finite(),
+        ),
+        (
+            "yard_fee muss in 0..5 liegen",
+            (0.0..=5.0).contains(&military.yard_fee),
+        ),
+        (
+            "yard_queue muss mindestens 1 sein",
+            military.yard_queue >= 1,
+        ),
+        (
+            "repair_per_day muss über 0 und höchstens 1 sein",
+            military.repair_per_day > 0.0 && military.repair_per_day <= 1.0,
+        ),
+        (
+            "repair_parts darf nicht negativ sein",
+            military.repair_parts >= 0.0 && military.repair_parts.is_finite(),
+        ),
+        (
+            "resupply_per_day muss über 0 und höchstens 1 sein",
+            military.resupply_per_day > 0.0 && military.resupply_per_day <= 1.0,
+        ),
+        (
+            "fuel_per_distance darf nicht negativ sein",
+            military.fuel_per_distance >= 0.0 && military.fuel_per_distance.is_finite(),
+        ),
+        (
+            "dry_speed muss über 0 und höchstens 1 sein",
+            military.dry_speed > 0.0 && military.dry_speed <= 1.0,
+        ),
+        (
+            "module_weight und repair_hull_share müssen in 0..1 liegen",
+            (0.0..=1.0).contains(&military.module_weight)
+                && (0.0..=1.0).contains(&military.repair_hull_share),
+        ),
+        (
+            "ammo_goods und fuel_goods dürfen nicht negativ sein",
+            military.ammo_goods >= 0.0
+                && military.ammo_goods.is_finite()
+                && military.fuel_goods >= 0.0
+                && military.fuel_goods.is_finite(),
+        ),
+    ];
+    for (message, ok) in checks {
+        if !ok {
+            return Err(invalid("balance.ron", format!("military: {message}")));
+        }
     }
     let battle = &data.balance.battle;
     if battle.dt <= 0.0 || battle.grid_cell <= 0.0 || battle.exit_radius <= battle.spawn_radius {

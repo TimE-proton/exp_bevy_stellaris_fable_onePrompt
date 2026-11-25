@@ -1,19 +1,34 @@
-//! Flotten auf der Galaxiekarte: Bewegung, Blockade, Kaperfahrt.
+//! Flotten auf der Galaxiekarte: Schiffe, Bewegung, Werften, Nachschub, Blockade.
 //!
-//! Stand Meilenstein 2: Eine Flotte ist eine Stärkezahl, Gefechte werden grob aufgelöst.
-//! Meilenstein 4 ersetzt das durch Schiffe mit Modulen und den taktischen Resolver.
+//! Eine Flotte besteht aus Schiffen mit Entwurf, Zustand und Bordvorräten. Ihre Stärke
+//! ist kein eigener Zustand mehr, sondern aus den Schiffen abgeleitet (Bauwert mal
+//! Zustand); Kaperfahrt, Geleitschutz und Blockade rechnen weiter mit dieser einen Zahl.
+//! Schiffe entstehen in Werften aus echten Bauteilen vom Markt, fassen Munition und
+//! Treibstoff nach, wo ihre Gemeinschaft zu Hause ist, und kosten jeden Monat Sold.
+//!
+//! Gefechte löst vorläufig noch die grobe Tagesregel in `skirmish` auf; der taktische
+//! Rechner aus [`crate::battle`] ersetzt sie.
 
+mod movement;
 mod plugin;
+mod skirmish;
+mod supply;
+mod yard;
 
+pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
+pub use skirmish::resolve_skirmishes;
+pub use supply::{monthly_upkeep, pay_upkeep, repair_fleets, resupply_fleets};
+pub use yard::{
+    BuildOrder, advance_yards, arms_capital, cancel_order, design_buildable, order_ship, yard_slots,
+};
 
-use crate::chronicle::{Chronicle, ChronicleKind};
-use crate::data::{FleetBalance, GameData};
+use crate::battle::{Doctrine, Formation, ShipSpec};
+use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
-use crate::ids::{FleetId, PolityId, SystemId};
+use crate::ids::{FleetId, PlanetId, PolityId, ShipId, SystemId};
 use crate::polity::Polities;
-use crate::rng::{Domain, Rng};
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
@@ -48,11 +63,125 @@ impl Stance {
     }
 }
 
+/// Ein Schiff der strategischen Ebene. Rumpf, Munition und Treibstoff sind Anteile 0..1
+/// am Höchstwert des Entwurfs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ship {
+    pub id: ShipId,
+    /// Index in [`GameData::designs`].
+    pub design: u16,
+    pub hull: f32,
+    /// Zustand 0..1 je Modul in der Reihenfolge des Entwurfs; leer heißt: alle heil.
+    pub modules: Vec<f32>,
+    pub ammo: f32,
+    pub fuel: f32,
+    /// Bordjäger im Hangar.
+    pub fighters: u32,
+}
+
+impl Ship {
+    /// Unversehrt und voll versorgt.
+    pub fn fresh(data: &GameData, id: ShipId, design: u16) -> Self {
+        Self {
+            id,
+            design,
+            hull: 1.0,
+            modules: Vec::new(),
+            ammo: 1.0,
+            fuel: 1.0,
+            fighters: data.designs[design as usize].stats.fighters,
+        }
+    }
+
+    /// Frisch aus der Werft: unversehrt, die Bordjäger an Bord, aber Magazine und Tanks
+    /// leer. Munition und Treibstoff sind nicht Teil der Bauteile; das Schiff fasst sie
+    /// wie jedes andere am Markt nach.
+    pub fn from_yard(data: &GameData, id: ShipId, design: u16) -> Self {
+        Self {
+            ammo: 0.0,
+            fuel: 0.0,
+            ..Self::fresh(data, id, design)
+        }
+    }
+
+    /// Mittlerer Zustand der Module (1 = alle heil).
+    pub fn module_condition(&self) -> f32 {
+        if self.modules.is_empty() {
+            1.0
+        } else {
+            self.modules.iter().sum::<f32>() / self.modules.len() as f32
+        }
+    }
+
+    /// Zustand 0..1: der Rumpf, gemindert um ausgefallene Module. Wie schwer die Module
+    /// wiegen, sagt `military.module_weight`.
+    pub fn condition(&self, data: &GameData) -> f32 {
+        let weight = data.balance.military.module_weight;
+        self.hull * (1.0 - weight + weight * self.module_condition())
+    }
+
+    /// Braucht das Schiff die Werft: Rumpf, Module oder Bordjäger unvollständig?
+    pub fn is_damaged(&self, data: &GameData) -> bool {
+        self.hull < 1.0
+            || self.modules.iter().any(|module| *module < 1.0)
+            || self.fighters < data.designs[self.design as usize].stats.fighters
+    }
+
+    /// Womit das Schiff in ein Gefecht geht: die Übergabe an den taktischen Rechner.
+    pub fn spec(&self) -> ShipSpec {
+        ShipSpec {
+            source: Some(self.id),
+            design: self.design,
+            hull: self.hull,
+            modules: self.modules.clone(),
+            ammo: self.ammo,
+            fuel: self.fuel,
+            morale: None,
+            fighters: self.fighters,
+        }
+    }
+}
+
+/// Bauwert eines Entwurfs, getrennt in das Schiff selbst und einen einzelnen Bordjäger.
+fn value_parts(data: &GameData, design: u16) -> (f64, f64) {
+    let stats = &data.designs[design as usize].stats;
+    let craft = stats
+        .craft
+        .map_or(0.0, |craft| data.designs[craft as usize].stats.value);
+    (
+        (stats.value - craft * stats.fighters as f64).max(0.0),
+        craft,
+    )
+}
+
+/// Kampfwert eines Schiffs in Credits: Bauwert mal Zustand. Bordjäger zählen mit ihrem
+/// eigenen Bauwert, soweit sie noch an Bord sind.
+pub fn combat_value(data: &GameData, ship: &Ship) -> f64 {
+    let (body, craft) = value_parts(data, ship.design);
+    let fighters = ship
+        .fighters
+        .min(data.designs[ship.design as usize].stats.fighters);
+    body * ship.condition(data) as f64 + craft * fighters as f64
+}
+
+/// Stärke einer Flotte: Kampfwert ihrer Schiffe, geeicht an der Startflotte
+/// (`fleets.start_strength`).
+pub fn fleet_strength(data: &GameData, fleet: &Fleet) -> f32 {
+    let value: f64 = fleet
+        .ships
+        .iter()
+        .map(|ship| combat_value(data, ship))
+        .sum();
+    (value * data.balance.military.strength_per_value) as f32
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Fleet {
     pub id: FleetId,
     pub owner: PolityId,
     pub name: String,
+    /// Kampfwert, abgeleitet aus den Schiffen (siehe [`fleet_strength`]). Wer Schiffe
+    /// ändert, führt ihn mit [`Fleets::refresh`] nach.
     pub strength: f32,
     pub stance: Stance,
     /// Aktuelles System, unterwegs das zuletzt verlassene.
@@ -63,12 +192,74 @@ pub struct Fleet {
     pub progress: f32,
     pub alive: bool,
     pub in_battle: bool,
+    // Die Felder ab hier fehlen in Spielständen des Formats 1. Mit dem Vorgabewert lassen
+    // sie sich noch lesen und werden dann am Format erkannt und abgelehnt.
+    /// Die Schiffe der Flotte. Eine Flotte ohne Schiffe besteht nicht mehr.
+    #[serde(default)]
+    pub ships: Vec<Ship>,
+    /// Stehende Befehle für künftige Gefechte.
+    #[serde(default)]
+    pub formation: Formation,
+    #[serde(default)]
+    pub doctrine: Doctrine,
 }
 
 impl Fleet {
     /// Steht die Flotte in einem System (und ist nicht auf einer Sprungroute)?
     pub fn is_docked(&self) -> bool {
         self.alive && (self.route.is_empty() || self.progress <= 0.0)
+    }
+
+    /// Bauwert aller Schiffe in Credits, ohne Rücksicht auf ihren Zustand.
+    pub fn build_value(&self, data: &GameData) -> f64 {
+        self.ships
+            .iter()
+            .map(|ship| data.designs[ship.design as usize].stats.value)
+            .sum()
+    }
+
+    /// Der knappste Treibstoffvorrat (0..1). Er bestimmt, wie weit die Flotte in voller
+    /// Fahrt kommt: Sie wartet auf ihr langsamstes Schiff.
+    pub fn min_fuel(&self) -> f32 {
+        self.ships.iter().map(|ship| ship.fuel).fold(1.0, f32::min)
+    }
+
+    /// Strecke, die die Flotte heute auf dem Marsch zurücklegen kann: volle Fahrt, solange
+    /// der knappste Tank reicht, danach nur noch die gedrosselte.
+    pub fn day_range(&self, data: &GameData) -> f32 {
+        let balance = &data.balance.military;
+        day_travel(
+            self.min_fuel(),
+            data.balance.fleets.speed,
+            balance.fuel_per_distance,
+            balance.dry_speed,
+            f32::INFINITY,
+        )
+        .0
+    }
+
+    /// Mittlere Vorräte an Munition und Treibstoff (0..1), gewichtet mit dem
+    /// Fassungsvermögen der Schiffe.
+    pub fn supply(&self, data: &GameData) -> (f32, f32) {
+        let (mut ammo, mut ammo_max, mut fuel, mut fuel_max) = (0.0, 0.0, 0.0, 0.0);
+        for ship in &self.ships {
+            let stats = &data.designs[ship.design as usize].stats;
+            ammo += ship.ammo * stats.ammo;
+            ammo_max += stats.ammo;
+            fuel += ship.fuel * stats.fuel;
+            fuel_max += stats.fuel;
+        }
+        let share = |have: f32, max: f32| if max > 0.0 { have / max } else { 1.0 };
+        (share(ammo, ammo_max), share(fuel, fuel_max))
+    }
+
+    pub fn ship(&self, id: ShipId) -> Option<&Ship> {
+        self.ships.iter().find(|ship| ship.id == id)
+    }
+
+    /// Alle Schiffe der Flotte, wie sie in ein Gefecht gehen.
+    pub fn specs(&self) -> Vec<ShipSpec> {
+        self.ships.iter().map(Ship::spec).collect()
     }
 }
 
@@ -77,6 +268,19 @@ pub struct Fleets {
     pub list: Vec<Fleet>,
     /// Blockierte Systeme, aufsteigend. Wird täglich aus der Lage neu bestimmt.
     pub blockaded: Vec<SystemId>,
+    /// Bauaufträge aller Werften, aufsteigend nach Nummer.
+    #[serde(default)]
+    pub orders: Vec<BuildOrder>,
+    /// Nächste freie Schiffsnummer.
+    #[serde(default)]
+    pub next_ship: u32,
+    /// Nächste freie Auftragsnummer.
+    #[serde(default)]
+    pub next_order: u32,
+    /// Soldrückstand je Gemeinschaft (0..1, geglättet): Anteil des Solds, den der Staat
+    /// zuletzt schuldig blieb. Lesen mit [`Fleets::arrears_of`].
+    #[serde(default)]
+    pub arrears: Vec<f32>,
 }
 
 impl Fleets {
@@ -94,6 +298,113 @@ impl Fleets {
         self.list
             .iter()
             .filter(move |fleet| fleet.alive && fleet.owner == polity)
+    }
+
+    pub fn get(&self, id: FleetId) -> Option<&Fleet> {
+        self.list.get(id.index())
+    }
+
+    /// Schiffe einer Gemeinschaft in allen ihren Flotten.
+    pub fn ship_count(&self, polity: PolityId) -> usize {
+        self.of(polity).map(|fleet| fleet.ships.len()).sum()
+    }
+
+    /// Flotte, zu der ein Schiff gehört.
+    pub fn fleet_of_ship(&self, ship: ShipId) -> Option<FleetId> {
+        self.list
+            .iter()
+            .find(|fleet| fleet.alive && fleet.ship(ship).is_some())
+            .map(|fleet| fleet.id)
+    }
+
+    /// Bauaufträge einer Gemeinschaft in Nummernfolge.
+    pub fn orders_of(&self, polity: PolityId) -> impl Iterator<Item = &BuildOrder> + '_ {
+        self.orders
+            .iter()
+            .filter(move |order| order.polity == polity)
+    }
+
+    /// Bauaufträge der Werft einer Welt in Nummernfolge: Die ersten belegen die Bauplätze,
+    /// die übrigen warten.
+    pub fn orders_at(&self, planet: PlanetId) -> impl Iterator<Item = &BuildOrder> + '_ {
+        self.orders
+            .iter()
+            .filter(move |order| order.planet == planet)
+    }
+
+    /// Soldrückstand einer Gemeinschaft (0 = alles gezahlt, 1 = nichts).
+    pub fn arrears_of(&self, polity: PolityId) -> f32 {
+        self.arrears.get(polity.index()).copied().unwrap_or(0.0)
+    }
+
+    /// Vergibt die nächste Schiffsnummer.
+    pub fn next_ship_id(&mut self) -> ShipId {
+        let id = ShipId(self.next_ship);
+        self.next_ship += 1;
+        id
+    }
+
+    /// Reiht ein neues, voll versorgtes Schiff in eine bestehende Flotte ein. `None`, wenn
+    /// es die Flotte oder den Entwurf nicht gibt.
+    pub fn add_ship(&mut self, data: &GameData, fleet: FleetId, design: u16) -> Option<ShipId> {
+        if design as usize >= data.designs.len()
+            || !self.get(fleet).is_some_and(|fleet| fleet.alive)
+        {
+            return None;
+        }
+        let id = self.next_ship_id();
+        let fleet = &mut self.list[fleet.index()];
+        fleet.ships.push(Ship::fresh(data, id, design));
+        fleet.strength = fleet_strength(data, fleet);
+        Some(id)
+    }
+
+    /// Stellt eine neue, noch leere Flotte auf. Der Aufrufer gibt ihr Schiffe und ruft
+    /// [`Fleets::refresh`]: Ohne Schiffe besteht sie nicht.
+    pub fn new_fleet(&mut self, polities: &Polities, owner: PolityId, system: SystemId) -> FleetId {
+        let id = FleetId::from_index(self.list.len());
+        // Nummeriert wird je Gemeinschaft fortlaufend; aufgelöste Flotten zählen mit.
+        let number = self
+            .list
+            .iter()
+            .filter(|fleet| fleet.owner == owner)
+            .count()
+            + 1;
+        self.list.push(Fleet {
+            id,
+            owner,
+            name: format!("{number}. Flotte ({})", polities.get(owner).short),
+            strength: 0.0,
+            stance: Stance::Guard,
+            system,
+            route: Vec::new(),
+            progress: 0.0,
+            alive: true,
+            in_battle: false,
+            ships: Vec::new(),
+            formation: Formation::default(),
+            doctrine: Doctrine::default(),
+        });
+        id
+    }
+
+    /// Führt nach, was aus den Schiffen folgt: die Stärke jeder Flotte, und dass eine
+    /// Flotte ohne Schiffe nicht mehr besteht.
+    pub fn refresh(&mut self, data: &GameData) {
+        for fleet in &mut self.list {
+            if !fleet.alive {
+                continue;
+            }
+            if fleet.ships.is_empty() {
+                fleet.alive = false;
+                fleet.in_battle = false;
+                fleet.route.clear();
+                fleet.progress = 0.0;
+                fleet.strength = 0.0;
+            } else {
+                fleet.strength = fleet_strength(data, fleet);
+            }
+        }
     }
 
     /// Stärke der Kaperer in `system`, die `victim` feindlich sind, und der Geleitschutz,
@@ -117,28 +428,98 @@ impl Fleets {
         }
         (raiders, escorts, raider)
     }
+
+    /// Prüft, dass Flotten, Schiffe und Bauaufträge in sich stimmen. Gibt die erste
+    /// Auffälligkeit zurück.
+    pub fn find_anomaly(&self, data: &GameData) -> Option<String> {
+        let unit = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
+        let mut ids: Vec<ShipId> = Vec::new();
+        for fleet in &self.list {
+            if !fleet.strength.is_finite() || fleet.strength < 0.0 {
+                return Some(format!("{}: Stärke {}", fleet.name, fleet.strength));
+            }
+            if !fleet.alive {
+                continue;
+            }
+            if fleet.ships.is_empty() {
+                return Some(format!("{}: besteht ohne Schiffe", fleet.name));
+            }
+            for ship in &fleet.ships {
+                let Some(design) = data.designs.get(ship.design as usize) else {
+                    return Some(format!("Schiff {}: Entwurf unbekannt", ship.id));
+                };
+                let modules_fit =
+                    ship.modules.is_empty() || ship.modules.len() == design.modules.len();
+                if !unit(ship.hull)
+                    || !unit(ship.ammo)
+                    || !unit(ship.fuel)
+                    || !modules_fit
+                    || !ship.modules.iter().all(|module| unit(*module))
+                    || ship.fighters > design.stats.fighters
+                {
+                    return Some(format!(
+                        "Schiff {} ({}): Zustand außerhalb der Grenzen: {ship:?}",
+                        ship.id, fleet.name
+                    ));
+                }
+                ids.push(ship.id);
+            }
+            // Erst wenn die Schiffe selbst stimmen, lässt sich die Stärke nachrechnen.
+            let derived = fleet_strength(data, fleet);
+            if (fleet.strength - derived).abs() > 1e-3 * derived.max(1.0) {
+                return Some(format!(
+                    "{}: Stärke {} passt nicht zu den Schiffen ({derived})",
+                    fleet.name, fleet.strength
+                ));
+            }
+        }
+        ids.sort_unstable();
+        if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Some(format!("Schiffsnummer {} doppelt vergeben", pair[0]));
+        }
+        if ids.last().is_some_and(|last| last.0 >= self.next_ship) {
+            return Some("Schiffsnummer jenseits des Zählers".into());
+        }
+        for pair in self.orders.windows(2) {
+            if pair[0].id >= pair[1].id {
+                return Some(format!("Bauauftrag {} steht außer der Reihe", pair[1].id));
+            }
+        }
+        for order in &self.orders {
+            if order.id >= self.next_order
+                || !unit(order.progress)
+                || order.spent < 0
+                || order.design as usize >= data.designs.len()
+            {
+                return Some(format!("Bauauftrag {} entgleist: {order:?}", order.id));
+            }
+        }
+        if let Some(arrears) = self.arrears.iter().find(|arrears| !unit(**arrears)) {
+            return Some(format!("Soldrückstand {arrears}"));
+        }
+        None
+    }
 }
 
+/// Jede Gemeinschaft beginnt mit der Flotte aus `balance.ron: military.starting_fleet`,
+/// voll versorgt im System ihrer Hauptwelt.
 pub fn setup_fleets(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> Fleets {
     let mut fleets = Fleets::default();
     for polity in &polities.list {
         let Some(capital) = polity.capital else {
             continue;
         };
-        let id = FleetId::from_index(fleets.list.len());
-        fleets.list.push(Fleet {
-            id,
-            owner: polity.id,
-            name: format!("1. Flotte ({})", polity.short),
-            strength: data.balance.fleets.start_strength,
-            stance: Stance::Guard,
-            system: galaxy.planet(capital).system,
-            route: Vec::new(),
-            progress: 0.0,
-            alive: true,
-            in_battle: false,
-        });
+        let id = fleets.new_fleet(polities, polity.id, galaxy.planet(capital).system);
+        for (design, count) in &data.balance.military.starting_fleet_ids {
+            for _ in 0..*count {
+                let ship = fleets.next_ship_id();
+                fleets.list[id.index()]
+                    .ships
+                    .push(Ship::fresh(data, ship, *design));
+            }
+        }
     }
+    fleets.refresh(data);
     fleets
 }
 
@@ -197,202 +578,446 @@ pub fn set_stance(
     Ok(())
 }
 
-/// Flotten rücken entlang ihrer Route vor.
-pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, balance: &FleetBalance) {
-    for fleet in &mut fleets.list {
-        if !fleet.alive || fleet.route.is_empty() || fleet.in_battle {
-            continue;
-        }
-        let Some(lane) = galaxy.lane_between(fleet.system, fleet.route[0]) else {
-            fleet.route.clear();
-            fleet.progress = 0.0;
-            continue;
-        };
-        fleet.progress += balance.speed / galaxy.lane(lane).length.max(1.0);
-        if fleet.progress >= 1.0 {
-            fleet.system = fleet.route.remove(0);
-            fleet.progress = 0.0;
-        }
-    }
-}
-
-/// Grobe Gefechtsauflösung: Feindliche Flotten im selben System zehren einander auf.
-pub fn resolve_skirmishes(
+/// Stehende Befehle einer Flotte für künftige Gefechte: Aufstellung und Doktrin.
+pub fn set_fleet_orders(
     fleets: &mut Fleets,
-    diplomacy: &Diplomacy,
-    polities: &Polities,
-    chronicle: &mut Chronicle,
-    balance: &FleetBalance,
-    seed: u64,
-    tick: u64,
-) {
-    let day = tick / crate::clock::TICKS_PER_DAY;
-    let count = fleets.list.len();
-    let mut damage = vec![0.0f32; count];
-    let mut fighting = vec![false; count];
-    for a in 0..count {
-        if !fleets.list[a].is_docked() {
-            continue;
-        }
-        for b in (a + 1)..count {
-            let (first, second) = (&fleets.list[a], &fleets.list[b]);
-            if !second.is_docked()
-                || first.system != second.system
-                || !diplomacy.at_war(first.owner, second.owner)
-            {
-                continue;
-            }
-            let mut rng = Rng::stream(seed, Domain::Battle, (a as u64) << 32 | b as u64, day);
-            damage[b] += first.strength * balance.daily_damage * rng.range_f32(0.7, 1.3);
-            damage[a] += second.strength * balance.daily_damage * rng.range_f32(0.7, 1.3);
-            fighting[a] = true;
-            fighting[b] = true;
-        }
-    }
-    for index in 0..count {
-        let fleet = &mut fleets.list[index];
-        if !fleet.alive {
-            continue;
-        }
-        if fighting[index] && !fleet.in_battle {
-            chronicle.push(
-                tick,
-                ChronicleKind::War,
-                Some(fleet.owner),
-                Some(fleet.system),
-                format!("{} steht im Gefecht.", fleet.name),
-            );
-        }
-        fleet.in_battle = fighting[index];
-        fleet.strength -= damage[index];
-        if fleet.strength <= 0.0 {
-            fleet.strength = 0.0;
-            fleet.alive = false;
-            fleet.in_battle = false;
-            fleet.route.clear();
-            chronicle.push(
-                tick,
-                ChronicleKind::War,
-                Some(fleet.owner),
-                Some(fleet.system),
-                format!(
-                    "{} der Gemeinschaft {} wurde vernichtet.",
-                    fleet.name,
-                    polities.get(fleet.owner).name
-                ),
-            );
-        }
-    }
+    polity: PolityId,
+    fleet: FleetId,
+    formation: Formation,
+    doctrine: Doctrine,
+) -> Result<(), String> {
+    let fleet = own_fleet(fleets, polity, fleet)?;
+    fleet.formation = formation;
+    fleet.doctrine = doctrine;
+    Ok(())
 }
 
-/// Ein System ist blockiert, wenn eine feindliche Flotte im Blockadeauftrag dort steht
-/// und der Besitzer keine eigene Flotte im Orbit hat: Erst die orbitale Überlegenheit,
-/// dann die Sperre.
-pub fn update_blockades(galaxy: &Galaxy, fleets: &mut Fleets, diplomacy: &Diplomacy) {
-    let mut blockaded = Vec::new();
-    for system in &galaxy.systems {
-        let Some(owner) = galaxy.system_owner(system.id) else {
-            continue;
-        };
-        let defended = fleets
-            .docked_in(system.id)
-            .any(|fleet| fleet.owner == owner);
-        let besieged = fleets
-            .docked_in(system.id)
-            .any(|fleet| fleet.stance == Stance::Blockade && diplomacy.at_war(fleet.owner, owner));
-        if besieged && !defended {
-            blockaded.push(system.id);
+/// Darf an der Zusammensetzung der Flotte etwas geändert werden? Nur im Dock und nicht
+/// mitten im Gefecht.
+fn ready_to_reorganize(fleet: &Fleet) -> Result<(), String> {
+    if !fleet.is_docked() {
+        return Err(format!(
+            "{} ist unterwegs; umgliedern lässt sich nur im Dock",
+            fleet.name
+        ));
+    }
+    if fleet.in_battle {
+        return Err(format!("{} steht im Gefecht", fleet.name));
+    }
+    Ok(())
+}
+
+/// Vereinigt zwei Flotten derselben Gemeinschaft, die im selben System liegen. Die
+/// Schiffe von `from` gehen an `into`; `from` besteht danach nicht mehr.
+pub fn merge_fleets(
+    data: &GameData,
+    fleets: &mut Fleets,
+    polity: PolityId,
+    from: FleetId,
+    into: FleetId,
+) -> Result<(), String> {
+    if from == into {
+        return Err("eine Flotte lässt sich nicht mit sich selbst vereinigen".into());
+    }
+    let target_system = {
+        let target = own_fleet(fleets, polity, into)?;
+        ready_to_reorganize(target)?;
+        target.system
+    };
+    let source = own_fleet(fleets, polity, from)?;
+    ready_to_reorganize(source)?;
+    if source.system != target_system {
+        return Err("beide Flotten müssen im selben System liegen".into());
+    }
+    let ships = std::mem::take(&mut source.ships);
+    fleets.list[into.index()].ships.extend(ships);
+    fleets.refresh(data);
+    Ok(())
+}
+
+/// Löst die genannten Schiffe aus einer Flotte und stellt mit ihnen im selben System
+/// eine neue auf. Mindestens ein Schiff bleibt zurück.
+pub fn split_fleet(
+    data: &GameData,
+    polities: &Polities,
+    fleets: &mut Fleets,
+    polity: PolityId,
+    fleet: FleetId,
+    ships: &[ShipId],
+) -> Result<FleetId, String> {
+    let parent = own_fleet(fleets, polity, fleet)?;
+    ready_to_reorganize(parent)?;
+    if ships.is_empty() {
+        return Err("keine Schiffe für die neue Flotte genannt".into());
+    }
+    for (index, ship) in ships.iter().enumerate() {
+        if parent.ship(*ship).is_none() {
+            return Err(format!("Schiff {ship} gehört nicht zu {}", parent.name));
+        }
+        if ships[..index].contains(ship) {
+            return Err(format!("Schiff {ship} ist mehrfach genannt"));
         }
     }
-    fleets.blockaded = blockaded;
+    if ships.len() >= parent.ships.len() {
+        return Err("mindestens ein Schiff muss in der Flotte bleiben".into());
+    }
+    let (system, stance, formation, doctrine) = (
+        parent.system,
+        parent.stance,
+        parent.formation,
+        parent.doctrine,
+    );
+    // Die Schiffe behalten ihre Reihenfolge aus der alten Flotte.
+    let (taken, kept): (Vec<Ship>, Vec<Ship>) = std::mem::take(&mut parent.ships)
+        .into_iter()
+        .partition(|ship| ships.contains(&ship.id));
+    parent.ships = kept;
+    let id = fleets.new_fleet(polities, polity, system);
+    let created = &mut fleets.list[id.index()];
+    created.ships = taken;
+    created.stance = stance;
+    created.formation = formation;
+    created.doctrine = doctrine;
+    fleets.refresh(data);
+    Ok(id)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use crate::galaxy::generate_galaxy;
     use crate::polity::found_polities;
 
-    fn setup() -> (GameData, Galaxy, Polities, Fleets) {
+    /// Galaxie, Gemeinschaften und Startflotten eines festen Seeds.
+    pub fn setup() -> (GameData, Galaxy, Polities, Fleets) {
         let data = GameData::load_workspace().unwrap();
         let mut galaxy = generate_galaxy(&data, 9);
         let polities = found_polities(&data, &mut galaxy, 9);
         let fleets = setup_fleets(&data, &galaxy, &polities);
         (data, galaxy, polities, fleets)
     }
+}
 
-    fn travel(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData, fleet: FleetId) {
-        for _ in 0..2000 {
-            if fleets.list[fleet.index()].route.is_empty() {
-                return;
-            }
-            move_fleets(galaxy, fleets, &data.balance.fleets);
+#[cfg(test)]
+mod tests {
+    use super::testing::setup;
+    use super::*;
+
+    #[test]
+    fn every_polity_starts_with_the_fleet_from_the_data() {
+        let (data, galaxy, polities, fleets) = setup();
+        assert_eq!(fleets.list.len(), polities.list.len());
+        let expected: Vec<u16> = data
+            .balance
+            .military
+            .starting_fleet_ids
+            .iter()
+            .flat_map(|(design, count)| std::iter::repeat_n(*design, *count as usize))
+            .collect();
+        assert!(!expected.is_empty());
+        for (fleet, polity) in fleets.list.iter().zip(&polities.list) {
+            assert_eq!(fleet.owner, polity.id);
+            assert_eq!(fleet.system, galaxy.planet(polity.capital.unwrap()).system);
+            let designs: Vec<u16> = fleet.ships.iter().map(|ship| ship.design).collect();
+            assert_eq!(designs, expected);
+            assert!(
+                fleet
+                    .ships
+                    .iter()
+                    .all(|ship| !ship.is_damaged(&data) && ship.ammo == 1.0 && ship.fuel == 1.0)
+            );
+            // Die unversehrte Startflotte ist das Maß der Stärke.
+            assert!((fleet.strength - data.balance.fleets.start_strength).abs() < 1e-3);
         }
-        panic!("Flotte kam nie an");
+        assert_eq!(
+            fleets.next_ship as usize,
+            expected.len() * polities.list.len()
+        );
+        assert_eq!(fleets.find_anomaly(&data), None);
     }
 
     #[test]
-    fn fleets_follow_lanes_to_their_target() {
-        let (data, galaxy, polities, mut fleets) = setup();
-        let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
-        order_move(&galaxy, &mut fleets, PolityId(0), FleetId(0), target).unwrap();
-        let route = fleets.list[0].route.clone();
-        let mut previous = fleets.list[0].system;
-        for step in &route {
-            assert!(galaxy.lane_between(previous, *step).is_some());
-            previous = *step;
-        }
-        travel(&galaxy, &mut fleets, &data, FleetId(0));
-        assert_eq!(fleets.list[0].system, target);
-        assert!(order_move(&galaxy, &mut fleets, PolityId(1), FleetId(0), target).is_err());
+    fn strength_follows_value_and_condition() {
+        let (data, _, _, mut fleets) = setup();
+        let full = fleets.list[0].strength;
+        let per_value = data.balance.military.strength_per_value;
+        let value = |fleets: &Fleets, index: usize| {
+            data.designs[fleets.list[0].ships[index].design as usize]
+                .stats
+                .value
+        };
+
+        // Ein halb zerstörter Rumpf zählt halb.
+        fleets.list[0].ships[0].hull = 0.5;
+        fleets.refresh(&data);
+        let expected = full as f64 - 0.5 * value(&fleets, 0) * per_value;
+        assert!((fleets.list[0].strength as f64 - expected).abs() < 1e-3);
+
+        // Ausgefallene Module mindern den Wert um ihr Gewicht, aber nicht auf null.
+        let slots = data.designs[fleets.list[0].ships[1].design as usize]
+            .modules
+            .len();
+        fleets.list[0].ships[1].modules = vec![0.0; slots];
+        fleets.refresh(&data);
+        let weight = data.balance.military.module_weight as f64;
+        assert!(weight > 0.0 && weight < 1.0);
+        let expected = expected - weight * value(&fleets, 1) * per_value;
+        assert!((fleets.list[0].strength as f64 - expected).abs() < 1e-3);
+        // Halb beschädigte Module, halber Abzug.
+        fleets.list[0].ships[1].modules = vec![0.5; slots];
+        fleets.refresh(&data);
+        let expected = expected + 0.5 * weight * value(&fleets, 1) * per_value;
+        assert!((fleets.list[0].strength as f64 - expected).abs() < 1e-3);
+
+        // Ein zusätzliches Schiff hebt die Stärke um seinen Bauwert.
+        let before = fleets.list[0].strength;
+        let cruiser = data.design_index("speer").unwrap();
+        fleets.add_ship(&data, FleetId(0), cruiser).unwrap();
+        let gain = data.designs[cruiser as usize].stats.value * per_value;
+        assert!((fleets.list[0].strength as f64 - before as f64 - gain).abs() < 1e-3);
+
+        // Ohne Schiffe besteht die Flotte nicht mehr.
+        fleets.list[0].ships.clear();
+        fleets.refresh(&data);
+        assert!(!fleets.list[0].alive);
+        assert_eq!(fleets.list[0].strength, 0.0);
     }
 
     #[test]
-    fn blockade_needs_war_and_orbital_superiority() {
+    fn supply_and_day_range_reflect_the_ships() {
+        let (data, _, _, mut fleets) = setup();
+        let speed = data.balance.fleets.speed;
+        assert_eq!(fleets.list[0].supply(&data), (1.0, 1.0));
+        assert_eq!(fleets.list[0].day_range(&data), speed);
+        // Gewichtet mit dem Fassungsvermögen: Der Kreuzer fasst weit mehr als eine Korvette.
+        let total: f32 = fleets.list[0]
+            .ships
+            .iter()
+            .map(|ship| data.designs[ship.design as usize].stats.ammo)
+            .sum();
+        let cruiser = data.designs[fleets.list[0].ships[0].design as usize]
+            .stats
+            .ammo;
+        fleets.list[0].ships[0].ammo = 0.0;
+        let (ammo, fuel) = fleets.list[0].supply(&data);
+        assert!((ammo - (1.0 - cruiser / total)).abs() < 1e-6 && fuel == 1.0);
+        assert!(
+            ammo < 0.5,
+            "der Kreuzer trägt den größten Teil der Munition"
+        );
+        // Ein leerer Tank drosselt die ganze Flotte.
+        fleets.list[0].ships[2].fuel = 0.0;
+        assert_eq!(fleets.list[0].min_fuel(), 0.0);
+        let crawl = speed * data.balance.military.dry_speed;
+        assert!((fleets.list[0].day_range(&data) - crawl).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_anomaly_check_finds_what_it_should() {
+        let (data, _, _, clean) = setup();
+        assert_eq!(clean.find_anomaly(&data), None);
+        let broken = |change: fn(&mut Fleets)| {
+            let mut fleets = clean.clone();
+            change(&mut fleets);
+            fleets.find_anomaly(&data)
+        };
+        // Schiffswerte außerhalb 0..1 oder nicht endlich.
+        assert!(broken(|fleets| fleets.list[0].ships[0].hull = 1.2).is_some());
+        assert!(broken(|fleets| fleets.list[0].ships[0].ammo = -0.1).is_some());
+        assert!(broken(|fleets| fleets.list[0].ships[0].fuel = f32::NAN).is_some());
+        assert!(broken(|fleets| fleets.list[0].ships[0].modules = vec![1.0]).is_some());
+        assert!(broken(|fleets| fleets.list[0].ships[0].fighters = 3).is_some());
+        assert!(broken(|fleets| fleets.list[0].ships[0].design = 9_999).is_some());
+        // Eine bestehende Flotte ohne Schiffe; eine doppelte Schiffsnummer.
+        assert!(broken(|fleets| fleets.list[0].ships.clear()).is_some());
+        assert!(
+            broken(|fleets| fleets.list[1].ships[0].id = fleets.list[0].ships[0].id)
+                .unwrap()
+                .contains("doppelt")
+        );
+        assert!(broken(|fleets| fleets.next_ship = 3).is_some());
+        // Eine Stärke, die nicht endlich ist oder nicht zu den Schiffen passt.
+        assert!(broken(|fleets| fleets.list[0].strength = f32::INFINITY).is_some());
+        assert!(
+            broken(|fleets| fleets.list[0].strength = 250.0)
+                .unwrap()
+                .contains("passt nicht")
+        );
+        // Ein beschädigtes Schiff ist kein Fehler, solange die Stärke nachgeführt ist.
+        let mut damaged = clean.clone();
+        damaged.list[0].ships[0].hull = 0.3;
+        assert!(damaged.find_anomaly(&data).is_some());
+        damaged.refresh(&data);
+        assert_eq!(damaged.find_anomaly(&data), None);
+        // Bauaufträge und Soldrückstand.
+        let order = BuildOrder {
+            id: 0,
+            polity: PolityId(0),
+            planet: PlanetId(0),
+            design: 1,
+            progress: 0.5,
+            spent: 0,
+            stalled: false,
+            started: 0,
+        };
+        let mut with_order = clean.clone();
+        with_order.orders.push(order.clone());
+        assert!(
+            with_order.find_anomaly(&data).is_some(),
+            "Nummer jenseits des Zählers"
+        );
+        with_order.next_order = 1;
+        assert_eq!(with_order.find_anomaly(&data), None);
+        with_order.orders[0].progress = 1.5;
+        assert!(with_order.find_anomaly(&data).is_some());
+        with_order.orders[0].progress = 0.5;
+        with_order.orders.push(order);
+        with_order.next_order = 5;
+        assert!(with_order.find_anomaly(&data).is_some(), "Nummer doppelt");
+        assert!(broken(|fleets| fleets.arrears = vec![0.0, 1.5]).is_some());
+    }
+
+    #[test]
+    fn carriers_count_their_craft_separately() {
+        let (data, _, _, mut fleets) = setup();
+        let carrier = data.design_index("horst").unwrap();
+        let id = fleets.add_ship(&data, FleetId(0), carrier).unwrap();
+        let stats = &data.designs[carrier as usize].stats;
+        let craft = data.designs[stats.craft.unwrap() as usize].stats.value;
+        let ship = fleets.list[0].ship(id).unwrap().clone();
+        assert_eq!(ship.fighters, stats.fighters);
+        assert!((combat_value(&data, &ship) - stats.value).abs() < 1e-6);
+        // Ohne Jäger fehlt genau deren Bauwert.
+        let empty = Ship {
+            fighters: 0,
+            ..ship.clone()
+        };
+        assert!(empty.is_damaged(&data));
+        let lost = stats.value - combat_value(&data, &empty);
+        assert!((lost - craft * stats.fighters as f64).abs() < 1e-6);
+        // Die Übergabe an den Gefechtsrechner trägt den Zustand unverändert.
+        let spec = empty.spec();
+        assert_eq!(
+            (spec.source, spec.design, spec.fighters),
+            (Some(id), carrier, 0)
+        );
+        assert_eq!((spec.hull, spec.ammo, spec.fuel), (1.0, 1.0, 1.0));
+        let specs = fleets.list[0].specs();
+        assert_eq!(specs.len(), fleets.list[0].ships.len());
+        assert_eq!(specs.last().unwrap().fighters, stats.fighters);
+    }
+
+    #[test]
+    fn merging_and_splitting_keep_every_ship() {
         let (data, galaxy, polities, mut fleets) = setup();
-        let mut diplomacy = Diplomacy::default();
-        let mut chronicle = Chronicle::default();
-        let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
-        order_move(&galaxy, &mut fleets, PolityId(0), FleetId(0), target).unwrap();
-        set_stance(&mut fleets, PolityId(0), FleetId(0), Stance::Blockade).unwrap();
-        travel(&galaxy, &mut fleets, &data, FleetId(0));
+        let me = PolityId(0);
+        let all: Vec<ShipId> = fleets.list[0].ships.iter().map(|ship| ship.id).collect();
+        let strength = fleets.list[0].strength;
 
-        // Ohne Krieg keine Blockade.
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
-        assert!(!fleets.is_blockaded(target));
+        // Abgelehnt: nichts genannt, fremdes Schiff, doppelt genannt, alle Schiffe.
+        let foreign = fleets.list[1].ships[0].id;
+        let split = |fleets: &mut Fleets, ships: &[ShipId]| {
+            split_fleet(&data, &polities, fleets, me, FleetId(0), ships)
+        };
+        assert!(split(&mut fleets, &[]).is_err());
+        assert!(split(&mut fleets, &[foreign]).is_err());
+        assert!(split(&mut fleets, &[all[0], all[0]]).is_err());
+        assert!(split(&mut fleets, &all).is_err());
+        assert!(
+            split_fleet(
+                &data,
+                &polities,
+                &mut fleets,
+                PolityId(1),
+                FleetId(0),
+                &all[..1]
+            )
+            .is_err()
+        );
+        assert_eq!(fleets.list.len(), polities.list.len(), "nichts entstanden");
 
-        // Im Krieg verhindert die Heimatflotte die Sperre, solange sie steht.
-        crate::diplomacy::declare_war(
-            &mut diplomacy,
-            &polities,
-            &mut chronicle,
-            0,
+        let second = split(&mut fleets, &all[..2]).unwrap();
+        assert_eq!(fleets.list[second.index()].ships.len(), 2);
+        assert_eq!(fleets.list[0].ships.len(), all.len() - 2);
+        assert_eq!(fleets.list[second.index()].system, fleets.list[0].system);
+        assert!(fleets.list[second.index()].name.starts_with("2. Flotte"));
+        let total = fleets.list[0].strength + fleets.list[second.index()].strength;
+        assert!((total - strength).abs() < 1e-3);
+        assert_eq!(fleets.find_anomaly(&data), None);
+
+        // Abgelehnt: mit sich selbst, fremde Flotte, anderes System, unterwegs.
+        assert!(merge_fleets(&data, &mut fleets, me, second, second).is_err());
+        assert!(merge_fleets(&data, &mut fleets, me, FleetId(1), FleetId(0)).is_err());
+        let elsewhere = galaxy.neighbors(fleets.list[0].system)[0].system;
+        order_move(&galaxy, &mut fleets, me, second, elsewhere).unwrap();
+        move_fleets(&galaxy, &mut fleets, &data);
+        assert!(merge_fleets(&data, &mut fleets, me, second, FleetId(0)).is_err());
+        for _ in 0..200 {
+            move_fleets(&galaxy, &mut fleets, &data);
+        }
+        assert_eq!(fleets.list[second.index()].system, elsewhere);
+        assert!(merge_fleets(&data, &mut fleets, me, second, FleetId(0)).is_err());
+        order_move(&galaxy, &mut fleets, me, FleetId(0), elsewhere).unwrap();
+        for _ in 0..200 {
+            move_fleets(&galaxy, &mut fleets, &data);
+        }
+
+        merge_fleets(&data, &mut fleets, me, second, FleetId(0)).unwrap();
+        assert!(!fleets.list[second.index()].alive);
+        let mut merged: Vec<ShipId> = fleets.list[0].ships.iter().map(|ship| ship.id).collect();
+        merged.sort_unstable();
+        assert_eq!(merged, all, "kein Schiff verloren, keines doppelt");
+        assert_eq!(fleets.find_anomaly(&data), None);
+        // Die aufgelöste Flotte nimmt keine Befehle mehr an.
+        assert!(merge_fleets(&data, &mut fleets, me, FleetId(0), second).is_err());
+    }
+
+    #[test]
+    fn the_old_layout_still_parses_so_that_old_saves_fail_on_their_format() {
+        // So sah eine Flotte im Spielstandformat 1 aus: eine Stärkezahl, keine Schiffe.
+        let old = "(list:[(id:0,owner:0,name:\"1. Flotte\",strength:100.0,stance:Guard,system:3,\
+                   route:[],progress:0.0,alive:true,in_battle:false)],blockaded:[])";
+        let fleets: Fleets = ron::from_str(old).expect("altes Format lesbar");
+        assert!(fleets.list[0].ships.is_empty() && fleets.orders.is_empty());
+        // Als Zustand einer Partie taugt das nicht: Deshalb lehnt `SaveGame` Format 1 ab.
+        let data = GameData::load_workspace().unwrap();
+        assert!(fleets.find_anomaly(&data).is_some());
+        assert_eq!(crate::state::SAVE_FORMAT, 2);
+    }
+
+    #[test]
+    fn standing_orders_belong_to_the_owner() {
+        let (_, _, _, mut fleets) = setup();
+        set_fleet_orders(
+            &mut fleets,
             PolityId(0),
-            PolityId(1),
+            FleetId(0),
+            Formation::Wedge,
+            Doctrine::Aggressive,
         )
         .unwrap();
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
-        assert!(!fleets.is_blockaded(target));
-
-        // Der Angreifer ist doppelt so stark: Er gewinnt das Gefecht und sperrt das System.
-        fleets.list[0].strength = 200.0;
-        for day in 0..400 {
-            resolve_skirmishes(
+        assert_eq!(fleets.list[0].formation, Formation::Wedge);
+        assert_eq!(fleets.list[0].doctrine, Doctrine::Aggressive);
+        assert!(
+            set_fleet_orders(
                 &mut fleets,
-                &diplomacy,
-                &polities,
-                &mut chronicle,
-                &data.balance.fleets,
-                9,
-                day * 20,
-            );
-            if !fleets.list[1].alive {
-                break;
-            }
-        }
-        assert!(!fleets.list[1].alive && fleets.list[0].alive);
-        assert!(fleets.list[0].strength < 200.0, "auch der Sieger zahlt");
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
-        assert!(fleets.is_blockaded(target));
+                PolityId(1),
+                FleetId(0),
+                Formation::Line,
+                Doctrine::Defensive
+            )
+            .is_err()
+        );
+        assert!(
+            set_fleet_orders(
+                &mut fleets,
+                PolityId(0),
+                FleetId(99),
+                Formation::Line,
+                Doctrine::Defensive
+            )
+            .is_err()
+        );
+        assert_eq!(fleets.list[0].formation, Formation::Wedge);
     }
 }

@@ -115,6 +115,8 @@
         raid_chance: 0.35,
     ),
     fleets: (
+        // Stärke einer unversehrten Startflotte. Die Stärke jeder Flotte ist der Bauwert
+        // ihrer Schiffe mal deren Zustand, an diesem Maß geeicht.
         start_strength: 100.0,
         // Strecke je Tag.
         speed: 22.0,
@@ -216,12 +218,28 @@
         starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
         // Monatlicher Unterhalt als Anteil am Bauwert; der Sold geht an die Haushalte.
         upkeep_per_month: 0.012,
+        // Reicht die Staatskasse nicht, bleibt Sold aus. Der Rückstand (0..1) folgt dem
+        // ausgebliebenen Anteil je Monat um diesen Anteil der Lücke.
+        arrears_smoothing: 0.5,
         // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
         yard_capital_per_slot: 4.0,
+        // Aufschlag der Werft auf den Einkaufswert der Bauteile. Er geht als Erlös an die
+        // Rüstungsfirma der Welt: An Staatsaufträgen verdienen ihre Anteilseigner mit.
+        yard_fee: 0.15,
+        // So viele Aufträge nimmt die Werft einer Welt höchstens an.
+        yard_queue: 8,
         // Anteil des Rumpfes, der im Dock je Tag instand gesetzt wird, und Rumpfsegmente
         // je vollständig repariertem Rumpf, als Anteil der Bausegmente.
         repair_per_day: 0.01,
         repair_parts: 0.4,
+        // Davon entfällt dieser Anteil auf den Rumpf, der Rest auf die Module.
+        repair_hull_share: 0.5,
+        // Anteil des Kampfwerts eines Schiffs, der an seinen Modulen hängt: Sind alle
+        // ausgefallen, zählt der Rumpf nur noch mit dem Rest.
+        module_weight: 0.5,
+        // Anteil des Bordvorrats an Munition und Treibstoff, den eine Flotte im eigenen,
+        // nicht blockierten System je Tag vom Markt nachfasst.
+        resupply_per_day: 0.05,
         // Treibstoff je Streckeneinheit auf der Karte, als Anteil des Tankinhalts.
         fuel_per_distance: 0.0012,
         // Ohne Treibstoff fährt eine Flotte nur noch mit diesem Anteil ihrer Fahrt.

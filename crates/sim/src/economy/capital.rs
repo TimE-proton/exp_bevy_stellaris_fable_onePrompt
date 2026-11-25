@@ -402,16 +402,33 @@ pub fn settle_public_accounts(
         if excess <= 0 {
             continue;
         }
-        let budget = excess / 2;
-        let mut spent: Money = 0;
-        for planet in galaxy.planets_of(id) {
-            let share = (budget as f64 * planet.population / population) as Money;
-            economy.planets[planet.id.index()].households += share;
-            economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
-            spent += share;
-        }
-        economy.treasuries[polity] -= spent;
+        pay_households(galaxy, economy, id, excess / 2);
     }
+}
+
+/// Zahlt bis zu `budget` aus der Staatskasse an die Haushalte aller Welten der
+/// Gemeinschaft, verteilt nach Bevölkerung. Gibt den ausgezahlten Betrag zurück; der
+/// Rundungsrest bleibt in der Kasse.
+pub fn pay_households(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    polity: PolityId,
+    budget: Money,
+) -> Money {
+    let population = galaxy.population_of(polity);
+    let budget = budget.min(economy.treasury(polity));
+    if population <= 0.0 || budget <= 0 {
+        return 0;
+    }
+    let mut spent: Money = 0;
+    for planet in galaxy.planets_of(polity) {
+        let share = (budget as f64 * planet.population / population) as Money;
+        economy.planets[planet.id.index()].households += share;
+        economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
+        spent += share;
+    }
+    economy.treasuries[polity.index()] -= spent;
+    spent
 }
 
 /// Geldmengensteuerung: Wächst die Wirtschaft, ohne dass Geld nachkommt, fallen die Preise

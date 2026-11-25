@@ -346,17 +346,38 @@ fn raiders_capture_freighters_and_escorts_protect_them() {
         };
         {
             // Der Kaperer steht im Heimatsystem des Opfers; dessen Flotte ist entweder
-            // ein starker Geleitschutz oder abwesend.
+            // ein starker Geleitschutz oder abwesend. Die Stärke folgt aus den Schiffen:
+            // Der Kaperer führt nur einen Kreuzer, eine Fregatte und eine Korvette (Stärke 60),
+            // der Geleitschutz wächst um 150 Kreuzer (Stärke rund 5000).
+            let data = data();
             let mut fleets = sim.world_mut().resource_mut::<Fleets>();
-            fleets.list[raider.index()].system = victim_home;
-            fleets.list[raider.index()].stance = Stance::Raid;
-            fleets.list[raider.index()].strength = 60.0;
-            let guard = &mut fleets.list[victim.index()];
+            let raiders = &mut fleets.list[raider.index()];
+            raiders.system = victim_home;
+            raiders.stance = Stance::Raid;
+            let mut kept: Vec<u16> = Vec::new();
+            raiders.ships.retain(|ship| {
+                let first_of_its_design = !kept.contains(&ship.design);
+                kept.push(ship.design);
+                first_of_its_design
+            });
+            let guard = FleetId(victim.index() as u32);
             if escort {
-                guard.stance = Stance::Escort;
-                guard.strength = 5_000.0;
+                fleets.list[guard.index()].stance = Stance::Escort;
+                let cruiser = data.design_index("speer").unwrap();
+                for _ in 0..150 {
+                    fleets.add_ship(&data, guard, cruiser).unwrap();
+                }
             } else {
-                guard.alive = false;
+                // Ohne Schiffe besteht die Flotte nicht mehr.
+                fleets.list[guard.index()].ships.clear();
+            }
+            fleets.refresh(&data);
+            let strength = |polity: PolityId| fleets.list[polity.index()].strength;
+            assert!((strength(raider) - 60.0).abs() < 1.0);
+            if escort {
+                assert!((strength(victim) - 5_000.0).abs() < 100.0);
+            } else {
+                assert!(!fleets.list[guard.index()].alive);
             }
         }
         sim.issue(raider, SimCommand::DeclareWar { target: victim });

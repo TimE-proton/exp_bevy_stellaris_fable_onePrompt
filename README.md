@@ -41,6 +41,14 @@ Volkswirtschaftliche Kennzahlen im Jahresabstand (Versorgung, Auslastung, Preisn
 Geldverteilung), dazu Markt und Werke eines Systems. Das Werkzeug zum Auswuchten.
 
 ```bash
+cargo headless fleets --seed 7 --years 20 --order speer:1,dolch:2
+```
+
+Flotten, Schiffe, Vorräte, Werften und Bauaufträge je Gemeinschaft. Mit `--order` gibt
+jede Gemeinschaft dieselben Schiffe bei der Werft ihrer Hauptwelt in Auftrag; `--ships`
+listet jedes Schiff einzeln.
+
+```bash
 cargo headless hash --seed 7 --days 3600
 ```
 
@@ -161,6 +169,27 @@ wählt `--data-dir PFAD` oder die Umgebungsvariable `KONFLUENZ_DATA`.
 
 Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 
+## Flotten, Werften und Nachschub
+
+- **Schiffe.** Eine Flotte besteht aus Schiffen mit Entwurf, Rumpf- und Modulzustand,
+  Munition, Treibstoff und Bordjägern. Ihre Stärke ist abgeleitet: Bauwert mal Zustand,
+  geeicht an der Startflotte. Kaperfahrt, Geleitschutz und Blockade rechnen mit dieser Zahl.
+- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung Kapital steht; je
+  `yard_capital_per_slot` ein Bauplatz, die Hauptwelt hat immer einen. Der Staat kauft
+  täglich den Tagesanteil der Bauteile am Markt des Systems und zahlt der Rüstungsfirma
+  der Welt einen Aufschlag, an dem ihre Anteilseigner mitverdienen. Fehlt ein Bauteil oder
+  Geld, stockt der Bau: Eine blockierte Werft steht still, weil keine Ware mehr ankommt.
+- **Nachschub.** Im eigenen, nicht blockierten System fasst eine Flotte Munition und
+  Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff;
+  mit leerem Tank schleppt sich eine Flotte nur noch mit einem Bruchteil ihrer Fahrt.
+- **Instandsetzung.** Im eigenen System mit Werft, gegen Rumpfsegmente vom Markt.
+- **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
+  Haushalte. Reicht die Kasse nicht, wächst der Soldrückstand der Gemeinschaft.
+- **Befehle.** Schiffe bestellen und Aufträge streichen, Flotten teilen und vereinigen,
+  Aufstellung und Doktrin als stehende Befehle für künftige Gefechte.
+
+Die Stellschrauben stehen in `assets/data/balance.ron` unter `military`.
+
 ## Stand
 
 | Meilenstein | Inhalt | Stand |
@@ -174,5 +203,6 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
 Bereits in Meilenstein 1 enthalten, weil spätere Stufen darauf bauen: Gemeinschaften mit
-Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände. Flotten und
-Gefechte sind bis Meilenstein 4 grob aufgelöst (eine Stärkezahl je Flotte).
+Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände. Gefechte
+auf der Karte sind noch grob aufgelöst (Stärke gegen Stärke, Tag für Tag), bis der
+taktische Rechner aus Meilenstein 4 angeschlossen ist.

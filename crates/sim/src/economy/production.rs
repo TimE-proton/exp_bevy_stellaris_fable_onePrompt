@@ -1,13 +1,10 @@
 //! Tagesschritt: Produktion, Konsum, Bevölkerung, Preise, Löhne.
 
-use super::{Economy, Money, energy_factor, lift_cost, local_yield, pay, to_money};
+use super::{BUYER_SHARE, Economy, Money, energy_factor, lift_cost, local_yield, pay, to_money};
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
 use crate::galaxy::Galaxy;
 
-/// Anteil des Marktbestands, den ein einzelner Käufer an einem Tag höchstens abnimmt.
-/// Verhindert, dass der erste Planet eines Systems den Markt leerkauft.
-const BUYER_SHARE: f64 = 0.5;
 /// Glättung der Tageswerte (Anteil des heutigen Werts).
 const SMOOTHING: f64 = 0.1;
 

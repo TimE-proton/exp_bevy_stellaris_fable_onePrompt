@@ -154,7 +154,8 @@ pub fn new_game(world: &mut World, config: SimConfig) {
     state.install(world);
 }
 
-pub const SAVE_FORMAT: u32 = 1;
+/// Format 2: Flotten bestehen aus Schiffen und führen Bauaufträge.
+pub const SAVE_FORMAT: u32 = 2;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]

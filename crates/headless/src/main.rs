@@ -2,6 +2,7 @@
 //! Kommandozeile und Ausgabe.
 
 mod battle;
+mod fleets;
 
 use clap::{Parser, Subcommand};
 use sim::GameData;
@@ -86,6 +87,8 @@ enum Command {
     },
     /// Übungsgefechte: Paarungen, Kontermatrix bei gleichen Kosten, Leistungsmessung.
     Battle(battle::BattleArgs),
+    /// Flotten, Schiffe, Vorräte, Werften und Bauaufträge nach einigen Jahren.
+    Fleets(fleets::FleetsArgs),
 }
 
 fn parse_range(text: &str) -> Result<(u64, u64), String> {
@@ -111,6 +114,7 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Battle(args) => return battle::run(&data, args),
+        Command::Fleets(args) => return fleets::run(&data, args),
         Command::Run {
             seed,
             years,
@@ -189,6 +193,23 @@ fn main() -> ExitCode {
                 100.0 * mean(|r| r.economy.pinned_prices),
                 mean(|r| r.economy.freighters as f64)
             );
+            let per_polity = |f: fn(&sim::harness::PolitySummary) -> f64| {
+                let (sum, count) = runs
+                    .iter()
+                    .flat_map(|run| run.polities.iter())
+                    .filter(|polity| polity.alive)
+                    .fold((0.0, 0usize), |(sum, count), polity| {
+                        (sum + f(polity), count + 1)
+                    });
+                sum / count.max(1) as f64
+            };
+            println!(
+                "Je Gemeinschaft im Mittel: {:.1} Flotten, {:.1} Schiffe, Stärke {:.0}, Soldrückstand {:.1} %",
+                per_polity(|p| p.fleets as f64),
+                per_polity(|p| p.ships as f64),
+                per_polity(|p| p.strength),
+                100.0 * per_polity(|p| p.arrears)
+            );
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -198,12 +219,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -218,7 +239,11 @@ fn main() -> ExitCode {
                             polity.name,
                             polity.alive,
                             polity.planets,
-                            polity.population
+                            polity.population,
+                            polity.fleets,
+                            polity.ships,
+                            polity.strength,
+                            polity.arrears
                         ));
                     }
                 }
@@ -535,10 +560,23 @@ fn print_summary(summary: &RunSummary) {
     );
     for polity in &summary.polities {
         println!(
-            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner{}",
+            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner  {:>2} {:<7}  {:>3} Schiffe  Stärke {:>5.0}{}{}",
             polity.name,
             polity.planets,
             polity.population,
+            polity.fleets,
+            if polity.fleets == 1 {
+                "Flotte"
+            } else {
+                "Flotten"
+            },
+            polity.ships,
+            polity.strength,
+            if polity.orders > 0 {
+                format!("  {} Bauaufträge", polity.orders)
+            } else {
+                String::new()
+            },
             if polity.alive { "" } else { "  (erloschen)" }
         );
     }

@@ -364,9 +364,23 @@ pub struct TechDef {
 pub struct MilitaryBalance {
     pub starting_fleet: Vec<(String, u32)>,
     pub upkeep_per_month: f64,
+    /// Anteil der Lücke zwischen ausgebliebenem Sold und Rückstand, der je Monat
+    /// geschlossen wird (Glättung des Soldrückstands).
+    pub arrears_smoothing: f32,
     pub yard_capital_per_slot: f64,
+    /// Aufschlag der Werft auf den Einkaufswert der Bauteile; Erlös der Rüstungsfirma.
+    pub yard_fee: f64,
+    /// So viele Aufträge nimmt die Werft einer Welt höchstens an.
+    pub yard_queue: u32,
     pub repair_per_day: f32,
     pub repair_parts: f64,
+    /// Anteil einer vollständigen Instandsetzung, der auf den Rumpf entfällt (0..1); der
+    /// Rest entfällt auf die Module.
+    pub repair_hull_share: f32,
+    /// Anteil des Kampfwerts eines Schiffs, der an seinen Modulen hängt (0..1).
+    pub module_weight: f32,
+    /// Anteil des Bordvorrats, den eine Flotte im eigenen System je Tag nachfasst.
+    pub resupply_per_day: f32,
     pub fuel_per_distance: f32,
     pub dry_speed: f32,
     pub ammo_goods: f64,
@@ -379,6 +393,10 @@ pub struct MilitaryBalance {
     pub hull_good_id: GoodId,
     #[serde(skip)]
     pub ammo_good_id: GoodId,
+    /// Stärkepunkte je Credit Kampfwert: so gewählt, dass eine unversehrte Startflotte
+    /// `fleets.start_strength` erreicht.
+    #[serde(skip)]
+    pub strength_per_value: f64,
 }
 
 /// Drei Werte je Doktrin: offensiv, ausgewogen, defensiv.
