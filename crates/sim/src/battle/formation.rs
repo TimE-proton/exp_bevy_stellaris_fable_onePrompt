@@ -10,12 +10,15 @@ fn centered(index: usize, count: usize, spacing: f32) -> f32 {
 }
 
 /// Weist den Schiffen `members` ihre Plätze zu. Bordjäger haben keinen Platz; sie folgen
-/// ihren Zielen und ihrem Träger.
+/// ihren Zielen und ihrem Träger. Träger stehen weit hinten, solange sie Jäger führen;
+/// mit `carriers_in_line` (keine Jäger mehr) stehen sie in der Linie, denn dann kämpfen
+/// sie mit ihren eigenen, kurz reichenden Geschützen.
 pub fn assign_slots(
     ships: &mut [BattleShip],
     members: &[usize],
     formation: Formation,
     spacing: f32,
+    carriers_in_line: bool,
 ) {
     // Schwere zuerst, bei Gleichstand in fester Reihenfolge.
     let of_class = |class: ShipClass| -> Vec<usize> {
@@ -29,8 +32,11 @@ pub fn assign_slots(
     let cruisers = of_class(ShipClass::Cruiser);
     let frigates = of_class(ShipClass::Frigate);
     let corvettes = of_class(ShipClass::Corvette);
-    let carriers = of_class(ShipClass::Carrier);
+    let mut carriers = of_class(ShipClass::Carrier);
     let mut line: Vec<usize> = battleships.iter().chain(cruisers.iter()).copied().collect();
+    if carriers_in_line {
+        line.append(&mut carriers);
+    }
     // Die schwersten Schiffe in die Mitte der Linie.
     line.sort_by(|a, b| ships[*b].value.total_cmp(&ships[*a].value).then(a.cmp(b)));
     let mut centered_line: Vec<usize> = Vec::with_capacity(line.len());

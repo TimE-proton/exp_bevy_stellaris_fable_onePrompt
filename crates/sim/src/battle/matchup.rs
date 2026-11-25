@@ -3,7 +3,7 @@
 
 use super::{Battle, CombatModifiers, CombatantSetup, Doctrine, Formation, ShipSpec};
 use crate::data::GameData;
-use crate::ids::{BattleId, PolityId, SystemId};
+use crate::ids::{BattleId, PolityId, ShipId, SystemId};
 
 /// Eine Partei eines Übungsgefechts.
 #[derive(Clone, Debug)]
@@ -108,7 +108,8 @@ impl Side {
         self.ships.iter().map(|(_, count)| *count).sum()
     }
 
-    fn specs(&self, data: &GameData) -> Vec<ShipSpec> {
+    /// Die Schiffe der Partei, fabrikneu mit den Vorräten der Partei.
+    pub fn specs(&self, data: &GameData) -> Vec<ShipSpec> {
         let mut specs = Vec::new();
         for (design, count) in &self.ships {
             for _ in 0..*count {
@@ -155,6 +156,11 @@ pub struct Outcome {
     /// Gefechtszeit in Sekunden.
     pub time: f32,
     pub timed_out: bool,
+    /// Im Patt beendet: Keine Seite kam lange durch die Schilde der anderen, alle zogen
+    /// gemeinsam ab. Dann gibt es keinen Sieger.
+    pub stalemate: bool,
+    /// Gefechtszeit beim ersten Kontakt.
+    pub contact_time: Option<f32>,
     pub sides: Vec<SideOutcome>,
     /// Höchststände, für die Leistungsmessung.
     pub peak_ships: usize,
@@ -162,6 +168,11 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// Sekunden Gefecht nach dem ersten Kontakt.
+    pub fn fighting_time(&self) -> f32 {
+        self.time - self.contact_time.unwrap_or(self.time)
+    }
+
     /// Sieger ist, wer als Einziger das Feld hält. Halten es mehrere oder niemand, gibt es
     /// keinen.
     pub fn winner(&self) -> Option<usize> {
@@ -192,9 +203,11 @@ impl Outcome {
     }
 }
 
-/// Stellt ein Gefecht auf: Alle Parteien sind einander feind.
+/// Stellt ein Gefecht auf: Alle Parteien sind einander feind. Die Schiffe tragen
+/// fortlaufende Kennungen, damit [`Battle::results`] sie ausweist.
 pub fn build(data: &GameData, seed: u64, sides: &[Side]) -> Battle {
     let mut battle = Battle::new(BattleId(0), SystemId(0), seed);
+    let mut next_id = 0u32;
     for (index, side) in sides.iter().enumerate() {
         let mut setup = CombatantSetup::new(PolityId(index as u32), data);
         setup.formation = side.formation;
@@ -203,7 +216,12 @@ pub fn build(data: &GameData, seed: u64, sides: &[Side]) -> Battle {
         if let Some(morale) = side.morale {
             setup.morale = morale;
         }
-        battle.add_combatant(data, setup, &side.specs(data));
+        let mut specs = side.specs(data);
+        for spec in &mut specs {
+            spec.source = Some(ShipId(next_id));
+            next_id += 1;
+        }
+        battle.add_combatant(data, setup, &specs);
     }
     for a in 0..sides.len() {
         for b in (a + 1)..sides.len() {
@@ -237,6 +255,11 @@ pub fn outcome_of(battle: &Battle) -> Outcome {
         ticks: battle.tick,
         time: battle.time,
         timed_out: battle.timed_out,
+        stalemate: battle
+            .combatants
+            .iter()
+            .any(|combatant| combatant.stalemate),
+        contact_time: battle.contact_time,
         sides,
         peak_ships: battle.ships.len(),
         peak_shots: 0,
@@ -246,6 +269,11 @@ pub fn outcome_of(battle: &Battle) -> Outcome {
 /// Rechnet ein Gefecht bis zum Ende.
 pub fn fight(data: &GameData, seed: u64, sides: &[Side]) -> Outcome {
     let mut battle = build(data, seed, sides);
+    finish(data, &mut battle)
+}
+
+/// Rechnet ein schon aufgestelltes (oder laufendes) Gefecht bis zum Ende.
+pub fn finish(data: &GameData, battle: &mut Battle) -> Outcome {
     let mut peak_shots = 0;
     // Die Zeitgrenze beendet jedes Gefecht; die Schranke hier schützt nur vor Datenfehlern.
     let limit = (data.balance.battle.time_limit / data.balance.battle.dt) as u64 + 100;
@@ -253,7 +281,7 @@ pub fn fight(data: &GameData, seed: u64, sides: &[Side]) -> Outcome {
         battle.step(data);
         peak_shots = peak_shots.max(battle.shots.len());
     }
-    let mut outcome = outcome_of(&battle);
+    let mut outcome = outcome_of(battle);
     outcome.peak_shots = peak_shots;
     outcome
 }

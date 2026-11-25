@@ -265,8 +265,11 @@ pub struct DesignStats {
     /// Bauwert in Credits zu Richtpreisen; Maß für Kosten und Kampfwert.
     pub value: f64,
     pub build_days: u32,
-    /// Reichweite der Waffengruppe, die den meisten Schaden bringt.
+    /// Reichweite der Waffengruppe, die den meisten Schaden bringt; bei Trägern der
+    /// Abstand, den sie halten, solange sie Jäger haben.
     pub main_range: f32,
+    /// Reichweite der eigenen Waffen (ohne Jäger).
+    pub gun_range: f32,
     /// Anteil der Feuerkraft, der zur Seite wirken kann (0..1): Maß dafür, wie sehr
     /// sich eine Breitseite lohnt.
     pub broadside: f32,
@@ -410,6 +413,146 @@ pub struct BattleBalance {
     pub range_keep: PerDoctrine,
     pub fuel_per_second: f32,
     pub formation_spacing: f32,
+    /// Gemeinsamer Faktor auf jeden Schaden gegen Schiffe: das Tempo der Gefechte.
+    pub damage_scale: f32,
+    /// Trefferchance der Punktverteidigung gegen Lenkwaffen.
+    pub point_defense_hit: f64,
+    /// Aufschlag auf Rumpfschaden durch Treffer ins Heck.
+    pub rear_hull_factor: f32,
+    /// Moralpunkte je Sekunde, um die ein Schreck (Verluste, Treffer von achtern) abklingt.
+    pub morale_shock_recovery: f32,
+    /// Größter Moralabzug, wenn die eigene Seite hoffnungslos unterlegen ist.
+    pub morale_outlook: f32,
+    /// Rückzug, wenn so viel vom Anfangswert verloren ist (je Doktrin) …
+    pub retreat_loss: PerDoctrine,
+    /// … und die eigene Stärke nicht um diesen Faktor über der des Gegners liegt.
+    pub retreat_unless_ahead: f32,
+    /// Fliehende Schiffe springen nach so vielen Sekunden aus dem Gefecht.
+    pub jump_out_time: f32,
+    /// Umlauf der Breitseitenflotten als Anteil ihrer Fahrt, und wie stark der Mittelpunkt
+    /// des Gefechts zur Feldmitte zurückgezogen wird (1/s).
+    pub orbit_share: f32,
+    pub center_pull: f32,
+    /// Sekunden, die ein Jäger beim Träger braucht, um Munition und Treibstoff aufzufüllen.
+    pub rearm_time: f32,
+    /// Abstand, den Träger zum Gegner halten wollen (als ihre Hauptreichweite).
+    pub carrier_standoff: f32,
+    /// Eine Partei, die so viele Sekunden nicht mehr durch die Schilde des Gegners kam,
+    /// bricht das Gefecht ab.
+    pub stalemate_time: f32,
+    /// Ein Gegner, der in so vielen Sekunden durch die Schilde kam, setzt einer Partei zu:
+    /// Richtet sie selbst nichts mehr aus, weicht sie allein (sonst gilt es als Patt).
+    pub stalemate_pressure: f32,
+    /// Ab diesem Verhältnis von Seiten- zu Bugfeuer zeigt ein Schiff dem Ziel die Breitseite
+    /// (und eine Flotte umkreist den Gegner); darunter fährt es mit dem Bug voran.
+    pub broadside_min: f32,
+    /// Winkel zwischen Bug und Ziel in der Breitseite, in Grad.
+    pub broadside_angle: f32,
+    // --- Module und Ausfälle ---
+    pub module_hits: ModuleHitWeights,
+    /// Ein zerstörtes Magazin kostet diesen Anteil des höchsten Rumpfs.
+    pub magazine_blast: f32,
+    /// Ein zerstörter Tank lässt diesen Anteil des Treibstoffs auslaufen.
+    pub tank_leak: f32,
+    /// Unter diesem Zustand (Anteil der Strukturpunkte) feuert eine Waffe langsamer …
+    pub damaged_weapon_below: f32,
+    /// … um diesen Faktor auf die Nachladezeit.
+    pub damaged_weapon_cooldown: f32,
+    /// Fahrt ohne Treibstoff als Anteil der Höchstfahrt.
+    pub dry_speed: f32,
+    // --- Moral ---
+    /// Gewicht des Schrecks (und Auftriebs), wenn ein Schiff dieser Größe verloren geht.
+    pub loss_shock: LossShock,
+    // --- Waffen und Ziele ---
+    /// Gewicht der Zielgröße bei der Trefferchance der Punktverteidigung.
+    pub point_defense_signature_weight: f32,
+    /// Bis zu dieser Zielgröße (signature) gilt ein Schiff als klein: Punktverteidigung
+    /// beschießt es, Fregatten gehen ihm entgegen.
+    pub small_signature: f32,
+    /// Unter dieser Zielgröße verschwenden Lenkwaffen und träge Türme keinen Schuss.
+    pub tiny_signature: f32,
+    /// Türme mit weniger Nachführung (rad/s) gelten als träge.
+    pub slow_tracking: f32,
+    /// Die Punktverteidigung nimmt kleinere Ziele zuerst: Entfernung mal
+    /// (1 + dieser Wert × Zielgröße).
+    pub point_defense_size_bias: f32,
+    pub targeting: TargetScoring,
+    // --- Bewegung ---
+    pub range_bands: RangeBands,
+    pub flanking: Flanking,
+    /// So weit (vom eigenen Platz) gehen Fregatten kleinen Angreifern entgegen.
+    pub frigate_leash: f32,
+    /// Jäger fliegen mindestens mit diesem Anteil ihrer Höchstfahrt.
+    pub fighter_min_speed: f32,
+    // --- Träger ---
+    /// Sekunden bis zum ersten Start und zwischen zwei Starts je Hangar.
+    pub first_launch: f32,
+    pub launch_interval: f32,
+    /// Sekunden, die ein Jäger nach einem Anflug geradeaus weiterfliegt.
+    pub breakaway_time: f32,
+    // --- Bewertung ---
+    /// Kampfwert eines Schiffs: Bauwert mal (dieser Sockel + Rest × Rumpfzustand).
+    pub value_hull_floor: f32,
+}
+
+/// Gewichte, mit denen ein Rumpftreffer ein Modul trifft, je Art und getroffener Seite.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ModuleHitWeights {
+    pub engine_rear: f32,
+    pub engine: f32,
+    pub weapon_front: f32,
+    pub weapon: f32,
+    pub hangar: f32,
+    pub reactor: f32,
+    pub shield: f32,
+    pub magazine: f32,
+    pub tank: f32,
+}
+
+/// Wie stark ein Verlust die Moral in der Nähe bewegt, je Größe des Schiffs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LossShock {
+    pub fighter: f32,
+    pub escort: f32,
+    pub capital: f32,
+}
+
+/// Bewertung der Ziele bei der Zielwahl.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TargetScoring {
+    /// Aufschlag für angeschlagene Ziele (mal verlorenem Rumpfanteil).
+    pub damaged: f32,
+    pub routing: f32,
+    pub disabled: f32,
+    /// Bonus für das bisherige Ziel: Es wird nicht ständig gewechselt.
+    pub keep: f32,
+    /// Feste Streuung je Paar, damit nicht alle dasselbe Ziel wählen.
+    pub jitter: f32,
+}
+
+/// Reichweitenkontrolle der Flotte, als Anteile des gewünschten Abstands.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RangeBands {
+    /// Weiter weg: heran.
+    pub approach: f32,
+    /// Näher: Abstand nehmen (außer offensiv) …
+    pub back_off: f32,
+    /// … und noch näher: mit voller Fahrt.
+    pub urgent: f32,
+    /// Fahrt beim gemächlichen Abstandnehmen, als Anteil der Flottenfahrt.
+    pub back_off_speed: f32,
+}
+
+/// Wie Korvetten flankieren.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Flanking {
+    /// Weiter als so weit vom Ziel bleiben Korvetten im Verband, solange die Flotte nicht
+    /// im Gefecht ist (Strecke).
+    pub engage_distance: f32,
+    /// Angriffspunkt hinter dem Ziel, als Anteil der Hauptreichweite.
+    pub reach: f32,
+    /// Seitlicher Abstand beim Umgehen, als Anteil der Hauptreichweite.
+    pub wide: f32,
 }
 
 /// `balance.ron: research`
