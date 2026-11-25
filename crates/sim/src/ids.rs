@@ -52,3 +52,15 @@ id_type!(
     /// Gut aus `goods.ron`, Index in [`crate::data::GameData::goods`].
     GoodId, "W"
 );
+id_type!(
+    /// Flotte in [`crate::fleet::Fleets::list`].
+    FleetId, "F"
+);
+id_type!(
+    /// Frachter in [`crate::logistics::Logistics::freighters`].
+    FreighterId, "T"
+);
+id_type!(
+    /// Handelshaus in [`crate::logistics::Logistics::houses`].
+    HouseId, "H"
+);

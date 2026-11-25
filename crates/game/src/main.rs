@@ -1,11 +1,13 @@
 //! KONFLUENZ – Bevy-App. Zeigt den Simulationskern an und schickt ihm Befehle.
 
 mod args;
+mod history;
 mod map;
 mod selftest;
 mod session;
 mod state;
 mod time_control;
+mod traffic;
 mod ui;
 
 use bevy::prelude::*;
@@ -53,6 +55,8 @@ fn main() -> AppExit {
             time_control::TimeControlPlugin,
             session::SessionPlugin,
             map::GalaxyViewPlugin,
+            traffic::TrafficPlugin,
+            history::HistoryPlugin,
             ui::UiPlugin,
             selftest::SelftestPlugin,
         ))

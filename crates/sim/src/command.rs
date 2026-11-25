@@ -8,8 +8,11 @@
 use crate::chronicle::Chronicle;
 use crate::clock::SimClock;
 use crate::data::GameData;
+use crate::diplomacy::{self, Diplomacy};
+use crate::economy::Economy;
+use crate::fleet::{self, Fleets, Stance};
 use crate::galaxy::Galaxy;
-use crate::ids::{PlanetId, PolityId};
+use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
 use crate::polity::{self, Polities};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
@@ -18,7 +21,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SimCommand {
     /// Kolonie auf einem freien Planeten in Reichweite gründen.
-    ClaimPlanet { planet: PlanetId },
+    ClaimPlanet {
+        planet: PlanetId,
+    },
+    /// Flotte auf dem kürzesten Weg in ein System schicken.
+    MoveFleet {
+        fleet: FleetId,
+        to: SystemId,
+    },
+    /// Auftrag einer Flotte ändern.
+    SetStance {
+        fleet: FleetId,
+        stance: Stance,
+    },
+    DeclareWar {
+        target: PolityId,
+    },
+    MakePeace {
+        target: PolityId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +123,9 @@ pub struct CommandContext<'w> {
     pub clock: Res<'w, SimClock>,
     pub galaxy: ResMut<'w, Galaxy>,
     pub polities: ResMut<'w, Polities>,
+    pub economy: ResMut<'w, Economy>,
+    pub fleets: ResMut<'w, Fleets>,
+    pub diplomacy: ResMut<'w, Diplomacy>,
     pub chronicle: ResMut<'w, Chronicle>,
 }
 
@@ -162,12 +186,35 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         SimCommand::ClaimPlanet { planet } => polity::claim_planet(
             &mut ctx.galaxy,
             &mut ctx.polities,
+            &mut ctx.economy,
             &mut ctx.chronicle,
-            &ctx.data.balance.colonization,
+            &ctx.data,
             polity,
             *planet,
             tick,
         )
         .map_err(|error| error.to_string()),
+        SimCommand::MoveFleet { fleet, to } => {
+            fleet::order_move(&ctx.galaxy, &mut ctx.fleets, polity, *fleet, *to)
+        }
+        SimCommand::SetStance { fleet, stance } => {
+            fleet::set_stance(&mut ctx.fleets, polity, *fleet, *stance)
+        }
+        SimCommand::DeclareWar { target } => diplomacy::declare_war(
+            &mut ctx.diplomacy,
+            &ctx.polities,
+            &mut ctx.chronicle,
+            tick,
+            polity,
+            *target,
+        ),
+        SimCommand::MakePeace { target } => diplomacy::make_peace(
+            &mut ctx.diplomacy,
+            &ctx.polities,
+            &mut ctx.chronicle,
+            tick,
+            polity,
+            *target,
+        ),
     }
 }

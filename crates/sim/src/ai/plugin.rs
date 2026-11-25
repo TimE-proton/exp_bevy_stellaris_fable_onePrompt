@@ -2,6 +2,7 @@ use super::best_colony_target;
 use crate::clock::{SimClock, day_start};
 use crate::command::{CommandQueue, CommandSource, SimCommand};
 use crate::data::GameData;
+use crate::economy::Economy;
 use crate::galaxy::Galaxy;
 use crate::polity::Polities;
 use crate::state::SimConfig;
@@ -24,6 +25,7 @@ fn expand(
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
+    economy: Res<Economy>,
     mut queue: ResMut<CommandQueue>,
 ) {
     let day = clock.day();
@@ -31,7 +33,9 @@ fn expand(
         if config.player == Some(polity.id) || polity.next_claim_day > day {
             continue;
         }
-        if let Some(planet) = best_colony_target(&data, &galaxy, &polities, polity.id, day) {
+        if let Some(planet) =
+            best_colony_target(&data, &galaxy, &polities, &economy, polity.id, day)
+        {
             queue.push(
                 polity.id,
                 CommandSource::Ai,

@@ -122,6 +122,156 @@ impl Headless {
     }
 }
 
+/// Volkswirtschaftliche Kennzahlen der ganzen Galaxie.
+#[derive(Clone, Debug, Default)]
+pub struct EconomyStats {
+    /// Bevölkerung in Millionen.
+    pub population: f64,
+    pub capital: f64,
+    /// Anteil der Arbeitskräfte in Arbeit.
+    pub employment: f64,
+    /// Kapitalgewichtete Auslastung der Werke.
+    pub utilization: f64,
+    /// Bevölkerungsgewichtete Deckung des Lebensnotwendigen.
+    pub essentials_met: f64,
+    /// Mittleres Verhältnis von Preis zu Richtpreis auf belebten Märkten.
+    pub price_level: f64,
+    /// Mittlere Preisspanne zwischen teuerstem und billigstem belebten Markt je Gut.
+    pub price_spread: f64,
+    /// Anteil der Preise, die an Boden oder Decke kleben.
+    pub pinned_prices: f64,
+    pub mean_wage: f64,
+    pub freighters: usize,
+    pub laden_freighters: usize,
+    /// Abweichung der Geldmenge vom Soll in Tausendstel Credits; muss null sein.
+    pub money_drift: i64,
+    /// Summe der Staatskassen in Credits.
+    pub treasuries: f64,
+    /// Geldverteilung in Credits: Haushalte, Firmen, Kontore, Handelshäuser.
+    pub household_money: f64,
+    pub firm_money: f64,
+    pub market_money: f64,
+    pub house_money: f64,
+    pub anomaly: Option<String>,
+}
+
+pub fn economy_stats(world: &World) -> EconomyStats {
+    let data = world.resource::<GameData>();
+    let galaxy = world.resource::<Galaxy>();
+    let economy = world.resource::<crate::economy::Economy>();
+    let logistics = world.resource::<crate::logistics::Logistics>();
+    let balance = &data.balance.economy;
+    let mut stats = EconomyStats::default();
+    let (mut labor, mut employed, mut used_capital, mut fed, mut wages) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for planet in &galaxy.planets {
+        if planet.owner.is_none() || planet.population <= 0.0 {
+            continue;
+        }
+        let local = economy.planet(planet.id);
+        let supply = planet.population * balance.workforce_share;
+        stats.population += planet.population;
+        labor += supply;
+        employed += supply.min(local.labor_demand);
+        fed += planet.population * local.essentials_met(balance);
+        wages += planet.population * local.wage;
+        for (capital, utilization) in local.capital.iter().zip(&local.utilization) {
+            stats.capital += capital;
+            used_capital += capital * utilization;
+        }
+    }
+    stats.employment = employed / labor.max(1e-9);
+    stats.utilization = used_capital / stats.capital.max(1e-9);
+    stats.essentials_met = fed / stats.population.max(1e-9);
+    stats.mean_wage = wages / stats.population.max(1e-9);
+
+    let live: Vec<usize> = galaxy
+        .systems
+        .iter()
+        .filter(|system| galaxy.system_owner(system.id).is_some())
+        .map(|system| system.index())
+        .collect();
+    let (mut level, mut level_count, mut spread, mut spread_count, mut pinned) =
+        (0.0, 0, 0.0, 0, 0);
+    for (good, def) in data.goods.iter().enumerate() {
+        let (mut low, mut high) = (f64::MAX, 0.0f64);
+        for index in &live {
+            let ratio = economy.markets[*index].price[good] / def.base_price;
+            level += ratio;
+            level_count += 1;
+            low = low.min(ratio);
+            high = high.max(ratio);
+            if ratio <= balance.price_floor * 1.02 || ratio >= balance.price_ceiling * 0.98 {
+                pinned += 1;
+            }
+        }
+        if !live.is_empty() {
+            spread += high / low;
+            spread_count += 1;
+        }
+    }
+    stats.price_level = level / (level_count.max(1) as f64);
+    stats.price_spread = spread / (spread_count.max(1) as f64);
+    stats.pinned_prices = pinned as f64 / (level_count.max(1) as f64);
+    stats.freighters = logistics.active_freighters();
+    stats.laden_freighters = logistics
+        .freighters
+        .iter()
+        .filter(|f| f.alive && f.cargo.is_some())
+        .count();
+    stats.money_drift = crate::state::money_drift(world).unwrap_or(0);
+    stats.treasuries = economy
+        .treasuries
+        .iter()
+        .map(|cash| crate::economy::to_credits(*cash))
+        .sum();
+    let credits = crate::economy::to_credits;
+    stats.household_money = economy.planets.iter().map(|p| credits(p.households)).sum();
+    stats.firm_money = economy
+        .planets
+        .iter()
+        .flat_map(|p| p.firms.iter())
+        .map(|firm| credits(firm.cash))
+        .sum();
+    stats.market_money = economy
+        .markets
+        .iter()
+        .map(|market| credits(market.cash))
+        .sum();
+    stats.house_money = credits(logistics.money());
+    stats.anomaly = economy.find_anomaly();
+    stats
+}
+
+/// Harte Invarianten. Ein Verstoß ist ein Programmfehler, kein Balanceproblem.
+pub fn check_invariants(world: &World) -> Result<(), String> {
+    let stats = economy_stats(world);
+    if stats.money_drift != 0 {
+        return Err(format!(
+            "Geldmenge weicht um {} Tausendstel Credits ab",
+            stats.money_drift
+        ));
+    }
+    if let Some(anomaly) = stats.anomaly {
+        return Err(anomaly);
+    }
+    let galaxy = world.resource::<Galaxy>();
+    for planet in &galaxy.planets {
+        if !planet.population.is_finite() || planet.population < 0.0 {
+            return Err(format!(
+                "{}: Bevölkerung {}",
+                planet.name, planet.population
+            ));
+        }
+        if planet.population > planet.capacity * 1.001 {
+            return Err(format!(
+                "{}: Bevölkerung über der Tragfähigkeit",
+                planet.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Kennzahlen einer Partie für Berichte und Sweeps.
 #[derive(Clone, Debug)]
 pub struct RunSummary {
@@ -132,6 +282,9 @@ pub struct RunSummary {
     pub planets: usize,
     pub free_planets: usize,
     pub polities: Vec<PolitySummary>,
+    pub economy: EconomyStats,
+    /// Erster Invariantenverstoß, falls es einen gab.
+    pub violation: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +320,8 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 population: galaxy.population_of(polity.id),
             })
             .collect(),
+        economy: economy_stats(sim.world()),
+        violation: check_invariants(sim.world()).err(),
     }
 }
 
@@ -175,6 +330,24 @@ pub fn run_ai_game(data: &GameData, seed: u64, days: u64) -> Headless {
     let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
     sim.run_days(days);
     sim
+}
+
+/// Wie [`run_ai_game`], prüft aber jährlich die Invarianten und meldet den ersten Verstoß.
+pub fn run_checked(data: &GameData, seed: u64, days: u64) -> (Headless, Option<String>) {
+    let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+    let mut violation = None;
+    let mut done = 0;
+    while done < days {
+        let step = crate::clock::DAYS_PER_YEAR.min(days - done);
+        sim.run_days(step);
+        done += step;
+        if violation.is_none()
+            && let Err(message) = check_invariants(sim.world())
+        {
+            violation = Some(format!("Tag {done}: {message}"));
+        }
+    }
+    (sim, violation)
 }
 
 /// Viele Seeds parallel. Jeder Lauf ist für sich einfädig und deterministisch; die
@@ -191,7 +364,9 @@ pub fn sweep(data: &GameData, seeds: &[u64], days: u64, jobs: usize) -> Vec<RunS
                     let Some(seed) = seeds.get(index) else {
                         break;
                     };
-                    let summary = summarize(&run_ai_game(data, *seed, days));
+                    let (sim, violation) = run_checked(data, *seed, days);
+                    let mut summary = summarize(&sim);
+                    summary.violation = violation.or(summary.violation);
                     results
                         .lock()
                         .expect("Sweep-Thread abgestürzt")
@@ -265,6 +440,7 @@ mod tests {
                     world.resource::<GameData>(),
                     world.resource::<Galaxy>(),
                     world.resource::<Polities>(),
+                    world.resource::<crate::economy::Economy>(),
                     me,
                     day,
                 )

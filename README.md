@@ -34,6 +34,13 @@ cargo sweep --seeds 0..32 --years 100
 Viele Seeds parallel, Kennzahlen als Tabelle (`--csv datei.csv` schreibt sie zusätzlich weg).
 
 ```bash
+cargo headless economy --seed 7 --years 40
+```
+
+Volkswirtschaftliche Kennzahlen im Jahresabstand (Versorgung, Auslastung, Preisniveau,
+Geldverteilung), dazu Markt und Werke eines Systems. Das Werkzeug zum Auswuchten.
+
+```bash
 cargo headless hash --seed 7 --days 3600
 ```
 
@@ -72,13 +79,15 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | 1 – 6 | Geschwindigkeit ½× bis 25× (1× = ein Tag je Sekunde) |
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
+| Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt") |
+| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Flotten |
 | F1 | Hilfe |
 | Esc | Menü |
 
 ## Aufbau
 
 ```
-assets/data/*.ron   Spieldaten: Güter, Planetentypen, Galaxie, Gemeinschaften, Balance
+assets/data/*.ron   Spieldaten: Güter, Rezepte, Planetentypen, Galaxie, Gemeinschaften, Balance
 crates/sim/         Simulationskern, ohne Rendering, Fenster oder Eingabe
 crates/game/        Bevy-App: Karte, Oberfläche, Eingabe
 crates/headless/    Kommandozeile über sim::harness
@@ -103,12 +112,32 @@ Protokoll genügen für eine exakte Wiedergabe.
 geprüft. Ändern, neu starten, fertig; neu übersetzt wird nichts. Ein anderes Verzeichnis
 wählt `--data-dir PFAD` oder die Umgebungsvariable `KONFLUENZ_DATA`.
 
+## Wie die Wirtschaft rechnet
+
+- **Produktion.** Jeder Planet hat je Rezept einen Kapitalstock. Was ein Werk abwirft,
+  ergibt sich aus dem lokalen Vorkommen, dem Lohn (viele Menschen, billige Arbeit), dem
+  Energiebedarf (Kälte, Hitze, Schwerkraft), den Startkosten in den Orbit und den Preisen
+  im System. Kapital wandert monatlich in das Rezept mit der höchsten erwarteten Rendite;
+  Gebäudeboni gibt es nicht. Deckt der Erlös nicht einmal Material und Energie, steht das
+  Werk still.
+- **Preise.** Je System und Gut aus der Lagerreichweite: Bestand gegen kaufkräftige
+  Tagesnachfrage, mit Boden, Decke und begrenztem Tagesschritt.
+- **Warenflüsse.** Frachter der Handelshäuser kaufen billig, fahren Kante für Kante durch
+  das Routennetz und verkaufen teuer. Ein blockiertes System erreicht niemand; Kaperer
+  bringen Frachter auf, Geleitschutz hält sie ab. Fehlt die Lieferung, fehlen die
+  Vorprodukte: Die Blockade wirkt über die Ware.
+- **Geld.** Ganzzahlig und geschlossen: Es wird nur verschoben. Neu entsteht es allein für
+  Neugeborene, ausgewiesen als Geldschöpfung. Ein Test und jeder Sweep prüfen die Summe.
+- **Sicherungen gegen Verklemmen.** Kontore lagern nur bis zu einer Obergrenze, Werke
+  laufen ohne Treibstoff im Notbetrieb weiter, Handelshäuser behalten eine Mindestflotte,
+  junge Kolonien haben eine Schonfrist. Engpässe schmerzen, sind aber nie endgültig.
+
 ## Stand
 
 | Meilenstein | Inhalt | Stand |
 |---|---|---|
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
-| 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | offen |
+| 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | offen |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | offen |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |

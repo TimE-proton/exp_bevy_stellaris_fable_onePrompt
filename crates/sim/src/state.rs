@@ -7,9 +7,13 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::command::{CommandLog, CommandQueue};
 use crate::data::GameData;
+use crate::diplomacy::Diplomacy;
+use crate::economy::{Economy, setup_economy};
+use crate::fleet::{Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
 use crate::hash::Fnv64;
 use crate::ids::PolityId;
+use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -65,9 +69,21 @@ sim_state! {
     clock: SimClock,
     galaxy: Galaxy,
     polities: Polities,
+    economy: Economy,
+    logistics: Logistics,
+    fleets: Fleets,
+    diplomacy: Diplomacy,
     queue: CommandQueue,
     log: CommandLog,
     chronicle: Chronicle,
+}
+
+/// Abweichung der Geldmenge vom Soll (Anfangsbestand plus ausgewiesene Schöpfung).
+/// Muss immer null sein: Geld wird nur verschoben.
+pub fn money_drift(world: &World) -> Option<i64> {
+    let economy = world.get_resource::<Economy>()?;
+    let logistics = world.get_resource::<Logistics>()?;
+    Some(economy.money_in_accounts() + logistics.money() - economy.initial_money - economy.minted)
 }
 
 impl SimState {
@@ -93,11 +109,19 @@ impl SimState {
                 galaxy.systems.len()
             ),
         );
+        let mut economy = setup_economy(data, &galaxy, &polities);
+        let logistics = setup_logistics(data, &galaxy, &polities);
+        economy.initial_money += logistics.money();
+        let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,
             clock: SimClock::default(),
             galaxy,
             polities,
+            economy,
+            logistics,
+            fleets,
+            diplomacy: Diplomacy::default(),
             queue: CommandQueue::default(),
             log: CommandLog::default(),
             chronicle,

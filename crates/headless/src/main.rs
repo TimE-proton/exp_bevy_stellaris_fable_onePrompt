@@ -64,6 +64,19 @@ enum Command {
         #[arg(long)]
         exact: bool,
     },
+    /// Volkswirtschaftliche Kennzahlen im Jahresabstand, zum Auswuchten der Balance.
+    Economy {
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 30)]
+        years: u64,
+        /// Zusätzlich Preise und Bestände dieses Systems (Name) ausgeben.
+        #[arg(long)]
+        system: Option<String>,
+        /// Nach den vollen Jahren noch so viele Tage weiterlaufen.
+        #[arg(long, default_value_t = 0)]
+        extra_days: u64,
+    },
     /// Kennzahlen der erzeugten Galaxie.
     Galaxy {
         #[arg(long, default_value_t = 1)]
@@ -158,17 +171,45 @@ fn main() -> ExitCode {
                 runs.len(),
                 started.elapsed().as_secs_f64()
             );
+            let mean = |f: fn(&RunSummary) -> f64| {
+                runs.iter().map(f).sum::<f64>() / runs.len().max(1) as f64
+            };
+            println!(
+                "Mittel: Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}",
+                mean(|r| r.economy.essentials_met),
+                mean(|r| r.economy.utilization),
+                mean(|r| r.economy.employment),
+                mean(|r| r.economy.price_level),
+                mean(|r| r.economy.price_spread),
+                100.0 * mean(|r| r.economy.pinned_prices),
+                mean(|r| r.economy.freighters as f64)
+            );
+            let violations: Vec<_> = runs
+                .iter()
+                .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
+                .collect();
+            for (seed, violation) in &violations {
+                eprintln!("INVARIANTE VERLETZT, Seed {seed}: {violation}");
+            }
             if let Some(path) = csv {
-                let mut text =
-                    String::from("seed,hash,days,free_planets,polity,alive,planets,population\n");
+                let mut text = String::from(
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population\n",
+                );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{},{},{},{:.1}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1}\n",
                             run.seed,
                             run.hash,
                             run.days,
                             run.free_planets,
+                            run.economy.essentials_met,
+                            run.economy.utilization,
+                            run.economy.employment,
+                            run.economy.price_level,
+                            run.economy.price_spread,
+                            run.economy.pinned_prices,
+                            run.economy.freighters,
                             polity.name,
                             polity.alive,
                             polity.planets,
@@ -181,6 +222,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 println!("CSV: {}", path.display());
+            }
+            if !violations.is_empty() {
+                return ExitCode::FAILURE;
             }
         }
         Command::Hash {
@@ -202,6 +246,181 @@ fn main() -> ExitCode {
                 }
                 done += step;
                 println!("Tag {:>7}  {:016x}", done, sim.hash());
+            }
+        }
+        Command::Economy {
+            seed,
+            years,
+            system,
+            extra_days,
+        } => {
+            let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+            println!(
+                "{:>5} {:>9} {:>8} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>9}   Geld in Tsd.: {:>7} {:>7} {:>7} {:>7} {:>7}",
+                "Jahr",
+                "Bev. Mio",
+                "Kapital",
+                "Arbeit",
+                "Ausl.",
+                "Vers.",
+                "Preis",
+                "Spanne",
+                "fest",
+                "Lohn",
+                "Frachter",
+                "Haush.",
+                "Firmen",
+                "Kontore",
+                "Häuser",
+                "Staat"
+            );
+            for year in 0..=years {
+                if year > 0 {
+                    sim.run_days(DAYS_PER_YEAR);
+                }
+                let stats = sim::harness::economy_stats(sim.world());
+                println!(
+                    "{:>5} {:>9.0} {:>8.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>7.2} {:>6.2} {:>6.2} {:>4}/{:<4}                 {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0}",
+                    year,
+                    stats.population,
+                    stats.capital,
+                    stats.employment,
+                    stats.utilization,
+                    stats.essentials_met,
+                    stats.price_level,
+                    stats.price_spread,
+                    stats.pinned_prices,
+                    stats.mean_wage,
+                    stats.laden_freighters,
+                    stats.freighters,
+                    stats.household_money / 1000.0,
+                    stats.firm_money / 1000.0,
+                    stats.market_money / 1000.0,
+                    stats.house_money / 1000.0,
+                    stats.treasuries / 1000.0
+                );
+                if let Err(message) = sim::harness::check_invariants(sim.world()) {
+                    eprintln!("INVARIANTE VERLETZT: {message}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            sim.run_days(extra_days);
+            let galaxy = sim.galaxy();
+            let economy = sim.world().resource::<sim::economy::Economy>();
+            let wanted = system.or_else(|| {
+                sim.polities().list[0]
+                    .capital
+                    .map(|p| galaxy.system(galaxy.planet(p).system).name.clone())
+            });
+            let logistics = sim.world().resource::<sim::logistics::Logistics>();
+            println!("\nWelten der ersten Gemeinschaft:");
+            let first = sim.polities().list[0].id;
+            let mut worlds: Vec<_> = galaxy.planets_of(first).collect();
+            worlds.sort_by(|a, b| b.population.total_cmp(&a.population));
+            for planet in worlds.iter().take(12) {
+                let local = economy.planet(planet.id);
+                let top = local
+                    .capital
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(index, capital)| format!("{} {:.1}", data.recipes[index].name, capital))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<16} {:<11} {:>7.0} Mio.  Lohn {:>4.2}  Stellen {:>4.2}  Versorgung {:>4.2}  Kapital {:>6.1}  größtes: {}",
+                    planet.name,
+                    data.planet_kinds[planet.kind as usize].name,
+                    planet.population,
+                    local.wage,
+                    local.employment,
+                    local.essentials_met(&data.balance.economy),
+                    local.total_capital(),
+                    top
+                );
+            }
+            let mut flows: Vec<_> = logistics.flows.iter().collect();
+            flows.sort_by(|a, b| b.1.total_cmp(a.1));
+            println!("\nGrößte Warenströme (gleitend):");
+            for ((from, to, good), volume) in flows.iter().take(12) {
+                println!(
+                    "  {:>8.1}  {:<14} {} → {}",
+                    volume,
+                    data.good(*good).name,
+                    galaxy.system(*from).name,
+                    galaxy.system(*to).name
+                );
+            }
+            for house in &logistics.houses {
+                let ships = logistics
+                    .freighters
+                    .iter()
+                    .filter(|f| f.alive && f.house == house.id)
+                    .count();
+                println!(
+                    "  {:<28} {:>3} Frachter  Gewinn {:>7.1}/Tag  Kasse {:>8.0}",
+                    house.name,
+                    ships,
+                    house.profit,
+                    sim::economy::to_credits(house.cash)
+                );
+            }
+            if let Some(found) =
+                wanted.and_then(|name| galaxy.systems.iter().find(|s| s.name == name))
+            {
+                let market = economy.market(found.id);
+                println!(
+                    "\nMarkt {} (Kasse {:.0}, Umsatz {:.0}/Tag)",
+                    found.name,
+                    sim::economy::to_credits(market.cash),
+                    market.turnover
+                );
+                println!(
+                    "  {:<14} {:>8} {:>8} {:>9} {:>9} {:>9}",
+                    "Gut", "Preis", "Richt", "Bestand", "Nachfr.", "Zufluss"
+                );
+                for (index, good) in data.goods.iter().enumerate() {
+                    println!(
+                        "  {:<14} {:>8.1} {:>8.1} {:>9.1} {:>9.2} {:>9.2}",
+                        good.name,
+                        market.price[index],
+                        good.base_price,
+                        market.stock[index],
+                        market.demand[index],
+                        market.supply[index]
+                    );
+                }
+                for planet in galaxy.planets_in(found.id).filter(|p| p.owner.is_some()) {
+                    let local = economy.planet(planet.id);
+                    println!(
+                        "\n  {} ({:.0} Mio., Lohn {:.2}, Stellen besetzt {:.2}, Haushalte {:.0})",
+                        planet.name,
+                        planet.population,
+                        local.wage,
+                        local.employment,
+                        sim::economy::to_credits(local.households)
+                    );
+                    for (index, recipe) in data.recipes.iter().enumerate() {
+                        if local.capital[index] > 0.0 {
+                            let unit = sim::economy::unit_economics(
+                                &data, planet, local.wage, market, recipe,
+                            );
+                            println!(
+                                "    {:<16} Kapital {:>7.1}  Ausstoß {:>7.2}  Auslastung {:>4.2} (Trend {:>4.2})  Rendite {:>6.2}  je Einheit: Erlös {:>6.2} Vorprodukte {:>6.2} Energie {:>5.2} Start {:>5.2} Löhne {:>5.2}",
+                                recipe.name,
+                                local.capital[index],
+                                local.output[index],
+                                local.utilization[index],
+                                local.utilization_trend[index],
+                                local.roc[index],
+                                unit.revenue,
+                                unit.inputs,
+                                unit.energy,
+                                unit.lift,
+                                unit.wages
+                            );
+                        }
+                    }
+                }
             }
         }
         Command::Galaxy { seed } => {

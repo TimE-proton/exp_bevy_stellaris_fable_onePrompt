@@ -1,11 +1,14 @@
 //! Oberfläche (egui). Die Fenster sind reine Funktionen über dem Simulationszustand:
 //! Sie lesen, zeichnen und geben Aktionen zurück. Erst das System unten wendet sie an.
 
+mod economy;
+mod fleets;
 mod format;
 mod panels;
 
 pub use panels::{SimRefs, UiAction};
 
+use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
 use crate::session::{Notice, SessionRequest, quicksave_path};
 use crate::state::AppState;
@@ -17,9 +20,22 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::chronicle::Chronicle;
 use sim::clock::SimClock;
 use sim::command::{CommandQueue, CommandSource};
+use sim::diplomacy::Diplomacy;
+use sim::economy::Economy;
+use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
+use sim::logistics::Logistics;
 use sim::polity::Polities;
 use sim::state::SimConfig;
+
+/// Reiter der linken Tafel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeftTab {
+    #[default]
+    Overview,
+    Market,
+    Production,
+}
 
 /// Zustand der Oberfläche selbst (kein Spielzustand).
 #[derive(Resource, Debug, Clone)]
@@ -27,6 +43,12 @@ pub struct UiState {
     pub seed_text: String,
     pub menu_open: bool,
     pub help_open: bool,
+    pub tab: LeftTab,
+    pub flows_open: bool,
+    pub chains_open: bool,
+    pub fleets_open: bool,
+    /// Güter, deren Preisverlauf im Diagramm gezeigt wird (Index = Gut).
+    pub chart_goods: Vec<bool>,
 }
 
 impl Default for UiState {
@@ -35,6 +57,11 @@ impl Default for UiState {
             seed_text: "1".into(),
             menu_open: false,
             help_open: false,
+            tab: LeftTab::default(),
+            flows_open: false,
+            chains_open: false,
+            fleets_open: false,
+            chart_goods: Vec::new(),
         }
     }
 }
@@ -47,6 +74,10 @@ pub struct SimParams<'w> {
     clock: Res<'w, SimClock>,
     config: Res<'w, SimConfig>,
     chronicle: Res<'w, Chronicle>,
+    economy: Res<'w, Economy>,
+    logistics: Res<'w, Logistics>,
+    fleets: Res<'w, Fleets>,
+    diplomacy: Res<'w, Diplomacy>,
 }
 
 pub struct UiPlugin;
@@ -89,6 +120,7 @@ fn draw_ui(
     data: Res<sim::GameData>,
     sim: Option<SimParams>,
     notice: Res<Notice>,
+    history: Res<PriceHistory>,
     mut ui_state: ResMut<UiState>,
     mut speed: ResMut<SimSpeed>,
     mut selection: ResMut<Selection>,
@@ -121,6 +153,11 @@ fn draw_ui(
                 clock: &sim.clock,
                 config: &sim.config,
                 chronicle: &sim.chronicle,
+                economy: &sim.economy,
+                logistics: &sim.logistics,
+                fleets: &sim.fleets,
+                diplomacy: &sim.diplomacy,
+                history: &history,
             };
             panels::in_game(
                 &mut root,

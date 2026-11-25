@@ -7,9 +7,114 @@
         cooldown_days: 240,
         // Unter dieser Bevölkerung gibt die Hauptwelt keine Siedler ab.
         min_capital_population: 200.0,
+        // Gründungskosten in Credits aus der Staatskasse: je ein Drittel für die Kasse des
+        // Kontors im Zielsystem, für Proviant vom Heimatmarkt und als Startkapital der Firmen.
+        cost: 6000.0,
+        // Kapitalstock, den die Siedler mitbringen (verteilt auf die lohnendsten Rezepte).
+        seed_capital: 10.0,
     ),
     population: (
-        // Jährliche Wachstumsrate weit unter der Tragfähigkeit.
-        growth_per_year: 0.025,
+        // Jährliche Wachstumsrate bei voller Versorgung, weit unter der Tragfähigkeit.
+        growth_per_year: 0.03,
+        // Jährliche Schrumpfung, wenn gar keine Nahrung ankommt.
+        starvation_per_year: 0.12,
+        // Anteil einer Welt, der je Monat höchstens abwandert.
+        migration_per_month: 0.006,
+    ),
+    economy: (
+        // Anteil der Bevölkerung, der arbeitet.
+        workforce_share: 0.4,
+        // Lohn je Mio. Arbeitskräfte und Tag bei ausgeglichenem Arbeitsmarkt.
+        base_wage: 1.0,
+        // Täglicher Bedarf der Haushalte je Mio. Einwohner.
+        needs: [
+            (good: "nahrung",      per_million: 0.010,  essential: true),
+            (good: "konsumgueter", per_million: 0.0035, essential: false),
+            (good: "medizin",      per_million: 0.0005, essential: false),
+        ],
+        fuel: "treibstoff",
+        // Anteil der Leistung, den ein Werk ganz ohne Treibstoff schafft (Notbetrieb).
+        // Verhindert, dass ein Engpass die Wirtschaft endgültig verklemmt.
+        emergency_output: 0.2,
+        capital_good: "maschinen",
+
+        // --- Preisbildung ---
+        // Lagerreichweite in Tagen, bei der der Preis dem Richtpreis entspricht.
+        cover_days: 20.0,
+        // Wie stark der Preis auf Über- und Unterdeckung reagiert.
+        price_elasticity: 0.7,
+        // Schranken als Vielfaches des Richtpreises und größte Änderung je Tag.
+        price_floor: 0.25,
+        price_ceiling: 4.0,
+        price_step: 0.04,
+        // Handelsspanne des Kontors (je Seite).
+        spread: 0.02,
+        // Startkosten in den Orbit: Credits je Laderaumeinheit und g.
+        lift_cost: 0.8,
+
+        // --- Löhne ---
+        wage_floor: 0.35,
+        wage_ceiling: 3.5,
+        wage_step: 0.015,
+
+        // --- Kapital (langsame Zeitskala, monatlich) ---
+        // Maschinen je Einheit Kapitalstock.
+        capital_cost: 5.0,
+        depreciation_per_year: 0.04,
+        // Zusätzlicher Abbau in Rezepten, die dauerhaft Verlust machen.
+        scrap_per_year: 0.25,
+        // Mindestrendite, ab der investiert wird.
+        hurdle_per_year: 0.08,
+        max_growth_per_month: 0.06,
+        // Kleinste Erstinvestition in ein neues Rezept.
+        seed_investment: 1.0,
+        // Firmen bauen Kapital bis zu diesem Vielfachen der vorhandenen Arbeitskräfte auf.
+        // Über 1 entsteht Lohndruck, der Zuwanderung anzieht.
+        overhire: 1.5,
+        // Schonfrist junger Kolonien: so viele Jahre wird dort nichts abgewickelt.
+        infant_years: 8,
+
+        // --- Geld ---
+        income_tax: 0.15,
+        // Bargeld je Mio. Einwohner bei Spielbeginn und für Neugeborene (Geldschöpfung).
+        cash_per_million: 16.0,
+        // Anteil ihres Geldes, den Haushalte je Tag höchstens ausgeben.
+        spend_rate: 0.08,
+        // Abbau der Vorkommen: Reserveanteil je geförderter Einheit bei Ergiebigkeit 1.
+        // Eine Heimatwelt, die 20 Einheiten am Tag fördert, verbraucht so in hundert
+        // Jahren rund ein Fünftel eines mittleren Vorkommens.
+        depletion: 0.0000003,
+        // Rücklagen: Staat in Credits je Mio. Einwohner, Kontore und Firmen in Tagen
+        // ihres Umsatzes bzw. ihrer Kosten. Was darüber liegt, fließt weiter.
+        state_reserve_per_million: 1.5,
+        market_reserve_days: 10.0,
+        firm_reserve_days: 10.0,
+    ),
+    logistics: (
+        // Laderaum eines Frachters.
+        freighter_capacity: 50.0,
+        // Strecke je Tag.
+        speed: 16.0,
+        // Treibstoff je Streckeneinheit.
+        fuel_per_distance: 0.004,
+        // Frachter je Milliarde Einwohner bei Spielbeginn.
+        freighters_per_billion: 2.5,
+        // Mindestgewinn je Tag, damit ein Frachter ablegt.
+        min_profit_per_day: 2.0,
+        // Bauteile für einen neuen Frachter.
+        freighter_hull: 4.0,
+        freighter_engines: 1.0,
+        // Heuer der Besatzung je Frachter und Fahrtag; fließt an die Haushalte der Hauptwelt.
+        upkeep_per_day: 1.5,
+        // Wahrscheinlichkeit je Tag, dass ein Kaperer einen Frachter im System aufbringt.
+        raid_chance: 0.35,
+    ),
+    fleets: (
+        start_strength: 100.0,
+        // Strecke je Tag.
+        speed: 22.0,
+        // Anteil der eigenen Stärke, den eine Flotte dem Gegner je Tag zufügt
+        // (grobe Auflösung bis Meilenstein 4).
+        daily_damage: 0.06,
     ),
 )

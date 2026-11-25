@@ -1,0 +1,60 @@
+// Rezepte. Alle Mengen gelten je Einheit Kapitalstock und Tag bei voller Auslastung.
+// sector: Mining | Agrar | Industry | Arms  (bestimmt, welche Firma das Rezept betreibt)
+// source: None | Soil | Deposit("gut")
+//   Deposit: Ausstoß skaliert mit Ergiebigkeit und Restvorrat des lokalen Vorkommens.
+//   Soil:    Ausstoß skaliert mit der Bewohnbarkeit.
+// labor:  Arbeitskräfte (Mio.) je Kapitaleinheit.
+// energy: Treibstoffbedarf je Kapitaleinheit; wird mit dem lokalen Energiefaktor
+//         (Kälte, Hitze, Schwerkraft) multipliziert.
+// Es gibt keine Standortboni: Was sich wo lohnt, ergibt sich aus Vorkommen, Löhnen,
+// Energie, Startkosten in den Orbit und den Preisen im System.
+[
+    // --- Förderung ---
+    (key: "erzabbau",       name: "Erzabbau",          sector: Mining, source: Deposit("erz"),
+     output: ("erz", 1.0),          inputs: [], labor: 5.4, energy: 0.05),
+    (key: "silikatabbau",   name: "Silikatabbau",      sector: Mining, source: Deposit("silikate"),
+     output: ("silikate", 1.0),     inputs: [], labor: 4.5, energy: 0.04),
+    (key: "gasfoerderung",  name: "Gasförderung",      sector: Mining, source: Deposit("fluechtige"),
+     // Energie 0: Die Treibstoffkette (Gasförderung, Raffinerie) versorgt sich selbst.
+     output: ("fluechtige", 1.0),   inputs: [], labor: 3.6, energy: 0.0),
+    (key: "seltenerdabbau", name: "Seltenerdabbau",    sector: Mining, source: Deposit("seltenerden"),
+     output: ("seltenerden", 0.5),  inputs: [], labor: 7.2, energy: 0.08),
+    (key: "spaltstoffabbau", name: "Spaltstoffabbau",  sector: Mining, source: Deposit("spaltstoffe"),
+     output: ("spaltstoffe", 0.4),  inputs: [], labor: 8.1, energy: 0.08),
+
+    // --- Agrar ---
+    (key: "ernte",          name: "Ernte",             sector: Agrar, source: Deposit("biomasse"),
+     output: ("biomasse", 1.0),     inputs: [], labor: 4.1, energy: 0.02),
+    (key: "nahrungswerk",   name: "Nahrungswerk",      sector: Agrar, source: None,
+     output: ("nahrung", 1.0),      inputs: [("biomasse", 1.2)], labor: 2.2, energy: 0.03),
+    (key: "hydrokultur",    name: "Hydrokultur",       sector: Agrar, source: None,
+     output: ("nahrung", 0.8),      inputs: [("fluechtige", 0.5)], labor: 3.2, energy: 0.25),
+
+    // --- Industrie ---
+    (key: "huette",         name: "Hütte",             sector: Industry, source: None,
+     output: ("legierungen", 1.0),  inputs: [("erz", 1.5)], labor: 4.1, energy: 0.25),
+    (key: "chemiewerk",     name: "Chemiewerk",        sector: Industry, source: None,
+     output: ("polymere", 1.0),     inputs: [("fluechtige", 1.2)], labor: 3.2, energy: 0.12),
+    (key: "raffinerie",     name: "Raffinerie",        sector: Industry, source: None,
+     output: ("treibstoff", 1.0),   inputs: [("fluechtige", 1.0)], labor: 1.8, energy: 0.0),
+    (key: "brueter",        name: "Brüter",            sector: Industry, source: None,
+     output: ("treibstoff", 1.6),   inputs: [("spaltstoffe", 0.3)], labor: 2.2, energy: 0.0),
+    (key: "halbleiterwerk", name: "Halbleiterwerk",    sector: Industry, source: None,
+     output: ("elektronik", 0.5),   inputs: [("silikate", 1.0), ("seltenerden", 0.3)], labor: 4.9, energy: 0.2),
+    (key: "maschinenbau",   name: "Maschinenbau",      sector: Industry, source: None,
+     output: ("maschinen", 0.6),    inputs: [("legierungen", 1.0), ("elektronik", 0.2)], labor: 5.8, energy: 0.15),
+    (key: "konsumwerk",     name: "Konsumgüterwerk",   sector: Industry, source: None,
+     output: ("konsumgueter", 0.6), inputs: [("polymere", 0.6), ("elektronik", 0.15), ("legierungen", 0.2)], labor: 5.4, energy: 0.1),
+    (key: "pharmawerk",     name: "Pharmawerk",        sector: Industry, source: None,
+     output: ("medizin", 0.2),      inputs: [("biomasse", 0.5), ("polymere", 0.2)], labor: 4.1, energy: 0.08),
+
+    // --- Rüstung ---
+    (key: "munitionswerk",  name: "Munitionswerk",     sector: Arms, source: None,
+     output: ("munition", 0.6),     inputs: [("legierungen", 0.6), ("polymere", 0.2), ("spaltstoffe", 0.1)], labor: 4.1, energy: 0.1),
+    (key: "rumpfwerk",      name: "Rumpfwerk",         sector: Arms, source: None,
+     output: ("rumpfsegmente", 0.4), inputs: [("legierungen", 1.5), ("maschinen", 0.1)], labor: 6.3, energy: 0.2),
+    (key: "waffenschmiede", name: "Waffenschmiede",    sector: Arms, source: None,
+     output: ("waffensysteme", 0.22), inputs: [("legierungen", 0.5), ("elektronik", 0.4), ("maschinen", 0.1)], labor: 6.8, energy: 0.15),
+    (key: "triebwerksbau",  name: "Triebwerksbau",     sector: Arms, source: None,
+     output: ("antriebe", 0.2),     inputs: [("legierungen", 0.6), ("elektronik", 0.3), ("seltenerden", 0.2)], labor: 6.8, energy: 0.15),
+]

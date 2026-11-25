@@ -1,7 +1,8 @@
 //! Die einzelnen Fenster und Leisten.
 
-use super::UiState;
 use super::format::{decimal, percent, population};
+use super::{LeftTab, UiState, economy, fleets};
+use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
 use crate::time_control::{SPEED_LABELS, SimSpeed};
@@ -10,8 +11,12 @@ use sim::chronicle::{Chronicle, ChronicleKind};
 use sim::clock::{SimClock, date_of_tick};
 use sim::command::SimCommand;
 use sim::data::{GameData, Rgb};
+use sim::diplomacy::Diplomacy;
+use sim::economy::{Economy, to_credits};
+use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
 use sim::ids::{PlanetId, SystemId};
+use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
 use sim::state::SimConfig;
 
@@ -23,6 +28,11 @@ pub struct SimRefs<'a> {
     pub clock: &'a SimClock,
     pub config: &'a SimConfig,
     pub chronicle: &'a Chronicle,
+    pub economy: &'a Economy,
+    pub logistics: &'a Logistics,
+    pub fleets: &'a Fleets,
+    pub diplomacy: &'a Diplomacy,
+    pub history: &'a PriceHistory,
 }
 
 /// Was der Spieler in der Oberfläche ausgelöst hat.
@@ -37,8 +47,8 @@ pub enum UiAction {
     Quit,
 }
 
-const ACCENT: Color32 = Color32::from_rgb(250, 180, 64);
-const MUTED: Color32 = Color32::from_rgb(140, 150, 165);
+pub const ACCENT: Color32 = Color32::from_rgb(250, 180, 64);
+pub const MUTED: Color32 = Color32::from_rgb(140, 150, 165);
 
 pub fn apply_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
@@ -48,7 +58,7 @@ pub fn apply_style(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
-fn color32(color: Rgb) -> Color32 {
+pub fn color32(color: Rgb) -> Color32 {
     let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgb(byte(color.0), byte(color.1), byte(color.2))
 }
@@ -136,13 +146,18 @@ pub fn in_game(
         .resizable(true)
         .default_size(430.0)
         .size_range(300.0..=640.0)
-        .show(root, |ui| selection_panel(ui, sim, selection, actions));
+        .show(root, |ui| left_panel(ui, sim, state, selection, actions));
     egui::Panel::right("gemeinschaften")
         .resizable(true)
         .default_size(290.0)
         .size_range(220.0..=420.0)
         .show(root, |ui| polities_panel(ui, sim, actions));
 
+    let ctx = root.ctx().clone();
+    let shown_planet = shown_planet(sim, selection);
+    economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
+    economy::flows_window(&ctx, sim, &mut state.flows_open, None);
+    fleets::fleets_window(&ctx, sim, &mut state.fleets_open, selection, actions);
     if state.menu_open {
         pause_menu(root.ctx(), state, actions);
     }
@@ -170,10 +185,18 @@ fn top_bar(
                 );
                 ui.separator();
                 ui.label(format!(
-                    "{} Planeten · {}",
+                    "{} Planeten · {} · Staatskasse {}",
                     sim.galaxy.planets_of(player).count(),
-                    population(sim.galaxy.population_of(player))
+                    population(sim.galaxy.population_of(player)),
+                    decimal(to_credits(sim.economy.treasury(player)), 0)
                 ));
+                if sim.diplomacy.is_at_war(player) {
+                    ui.label(
+                        RichText::new("IM KRIEG")
+                            .color(Color32::from_rgb(235, 110, 95))
+                            .strong(),
+                    );
+                }
             }
             None => {
                 ui.label(RichText::new("Beobachter").strong());
@@ -217,6 +240,11 @@ fn top_bar(
             if ui.button("Hilfe").on_hover_text("F1").clicked() {
                 state.help_open = !state.help_open;
             }
+            ui.separator();
+            ui.toggle_value(&mut state.fleets_open, "Flotten");
+            ui.toggle_value(&mut state.chains_open, "Ketten");
+            ui.toggle_value(&mut state.flows_open, "Warenflüsse");
+            ui.separator();
             let free = sim
                 .galaxy
                 .planets
@@ -263,6 +291,69 @@ fn chronicle_color(kind: ChronicleKind) -> Color32 {
         ChronicleKind::End => ACCENT,
         _ => Color32::from_rgb(200, 205, 215),
     }
+}
+
+/// Die Welt, deren Einzelheiten gezeigt werden: die gewählte, sonst die erste des Systems.
+fn shown_planet(sim: &SimRefs, selection: &Selection) -> Option<PlanetId> {
+    let system = sim.galaxy.system(selection.system?);
+    selection
+        .planet
+        .filter(|id| system.planets.contains(id))
+        .or(system.planets.first().copied())
+}
+
+fn left_panel(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    state: &mut UiState,
+    selection: &Selection,
+    actions: &mut Vec<UiAction>,
+) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.tab, LeftTab::Overview, "Übersicht");
+        ui.selectable_value(&mut state.tab, LeftTab::Market, "Markt");
+        ui.selectable_value(&mut state.tab, LeftTab::Production, "Produktion");
+    });
+    ui.separator();
+    match (state.tab, selection.system) {
+        (LeftTab::Market, Some(system)) => {
+            ui.heading(&sim.galaxy.system(system).name);
+            economy::market_tab(ui, sim, state, system);
+        }
+        (LeftTab::Production, Some(system)) => {
+            planet_picker(ui, sim, system, selection, actions);
+            if let Some(planet) = shown_planet(sim, selection) {
+                economy::production_tab(ui, sim, planet);
+            }
+        }
+        _ => selection_panel(ui, sim, selection, actions),
+    }
+}
+
+/// Kurze Planetenleiste für die Reiter, die sich auf eine Welt beziehen.
+fn planet_picker(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    system: SystemId,
+    selection: &Selection,
+    actions: &mut Vec<UiAction>,
+) {
+    let shown = shown_planet(sim, selection);
+    ui.horizontal_wrapped(|ui| {
+        for planet_id in &sim.galaxy.system(system).planets {
+            let planet = sim.galaxy.planet(*planet_id);
+            if ui
+                .selectable_label(shown == Some(*planet_id), &planet.name)
+                .clicked()
+            {
+                actions.push(UiAction::Select(Selection {
+                    system: Some(system),
+                    planet: Some(*planet_id),
+                }));
+            }
+        }
+    });
 }
 
 fn selection_panel(
@@ -446,6 +537,7 @@ fn planet_details(
             sim.galaxy,
             sim.polities,
             &sim.data.balance.colonization,
+            sim.economy.treasury(player),
             player,
             planet_id,
             sim.clock.day(),
@@ -459,8 +551,9 @@ fn planet_details(
         match verdict {
             Ok(()) => {
                 ui.small(format!(
-                    "{} Siedler ziehen von der Hauptwelt um.",
-                    population(sim.data.balance.colonization.settlers)
+                    "{} Siedler ziehen von der Hauptwelt um. Die Gründung kostet {} Credits.",
+                    population(sim.data.balance.colonization.settlers),
+                    decimal(sim.data.balance.colonization.cost, 0)
                 ));
             }
             Err(reason) => {
@@ -481,9 +574,9 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
         .sum();
     egui::Grid::new("gemeinschaften")
         .striped(true)
-        .num_columns(4)
+        .num_columns(5)
         .show(ui, |ui| {
-            for title in ["", "Planeten", "Bevölkerung", "Anteil"] {
+            for title in ["", "Planeten", "Bevölkerung", "Anteil", ""] {
                 ui.label(RichText::new(title).color(MUTED).small());
             }
             ui.end_row();
@@ -509,6 +602,34 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.label(sim.galaxy.planets_of(polity.id).count().to_string());
                 ui.label(population(people));
                 ui.label(percent((people / total.max(1.0)) as f32));
+                match sim.config.player {
+                    Some(player) if player != polity.id && polity.alive => {
+                        if sim.diplomacy.at_war(player, polity.id) {
+                            if ui
+                                .small_button(RichText::new("Frieden").color(ACCENT))
+                                .on_hover_text("Der Krieg endet sofort.")
+                                .clicked()
+                            {
+                                actions.push(UiAction::Command(SimCommand::MakePeace {
+                                    target: polity.id,
+                                }));
+                            }
+                        } else if ui
+                            .small_button("Krieg")
+                            .on_hover_text(
+                                "Krieg erklären. Erst im Krieg wirken Blockade und Kaperfahrt.",
+                            )
+                            .clicked()
+                        {
+                            actions.push(UiAction::Command(SimCommand::DeclareWar {
+                                target: polity.id,
+                            }));
+                        }
+                    }
+                    _ => {
+                        ui.label("");
+                    }
+                }
                 ui.end_row();
             }
         });
@@ -620,7 +741,7 @@ mod tests {
     }
 
     impl Fixture {
-        fn refs(&self) -> SimRefs<'_> {
+        fn refs<'a>(&'a self, history: &'a PriceHistory) -> SimRefs<'a> {
             SimRefs {
                 data: &self.data,
                 galaxy: &self.state.galaxy,
@@ -628,6 +749,11 @@ mod tests {
                 clock: &self.state.clock,
                 config: &self.state.config,
                 chronicle: &self.state.chronicle,
+                economy: &self.state.economy,
+                logistics: &self.state.logistics,
+                fleets: &self.state.fleets,
+                diplomacy: &self.state.diplomacy,
+                history,
             }
         }
     }
@@ -660,37 +786,50 @@ mod tests {
     }
 
     #[test]
-    fn game_screen_draws_for_every_system() {
+    fn game_screen_draws_for_every_system_and_tab() {
         let fixture = fixture();
-        let refs = fixture.refs();
-        let mut state = UiState {
-            menu_open: true,
-            help_open: true,
-            ..Default::default()
-        };
+        let mut history = PriceHistory::default();
+        history.record(0, &fixture.state.economy);
+        history.record(5, &fixture.state.economy);
+        let refs = fixture.refs(&history);
         let speed = SimSpeed::default();
-        for system in &fixture.state.galaxy.systems {
-            for planet in std::iter::once(None).chain(system.planets.iter().copied().map(Some)) {
-                let selection = Selection {
-                    system: Some(system.id),
-                    planet,
-                };
-                let mut actions = Vec::new();
-                frame(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut actions));
-                assert!(actions.is_empty());
+        for tab in [LeftTab::Overview, LeftTab::Market, LeftTab::Production] {
+            let mut state = UiState {
+                menu_open: true,
+                help_open: true,
+                flows_open: true,
+                chains_open: true,
+                fleets_open: true,
+                tab,
+                ..Default::default()
+            };
+            for system in &fixture.state.galaxy.systems {
+                for planet in std::iter::once(None).chain(system.planets.iter().copied().map(Some))
+                {
+                    let selection = Selection {
+                        system: Some(system.id),
+                        planet,
+                    };
+                    let mut actions = Vec::new();
+                    frame(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut actions));
+                    assert!(
+                        actions.is_empty(),
+                        "ohne Eingabe darf nichts ausgelöst werden"
+                    );
+                }
             }
+            let mut actions = Vec::new();
+            frame(|ui| {
+                in_game(
+                    ui,
+                    &refs,
+                    &mut state,
+                    &speed,
+                    &Selection::default(),
+                    &mut actions,
+                )
+            });
         }
-        let mut actions = Vec::new();
-        frame(|ui| {
-            in_game(
-                ui,
-                &refs,
-                &mut state,
-                &speed,
-                &Selection::default(),
-                &mut actions,
-            )
-        });
     }
 
     #[test]

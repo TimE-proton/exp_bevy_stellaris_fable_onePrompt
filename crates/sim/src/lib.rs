@@ -13,10 +13,14 @@ pub mod chronicle;
 pub mod clock;
 pub mod command;
 pub mod data;
+pub mod diplomacy;
+pub mod economy;
+pub mod fleet;
 pub mod galaxy;
 pub mod harness;
 pub mod hash;
 pub mod ids;
+pub mod logistics;
 pub mod polity;
 pub mod rng;
 pub mod state;
@@ -120,6 +124,10 @@ impl PluginGroup for SimPlugins {
         PluginGroupBuilder::start::<Self>()
             .add(CorePlugin)
             .add(galaxy::GalaxyPlugin)
+            .add(diplomacy::DiplomacyPlugin)
+            .add(logistics::LogisticsPlugin)
+            .add(economy::EconomyPlugin)
+            .add(fleet::FleetPlugin)
             .add(ai::AiPlugin)
     }
 }

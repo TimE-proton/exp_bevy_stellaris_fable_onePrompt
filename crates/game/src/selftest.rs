@@ -7,6 +7,7 @@ use crate::map::{FocusSystem, Selection};
 use crate::session::SessionRequest;
 use crate::state::AppState;
 use crate::time_control::SimSpeed;
+use crate::ui::{LeftTab, UiState};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use sim::clock::SimClock;
@@ -48,6 +49,7 @@ fn drive(
     mut test: ResMut<Selftest>,
     mut speed: ResMut<SimSpeed>,
     selection: Res<Selection>,
+    mut ui_state: ResMut<UiState>,
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     mut focus: MessageWriter<FocusSystem>,
@@ -63,7 +65,10 @@ fn drive(
     if test.frame == total / 2
         && let Some(system) = selection.system
     {
+        // Zur Halbzeit heranzoomen und die datenlastigen Tafeln öffnen.
         focus.write(FocusSystem(system));
+        ui_state.tab = LeftTab::Market;
+        ui_state.flows_open = true;
     }
     if test.frame == total.saturating_sub(12)
         && !test.shot_taken

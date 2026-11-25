@@ -60,6 +60,7 @@ impl std::error::Error for DataError {}
 pub struct GameData {
     pub goods: Vec<GoodDef>,
     pub planet_kinds: Vec<PlanetKindDef>,
+    pub recipes: Vec<RecipeDef>,
     pub galaxy: GalaxyParams,
     pub polities: Vec<PolityDef>,
     pub names: NameData,
@@ -105,6 +106,7 @@ impl GameData {
         let mut hasher = Fnv64::new();
         let goods: Vec<GoodDef> = load_ron(dir, "goods.ron", &mut hasher)?;
         let planet_kinds: Vec<PlanetKindDef> = load_ron(dir, "planet_kinds.ron", &mut hasher)?;
+        let recipes: Vec<RecipeDef> = load_ron(dir, "recipes.ron", &mut hasher)?;
         let galaxy: GalaxyParams = load_ron(dir, "galaxy.ron", &mut hasher)?;
         let polities: Vec<PolityDef> = load_ron(dir, "polities.ron", &mut hasher)?;
         let names: NameData = load_ron(dir, "names.ron", &mut hasher)?;
@@ -112,6 +114,7 @@ impl GameData {
         let mut data = Self {
             goods,
             planet_kinds,
+            recipes,
             galaxy,
             polities,
             names,
@@ -137,6 +140,10 @@ impl GameData {
 
     pub fn good(&self, id: GoodId) -> &GoodDef {
         &self.goods[id.index()]
+    }
+
+    pub fn recipe_index(&self, key: &str) -> Option<usize> {
+        self.recipes.iter().position(|recipe| recipe.key == key)
     }
 
     pub fn raw_goods(&self) -> impl Iterator<Item = GoodId> + '_ {
@@ -228,6 +235,80 @@ impl GameData {
             }
         }
 
+        // Rezepte
+        let resolve = |file: &'static str, owner: &str, key: &str| {
+            good_keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .map(GoodId::from_index)
+                .ok_or_else(|| invalid(file, format!("`{owner}`: unbekanntes Gut `{key}`")))
+        };
+        let mut recipe_keys = BTreeSet::new();
+        for recipe in &mut self.recipes {
+            let file = "recipes.ron";
+            if !recipe_keys.insert(recipe.key.clone()) {
+                return Err(invalid(file, format!("Schlüssel `{}` doppelt", recipe.key)));
+            }
+            recipe.output_id = resolve(file, &recipe.key, &recipe.output.0)?;
+            recipe.input_ids.clear();
+            for (key, amount) in &recipe.inputs {
+                if *amount <= 0.0 {
+                    return Err(invalid(
+                        file,
+                        format!("`{}`: Menge von `{key}` nicht positiv", recipe.key),
+                    ));
+                }
+                recipe
+                    .input_ids
+                    .push((resolve(file, &recipe.key, key)?, *amount));
+            }
+            recipe.deposit_id = match &recipe.source {
+                YieldSource::Deposit(key) => Some(resolve(file, &recipe.key, key)?),
+                _ => None,
+            };
+            if recipe.output.1 <= 0.0 || recipe.labor <= 0.0 || recipe.energy < 0.0 {
+                return Err(invalid(
+                    file,
+                    format!("`{}`: Ausstoß und Arbeit müssen positiv sein", recipe.key),
+                ));
+            }
+        }
+        // Jeder Rohstoff braucht eine Förderung, jedes andere Gut einen Hersteller.
+        for (index, key) in good_keys.iter().enumerate() {
+            let id = GoodId::from_index(index);
+            if !self.recipes.iter().any(|recipe| recipe.output_id == id) {
+                return Err(invalid(
+                    "recipes.ron",
+                    format!("kein Rezept stellt `{key}` her"),
+                ));
+            }
+        }
+
+        // Wirtschaftsbalance
+        let economy = &mut self.balance.economy;
+        economy.fuel_id = resolve("balance.ron", "economy.fuel", &economy.fuel)?;
+        economy.capital_good_id =
+            resolve("balance.ron", "economy.capital_good", &economy.capital_good)?;
+        for need in &mut economy.needs {
+            need.good_id = resolve("balance.ron", "economy.needs", &need.good)?;
+        }
+        if !economy.needs.iter().any(|need| need.essential) {
+            return Err(invalid(
+                "balance.ron",
+                "mindestens ein Bedarf braucht `essential: true`".into(),
+            ));
+        }
+        if economy.price_floor <= 0.0
+            || economy.price_floor >= 1.0
+            || economy.price_ceiling <= 1.0
+            || economy.cover_days <= 0.0
+        {
+            return Err(invalid(
+                "balance.ron",
+                "Preisschranken oder cover_days unplausibel".into(),
+            ));
+        }
+
         // Galaxie
         let g = &self.galaxy;
         let file = "galaxy.ron";
@@ -315,6 +396,10 @@ mod tests {
         assert!(data.raw_goods().count() >= 4);
         assert!(data.good_id("erz").is_some());
         assert!(data.planet_kinds.iter().any(|kind| kind.home));
+        assert!(data.recipes.len() >= 12);
+        let hut = &data.recipes[data.recipe_index("huette").unwrap()];
+        assert_eq!(hut.output_id, data.good_id("legierungen").unwrap());
+        assert_eq!(hut.input_ids[0].0, data.good_id("erz").unwrap());
         assert_ne!(data.hash, 0);
     }
 

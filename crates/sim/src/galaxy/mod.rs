@@ -48,6 +48,13 @@ pub struct StarSystem {
     pub chokepoint: bool,
 }
 
+impl StarSystem {
+    #[inline]
+    pub fn index(&self) -> usize {
+        self.id.index()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lane {
     pub id: LaneId,
@@ -324,6 +331,55 @@ impl Galaxy {
         }
         path.reverse();
         Some(path)
+    }
+
+    /// Routenlänge von `from` zu jedem System (`f32::INFINITY` = unerreichbar) und der
+    /// jeweilige Vorgänger auf dem kürzesten Weg. `passable` gilt für jedes betretene System.
+    pub fn distances_from(
+        &self,
+        from: SystemId,
+        passable: impl Fn(SystemId) -> bool,
+    ) -> (Vec<f32>, Vec<Option<SystemId>>) {
+        let count = self.systems.len();
+        let mut best = vec![u64::MAX; count];
+        let mut length = vec![f32::INFINITY; count];
+        let mut previous: Vec<Option<SystemId>> = vec![None; count];
+        let mut heap = BinaryHeap::new();
+        best[from.index()] = 0;
+        length[from.index()] = 0.0;
+        heap.push(Reverse((0u64, from)));
+        while let Some(Reverse((cost, current))) = heap.pop() {
+            if cost > best[current.index()] {
+                continue;
+            }
+            for neighbor in self.neighbors(current) {
+                if !passable(neighbor.system) {
+                    continue;
+                }
+                let lane = self.lane(neighbor.lane);
+                let next_cost = cost + (lane.length * 16.0) as u64 + 1;
+                if next_cost < best[neighbor.system.index()] {
+                    best[neighbor.system.index()] = next_cost;
+                    length[neighbor.system.index()] = length[current.index()] + lane.length;
+                    previous[neighbor.system.index()] = Some(current);
+                    heap.push(Reverse((next_cost, neighbor.system)));
+                }
+            }
+        }
+        (length, previous)
+    }
+
+    /// Weg aus dem Vorgängerfeld von [`Galaxy::distances_from`], ohne den Startpunkt.
+    pub fn route_to(previous: &[Option<SystemId>], to: SystemId) -> Vec<SystemId> {
+        let mut route = vec![to];
+        let mut cursor = to;
+        while let Some(prev) = previous[cursor.index()] {
+            route.push(prev);
+            cursor = prev;
+        }
+        route.pop();
+        route.reverse();
+        route
     }
 
     /// Länge eines Wegs entlang der Routen.

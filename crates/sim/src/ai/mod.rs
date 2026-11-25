@@ -8,6 +8,7 @@ mod plugin;
 pub use plugin::AiPlugin;
 
 use crate::data::GameData;
+use crate::economy::Economy;
 use crate::galaxy::{Galaxy, Planet};
 use crate::ids::{PlanetId, PolityId};
 use crate::polity::{Polities, claimable_planets};
@@ -21,7 +22,9 @@ pub fn colony_value(galaxy: &Galaxy, planet: &Planet) -> f64 {
         .map(|deposit| (deposit.richness * deposit.reserve) as f64)
         .sum();
     let position = galaxy.system(planet.system).centrality as f64;
-    living_space + deposits * 1.5 + position * 2.0
+    // Lebensfeindliche Welten ohne reiche Vorkommen tragen keine Kolonie.
+    let viability = 0.3 + 0.7 * planet.habitability as f64;
+    (living_space + deposits * 1.5 + position * 2.0) * viability
 }
 
 /// Beste freie Welt, die `polity` heute besiedeln darf. Gleichstand entscheidet die ID.
@@ -29,11 +32,20 @@ pub fn best_colony_target(
     data: &GameData,
     galaxy: &Galaxy,
     polities: &Polities,
+    economy: &Economy,
     polity: PolityId,
     day: u64,
 ) -> Option<PlanetId> {
     let mut best: Option<(PlanetId, f64)> = None;
-    for id in claimable_planets(galaxy, polities, &data.balance.colonization, polity, day) {
+    let treasury = economy.treasury(polity);
+    for id in claimable_planets(
+        galaxy,
+        polities,
+        &data.balance.colonization,
+        treasury,
+        polity,
+        day,
+    ) {
         let value = colony_value(galaxy, galaxy.planet(id));
         if best.is_none_or(|(_, best_value)| value > best_value) {
             best = Some((id, value));

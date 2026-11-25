@@ -11,12 +11,14 @@
         gravity: (0.85, 1.15), temperature: (6.0, 26.0), water: (0.45, 0.75),
         atmospheres: [(Breathable, 1.0)],
         capacity: (7000.0, 11000.0),
+        // Gartenwelten tragen jede Grundkette selbst, aber mit mäßigen Vorkommen.
+        // Spaltstoffe fehlen ganz: Wer rüsten will, muss hinaus.
         deposits: [
-            (good: "biomasse",    chance: 1.0,  richness: (0.8, 1.4)),
-            (good: "erz",         chance: 0.8,  richness: (0.3, 0.8)),
-            (good: "silikate",    chance: 0.8,  richness: (0.3, 0.8)),
-            (good: "fluechtige",  chance: 0.6,  richness: (0.2, 0.6)),
-            (good: "seltenerden", chance: 0.25, richness: (0.1, 0.4)),
+            (good: "biomasse",    chance: 1.0,  richness: (0.9, 1.4)),
+            (good: "erz",         chance: 1.0,  richness: (0.4, 0.8)),
+            (good: "silikate",    chance: 1.0,  richness: (0.4, 0.8)),
+            (good: "fluechtige",  chance: 1.0,  richness: (0.4, 0.7)),
+            (good: "seltenerden", chance: 1.0,  richness: (0.15, 0.4)),
         ],
     ),
     (

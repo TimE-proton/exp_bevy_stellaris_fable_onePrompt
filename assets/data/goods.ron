@@ -7,7 +7,8 @@
     (key: "erz",          name: "Erz",            tier: Raw, base_price: 8.0,  mass: 1.4),
     (key: "silikate",     name: "Silikate",       tier: Raw, base_price: 6.0,  mass: 1.2),
     (key: "fluechtige",   name: "Flüchtige",      tier: Raw, base_price: 7.0,  mass: 1.0),
-    (key: "biomasse",     name: "Biomasse",       tier: Raw, base_price: 5.0,  mass: 1.0),
+    // renewable: wächst nach, das Vorkommen erschöpft sich nicht.
+    (key: "biomasse",     name: "Biomasse",       tier: Raw, base_price: 5.0,  mass: 1.0, renewable: true),
     (key: "seltenerden",  name: "Seltene Erden",  tier: Raw, base_price: 22.0, mass: 0.8),
     (key: "spaltstoffe",  name: "Spaltstoffe",    tier: Raw, base_price: 30.0, mass: 0.6),
 

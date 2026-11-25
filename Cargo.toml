@@ -42,6 +42,9 @@ features = [
 [workspace.lints.clippy]
 type_complexity = "allow"
 too_many_arguments = "allow"
+# Die Simulation führt viele parallele Felder über denselben Index (Güter, Rezepte,
+# Systeme); Indexschleifen sind dort klarer als verschachtelte Iteratoren.
+needless_range_loop = "allow"
 
 # Schnelle Entwicklungs-Builds: eigener Code leicht, Abhängigkeiten voll optimiert.
 [profile.dev]

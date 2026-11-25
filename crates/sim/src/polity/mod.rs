@@ -2,6 +2,7 @@
 
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::data::{ColonizationBalance, GameData, Rgb};
+use crate::economy::{Economy, Money, seed_colony, to_money};
 use crate::galaxy::{Galaxy, dist, roll_planet};
 use crate::ids::{PlanetId, PolityId, SystemId};
 use crate::rng::{Domain, Rng};
@@ -151,6 +152,7 @@ pub enum ClaimError {
     OutOfReach,
     CoolingDown { ready_on_day: u64 },
     NoSettlers,
+    NoFunds { needed: Money },
 }
 
 impl fmt::Display for ClaimError {
@@ -171,6 +173,11 @@ impl fmt::Display for ClaimError {
                 crate::clock::Date::from_day(*ready_on_day)
             ),
             ClaimError::NoSettlers => write!(f, "Hauptwelt kann keine Siedler abgeben"),
+            ClaimError::NoFunds { needed } => write!(
+                f,
+                "Staatskasse zu leer: die Gründung kostet {:.0} Credits",
+                crate::economy::to_credits(*needed)
+            ),
         }
     }
 }
@@ -180,6 +187,7 @@ pub fn can_claim(
     galaxy: &Galaxy,
     polities: &Polities,
     balance: &ColonizationBalance,
+    treasury: Money,
     polity: PolityId,
     planet: PlanetId,
     day: u64,
@@ -213,27 +221,53 @@ pub fn can_claim(
     if capital_population < balance.min_capital_population + balance.settlers {
         return Err(ClaimError::NoSettlers);
     }
+    let needed = to_money(balance.cost);
+    if treasury < needed {
+        return Err(ClaimError::NoFunds { needed });
+    }
     Ok(())
 }
 
-/// Gründet eine Kolonie. Die Siedler ziehen von der Hauptwelt um.
+/// Gründet eine Kolonie. Die Siedler ziehen von der Hauptwelt um und nehmen ihren Anteil
+/// am Geld mit; der Staat bezahlt die Erstausstattung.
 pub fn claim_planet(
     galaxy: &mut Galaxy,
     polities: &mut Polities,
+    economy: &mut Economy,
     chronicle: &mut Chronicle,
-    balance: &ColonizationBalance,
+    data: &GameData,
     polity: PolityId,
     planet: PlanetId,
     tick: u64,
 ) -> Result<(), ClaimError> {
+    let balance = &data.balance.colonization;
     let day = tick / crate::clock::TICKS_PER_DAY;
-    can_claim(galaxy, polities, balance, polity, planet, day)?;
+    can_claim(
+        galaxy,
+        polities,
+        balance,
+        economy.treasury(polity),
+        polity,
+        planet,
+        day,
+    )?;
     let capital = polities.get(polity).capital.expect("von can_claim geprüft");
+    let capital_population = galaxy.planet(capital).population;
     galaxy.planet_mut(capital).population -= balance.settlers;
     let target = galaxy.planet_mut(planet);
     target.owner = Some(polity);
     target.population = balance.settlers;
     let (system, planet_name) = (target.system, target.name.clone());
+    seed_colony(
+        data,
+        galaxy,
+        economy,
+        planet,
+        capital,
+        balance.settlers,
+        capital_population,
+        day,
+    );
     let owner = polities.get_mut(polity);
     owner.next_claim_day = day + balance.cooldown_days;
     chronicle.push(
@@ -251,6 +285,7 @@ pub fn claimable_planets(
     galaxy: &Galaxy,
     polities: &Polities,
     balance: &ColonizationBalance,
+    treasury: Money,
     polity: PolityId,
     day: u64,
 ) -> Vec<PlanetId> {
@@ -258,7 +293,9 @@ pub fn claimable_planets(
         .planets
         .iter()
         .filter(|planet| planet.owner.is_none())
-        .filter(|planet| can_claim(galaxy, polities, balance, polity, planet.id, day).is_ok())
+        .filter(|planet| {
+            can_claim(galaxy, polities, balance, treasury, polity, planet.id, day).is_ok()
+        })
         .map(|planet| planet.id)
         .collect()
 }
@@ -268,17 +305,18 @@ mod tests {
     use super::*;
     use crate::galaxy::generate_galaxy;
 
-    fn setup(seed: u64) -> (GameData, Galaxy, Polities) {
+    fn setup(seed: u64) -> (GameData, Galaxy, Polities, Economy) {
         let data = GameData::load_workspace().unwrap();
         let mut galaxy = generate_galaxy(&data, seed);
         let polities = found_polities(&data, &mut galaxy, seed);
-        (data, galaxy, polities)
+        let economy = crate::economy::setup_economy(&data, &galaxy, &polities);
+        (data, galaxy, polities, economy)
     }
 
     #[test]
     fn every_polity_gets_a_distinct_habitable_home() {
         for seed in 0..20 {
-            let (data, galaxy, polities) = setup(seed);
+            let (data, galaxy, polities, _) = setup(seed);
             assert_eq!(polities.list.len(), data.galaxy.polities as usize);
             let mut clusters = Vec::new();
             for polity in &polities.list {
@@ -303,12 +341,13 @@ mod tests {
     }
 
     #[test]
-    fn claims_need_reach_and_respect_cooldown() {
-        let (data, mut galaxy, mut polities) = setup(1);
+    fn claims_need_reach_funds_and_respect_cooldown() {
+        let (data, mut galaxy, mut polities, mut economy) = setup(1);
         let mut chronicle = Chronicle::default();
         let balance = &data.balance.colonization;
         let me = PolityId(0);
-        let options = claimable_planets(&galaxy, &polities, balance, me, 0);
+        let rich = to_money(1e9);
+        let options = claimable_planets(&galaxy, &polities, balance, rich, me, 0);
         assert!(!options.is_empty());
         let home_system = galaxy.planet(polities.get(me).capital.unwrap()).system;
         let far = galaxy
@@ -319,45 +358,48 @@ mod tests {
             })
             .unwrap()
             .id;
+        let verdict = |galaxy: &Galaxy, polities: &Polities, treasury, planet, day| {
+            can_claim(galaxy, polities, balance, treasury, me, planet, day)
+        };
         assert_eq!(
-            can_claim(&galaxy, &polities, balance, me, far, 0),
+            verdict(&galaxy, &polities, rich, far, 0),
             Err(ClaimError::OutOfReach)
         );
+        assert!(matches!(
+            verdict(&galaxy, &polities, 0, options[0], 0),
+            Err(ClaimError::NoFunds { .. })
+        ));
+
         let before = galaxy.population_of(me);
+        let money_before = economy.money_in_accounts();
+        let target = options[0];
         claim_planet(
             &mut galaxy,
             &mut polities,
+            &mut economy,
             &mut chronicle,
-            balance,
+            &data,
             me,
-            options[0],
+            target,
             0,
         )
         .unwrap();
-        assert_eq!(galaxy.planet(options[0]).owner, Some(me));
-        // Siedler ziehen um, niemand entsteht aus dem Nichts.
+        assert_eq!(galaxy.planet(target).owner, Some(me));
+        // Siedler ziehen um, niemand entsteht aus dem Nichts; ebenso das Geld.
         assert!((galaxy.population_of(me) - before).abs() < 1e-6);
+        assert_eq!(economy.money_in_accounts(), money_before);
+        assert!(economy.planet(target).total_capital() > 0.0);
         assert_eq!(chronicle.entries.len(), 1);
         assert_eq!(
-            can_claim(&galaxy, &polities, balance, me, options[0], 0),
+            verdict(&galaxy, &polities, rich, target, 0),
             Err(ClaimError::AlreadyOwned)
         );
         if let Some(next) = options.get(1) {
             assert!(matches!(
-                can_claim(&galaxy, &polities, balance, me, *next, 5),
+                verdict(&galaxy, &polities, rich, *next, 5),
                 Err(ClaimError::CoolingDown { .. })
             ));
-            assert!(
-                can_claim(
-                    &galaxy,
-                    &polities,
-                    balance,
-                    me,
-                    *next,
-                    balance.cooldown_days
-                )
-                .is_ok()
-            );
+            assert!(verdict(&galaxy, &polities, rich, *next, balance.cooldown_days).is_ok());
         }
     }
 }
