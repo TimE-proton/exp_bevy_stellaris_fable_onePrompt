@@ -26,6 +26,7 @@ pub mod logistics;
 pub mod polity;
 pub mod rng;
 pub mod state;
+pub mod tech;
 
 use bevy_app::prelude::*;
 use bevy_app::{PluginGroup, PluginGroupBuilder};
@@ -130,6 +131,7 @@ impl PluginGroup for SimPlugins {
             .add(logistics::LogisticsPlugin)
             .add(economy::EconomyPlugin)
             .add(finance::FinancePlugin)
+            .add(tech::TechPlugin)
             .add(fleet::FleetPlugin)
             .add(ai::AiPlugin)
     }

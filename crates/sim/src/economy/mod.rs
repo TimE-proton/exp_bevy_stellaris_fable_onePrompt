@@ -9,7 +9,10 @@ mod plugin;
 pub mod production;
 mod setup;
 
-pub use capital::{invest_and_depreciate, migrate, settle_public_accounts, steer_money_supply};
+pub use capital::{
+    invest_and_depreciate, migrate, pay_households, settle_public_accounts, state_reserve,
+    steer_money_supply,
+};
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
     abandon_dead_colonies, grow_population, produce_and_consume, target_price,
@@ -219,6 +222,16 @@ pub struct Economy {
     pub initial_money: Money,
     /// Seit Spielbeginn ausgewiesene Geldschöpfung.
     pub minted: Money,
+    /// Ertragsfaktor der Technik je Gemeinschaft (1 = Grundstand; fehlende Einträge
+    /// gelten als 1). Das Wirtschafts-Plugin übernimmt ihn täglich aus der Forschung.
+    #[serde(default)]
+    pub tech_yield: Vec<f64>,
+}
+
+/// Faktor einer Gemeinschaft aus einer Liste je Gemeinschaft; fehlt der Eintrag, 1.
+#[inline]
+pub fn factor_of(factors: &[f64], polity: PolityId) -> f64 {
+    factors.get(polity.index()).copied().unwrap_or(1.0)
 }
 
 impl Economy {
@@ -235,6 +248,12 @@ impl Economy {
     #[inline]
     pub fn treasury(&self, polity: PolityId) -> Money {
         self.treasuries.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Ertragsfaktor der Technik, mit dem die Werke der Gemeinschaft produzieren.
+    #[inline]
+    pub fn yield_factor(&self, polity: PolityId) -> f64 {
+        factor_of(&self.tech_yield, polity)
     }
 
     /// Summe aller Konten der Wirtschaft (ohne Handelshäuser).
@@ -335,7 +354,7 @@ pub struct UnitEconomics {
     /// Startkosten in den Orbit und zurück.
     pub lift: f64,
     pub wages: f64,
-    /// Ertragsfaktor aus Vorkommen oder Boden.
+    /// Ertragsfaktor aus Vorkommen oder Boden, samt dem der Technik.
     pub local_yield: f64,
 }
 
@@ -357,8 +376,21 @@ pub fn unit_economics(
     market: &Market,
     recipe: &RecipeDef,
 ) -> UnitEconomics {
+    unit_economics_at(data, planet, wage, market, recipe, 1.0)
+}
+
+/// Wie [`unit_economics`], mit dem Ertragsfaktor der Technik der Gemeinschaft
+/// ([`Economy::yield_factor`]): Er hebt den Ausstoß bei gleichem Einsatz.
+pub fn unit_economics_at(
+    data: &GameData,
+    planet: &Planet,
+    wage: f64,
+    market: &Market,
+    recipe: &RecipeDef,
+    tech_yield: f64,
+) -> UnitEconomics {
     let balance = &data.balance.economy;
-    let local_yield = local_yield(recipe, planet);
+    let local_yield = local_yield(recipe, planet) * tech_yield;
     let output = recipe.output.1 as f64 * local_yield;
     let mut lift = output * lift_cost(data, planet, recipe.output_id);
     let mut inputs = 0.0;

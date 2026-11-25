@@ -15,6 +15,7 @@ use crate::galaxy::Galaxy;
 use crate::ids::PlanetId;
 use crate::logistics::Logistics;
 use crate::polity::Polities;
+use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -168,6 +169,7 @@ fn cohesion(
     mut polities: ResMut<Polities>,
     mut economy: ResMut<Economy>,
     mut finance: ResMut<Finance>,
+    mut research: ResMut<Research>,
     mut chronicle: ResMut<Chronicle>,
 ) {
     let secessions = update_cohesion(
@@ -181,7 +183,7 @@ fn cohesion(
         clock.day(),
     );
     for secession in secessions {
-        apply_secession(
+        let founded = apply_secession(
             &secession,
             &mut finance,
             &mut galaxy,
@@ -192,5 +194,9 @@ fn cohesion(
             &data,
             clock.tick,
         );
+        // Ein neuer Freistaat nimmt das Wissen des Reichs mit, das er verlässt.
+        if let (None, Some(child)) = (secession.joins, founded) {
+            research.inherit(&data, secession.from, child);
+        }
     }
 }

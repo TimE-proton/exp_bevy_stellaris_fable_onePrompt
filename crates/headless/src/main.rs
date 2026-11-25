@@ -2,6 +2,7 @@
 //! Kommandozeile und Ausgabe.
 
 mod battle;
+mod research;
 
 use clap::{Parser, Subcommand};
 use sim::GameData;
@@ -86,6 +87,8 @@ enum Command {
     },
     /// Übungsgefechte: Paarungen, Kontermatrix bei gleichen Kosten, Leistungsmessung.
     Battle(battle::BattleArgs),
+    /// Forschung je Gemeinschaft und Jahrzehnt; mit --seeds die Übersicht über viele Seeds.
+    Research(research::ResearchArgs),
 }
 
 fn parse_range(text: &str) -> Result<(u64, u64), String> {
@@ -111,6 +114,7 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Battle(args) => return battle::run(&data, args),
+        Command::Research(args) => return research::run(&data, args),
         Command::Run {
             seed,
             years,

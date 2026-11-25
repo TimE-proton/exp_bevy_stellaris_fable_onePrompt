@@ -1,20 +1,22 @@
 // Vorlagen für die Gemeinschaften. Jede Partie zieht daraus so viele, wie galaxy.ron
 // unter `polities` verlangt. color: sRGB 0..1.
+// start_techs: Technologien aus techs.ron, die die Gemeinschaft von Beginn an beherrscht
+// (samt allen Voraussetzungen). Fehlt die Angabe, beginnt sie ohne Vorwissen.
 [
     (key: "halde",     name: "Halde-Konkordat",       short: "Konkordat", color: (0.90, 0.55, 0.15),
-     motto: "Was wir heben, hält uns zusammen."),
+     motto: "Was wir heben, hält uns zusammen.", start_techs: ["wirtschaft_1"]),
     (key: "vesper",    name: "Vesperbund",            short: "Vesperbund", color: (0.55, 0.40, 0.90),
-     motto: "Am Abend zählt, wer geblieben ist."),
+     motto: "Am Abend zählt, wer geblieben ist.", start_techs: ["verteidigung_1"]),
     (key: "irrlicht",  name: "Irrlicht-Syndikat",     short: "Syndikat", color: (0.20, 0.80, 0.70),
-     motto: "Jeder Weg hat einen Preis."),
+     motto: "Jeder Weg hat einen Preis.", start_techs: ["antrieb_1"]),
     (key: "thalassa",  name: "Thalassische Liga",     short: "Liga", color: (0.20, 0.50, 0.95),
-     motto: "Ein Meer, viele Ufer."),
+     motto: "Ein Meer, viele Ufer.", start_techs: ["wirtschaft_1"]),
     (key: "tiefenuhr", name: "Orden der Tiefen Uhr",  short: "Orden", color: (0.85, 0.25, 0.30),
-     motto: "Die Zeit arbeitet für die Geduldigen."),
+     motto: "Die Zeit arbeitet für die Geduldigen.", start_techs: ["waffen_1"]),
     (key: "meridian",  name: "Karawane von Meridian", short: "Karawane", color: (0.95, 0.85, 0.25),
-     motto: "Wer rastet, wird überholt."),
+     motto: "Wer rastet, wird überholt.", start_techs: ["antrieb_1"]),
     (key: "aschgrau",  name: "Aschgraue Räte",        short: "Räte", color: (0.60, 0.65, 0.70),
-     motto: "Kein Befehl ohne Beschluss."),
+     motto: "Kein Befehl ohne Beschluss.", start_techs: ["boden_1"]),
     (key: "sonnwend",  name: "Sonnwend-Kommune",      short: "Kommune", color: (0.50, 0.85, 0.30),
-     motto: "Nach der längsten Nacht gehört der Tag allen."),
+     motto: "Nach der längsten Nacht gehört der Tag allen.", start_techs: ["verteidigung_1"]),
 ]

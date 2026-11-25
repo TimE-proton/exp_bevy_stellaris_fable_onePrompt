@@ -2,7 +2,7 @@
 
 use super::{
     Economy, Market, Money, PlanetEconomy, energy_factor, expected_return, local_yield, to_money,
-    unit_economics,
+    unit_economics, unit_economics_at,
 };
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
@@ -25,6 +25,7 @@ pub fn setup_economy(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> E
         treasury_targets: vec![0; polities.list.len()],
         initial_money: 0,
         minted: 0,
+        tech_yield: Vec::new(),
     };
     for polity in &polities.list {
         if let Some(capital) = polity.capital {
@@ -195,6 +196,7 @@ pub fn seed_colony(
     economy.planets[capital.index()].households -= cash;
 
     let market = &economy.markets[planet.system.index()];
+    let tech = economy.yield_factor(owner);
     // Siedler bringen Förderanlagen mit, keine Fabriken: Rezepte ohne Vorprodukte, die
     // aus dem leben, was der Ort hergibt. Verarbeitung folgt später, wenn sie sich rechnet.
     let mut ranked: Vec<(usize, f64)> = data
@@ -203,7 +205,14 @@ pub fn seed_colony(
         .enumerate()
         .filter(|(_, recipe)| recipe.input_ids.is_empty())
         .filter_map(|(index, recipe)| {
-            let economics = unit_economics(data, planet, balance.economy.base_wage, market, recipe);
+            let economics = unit_economics_at(
+                data,
+                planet,
+                balance.economy.base_wage,
+                market,
+                recipe,
+                tech,
+            );
             (economics.local_yield > 0.0)
                 .then(|| (index, expected_return(data, market, &economics)))
         })

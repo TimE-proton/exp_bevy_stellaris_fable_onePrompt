@@ -7,6 +7,7 @@
 mod defs;
 mod ship_loader;
 mod ships;
+mod tech_loader;
 
 pub use defs::*;
 pub use ship_loader::arc_covers;
@@ -140,6 +141,7 @@ impl GameData {
         };
         data.resolve_and_validate()?;
         ship_loader::resolve_ships(&mut data)?;
+        tech_loader::resolve_research(&mut data)?;
         Ok(data)
     }
 

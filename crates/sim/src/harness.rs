@@ -7,6 +7,7 @@ use crate::galaxy::Galaxy;
 use crate::ids::PolityId;
 use crate::polity::Polities;
 use crate::state::{SaveGame, SimConfig, SimState, hash_world, new_game};
+use crate::tech::Research;
 use crate::{SimPlugins, needs_fine_ticks, sim_schedule};
 use bevy_app::App;
 use bevy_ecs::prelude::*;
@@ -55,6 +56,10 @@ impl Headless {
 
     pub fn polities(&self) -> &Polities {
         self.world().resource::<Polities>()
+    }
+
+    pub fn research(&self) -> &Research {
+        self.world().resource::<Research>()
     }
 
     pub fn hash(&self) -> u64 {
@@ -315,6 +320,13 @@ pub fn check_invariants(world: &World) -> Result<(), String> {
             ));
         }
     }
+    let polities = world.resource::<Polities>().list.len();
+    if let Some(anomaly) = world
+        .resource::<Research>()
+        .find_anomaly(world.resource::<GameData>(), polities)
+    {
+        return Err(anomaly);
+    }
     Ok(())
 }
 
@@ -339,11 +351,17 @@ pub struct PolitySummary {
     pub alive: bool,
     pub planets: usize,
     pub population: f64,
+    /// Zahl der erforschten Technologien.
+    pub techs: usize,
+    /// Höchste erforschte Stufe je Zweig, in der Reihenfolge von `TechBranch::ALL`.
+    pub tiers: [u8; 5],
 }
 
 pub fn summarize(sim: &Headless) -> RunSummary {
     let galaxy = sim.galaxy();
     let config = sim.world().resource::<SimConfig>();
+    let data = sim.world().resource::<GameData>();
+    let research = sim.research();
     RunSummary {
         seed: config.seed,
         days: sim.clock().day(),
@@ -364,6 +382,9 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 alive: polity.alive,
                 planets: galaxy.planets_of(polity.id).count(),
                 population: galaxy.population_of(polity.id),
+                techs: research.known_count(polity.id),
+                tiers: crate::data::TechBranch::ALL
+                    .map(|branch| research.tier(data, polity.id, branch)),
             })
             .collect(),
         economy: economy_stats(sim.world()),
