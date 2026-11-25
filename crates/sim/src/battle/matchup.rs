@@ -156,6 +156,9 @@ pub struct Outcome {
     /// Gefechtszeit in Sekunden.
     pub time: f32,
     pub timed_out: bool,
+    /// Im Patt beendet: Keine Seite kam lange durch die Schilde der anderen, alle zogen
+    /// gemeinsam ab. Dann gibt es keinen Sieger.
+    pub stalemate: bool,
     /// Gefechtszeit beim ersten Kontakt.
     pub contact_time: Option<f32>,
     pub sides: Vec<SideOutcome>,
@@ -252,6 +255,10 @@ pub fn outcome_of(battle: &Battle) -> Outcome {
         ticks: battle.tick,
         time: battle.time,
         timed_out: battle.timed_out,
+        stalemate: battle
+            .combatants
+            .iter()
+            .any(|combatant| combatant.stalemate),
         contact_time: battle.contact_time,
         sides,
         peak_ships: battle.ships.len(),

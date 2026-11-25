@@ -213,7 +213,8 @@ pub struct BattleShip {
     pub signature: f32,
     pub main_range: f32,
     pub broadside: f32,
-    /// Bauwert; Maß des Kampfwerts.
+    /// Bauwert; Maß des Kampfwerts. Bei Trägern ohne die Bordjäger: Die zählen je Jäger,
+    /// ob im Hangar oder in der Luft, sonst stünden sie doppelt in der Bilanz.
     pub value: f32,
     /// Anteil des Strombedarfs, den die Reaktoren decken (0..1).
     pub power: f32,
@@ -277,6 +278,19 @@ impl CombatantSetup {
             morale: data.balance.battle.morale_start,
         }
     }
+
+    /// Ausgangsmoral nach der Kriegsmüdigkeit (0..100) der eigenen Gemeinschaft: je Punkt
+    /// `morale_per_weariness` weniger als `morale_start`. Für das Aufstellen aus der Partie.
+    pub fn with_war_weariness(mut self, data: &GameData, weariness: f64) -> Self {
+        let battle = &data.balance.battle;
+        let weariness = if weariness.is_finite() {
+            weariness.clamp(0.0, 100.0) as f32
+        } else {
+            0.0
+        };
+        self.morale = (battle.morale_start - battle.morale_per_weariness * weariness).max(0.0);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -308,6 +322,10 @@ pub struct Combatant {
     /// Gefechtszeit, zu der der Rückzug befohlen wurde.
     #[serde(default)]
     pub retreat_time: Option<f32>,
+    /// Hat sich im Patt gelöst: Keine Seite kam lange durch die Schilde der anderen, beide
+    /// zogen gemeinsam ab. Ein solches Gefecht hat keinen Sieger.
+    #[serde(default)]
+    pub stalemate: bool,
     /// Schaden an Panzerung und Rumpf des Gegners je Waffenart (Strahl, Geschütz,
     /// Lenkwaffe, Punktverteidigung), für Auswertungen.
     pub damage_dealt: [f32; 4],
@@ -318,6 +336,16 @@ pub struct Combatant {
     // --- aus der Zusammensetzung abgeleitet ---
     pub fleet_speed: f32,
     pub fleet_range: f32,
+    /// Schwerpunkt der Schiffe, die `fleet_range` bestimmen: Von dort, nicht vom
+    /// Bezugspunkt, wird der Abstand zum Gegner gemessen. Dazu ihr mittlerer Platz im
+    /// Bezugssystem der Flotte, um zu sehen, wie weit sie dem Bezugspunkt nachhängen.
+    #[serde(default)]
+    pub range_center: V2,
+    #[serde(default)]
+    pub range_offset: V2,
+    /// Träger ohne Jäger stehen in der Linie (einmal gesetzt, bleibt es).
+    #[serde(default)]
+    pub carriers_in_line: bool,
     pub broadside: bool,
     // --- Bilanz ---
     pub initial: [u32; 6],
@@ -521,11 +549,15 @@ impl Battle {
             outlook: 0.0,
             last_hit: 0.0,
             retreat_time: None,
+            stalemate: false,
             damage_dealt: [0.0; 4],
             damage_taken: 0.0,
             enemy_center: V2::ZERO,
             fleet_speed: 30.0,
             fleet_range: 500.0,
+            range_center: anchor,
+            range_offset: V2::ZERO,
+            carriers_in_line: false,
             broadside: false,
             initial: [0; 6],
             lost: [0; 6],
@@ -547,14 +579,17 @@ impl Battle {
             self.ships.push(ship);
         }
         self.combatants.push(combatant);
-        self.refresh_fleet_profile(data, side);
         let members: Vec<usize> = (first..self.ships.len()).collect();
+        // Träger ohne Jäger stehen gleich in der Linie.
+        self.combatants[side].carriers_in_line = !self.has_fighters(data, side);
         formation::assign_slots(
             &mut self.ships,
             &members,
             self.combatants[side].formation,
             balance.formation_spacing,
+            self.combatants[side].carriers_in_line,
         );
+        self.refresh_fleet_profile(data, side);
         let (forward, left) = (
             math::exact_direction(facing),
             math::exact_direction(facing).perp(),
@@ -568,19 +603,72 @@ impl Battle {
         side
     }
 
+    /// Hat die Partei noch Jäger, die kämpfen, oder Träger, die welche starten können?
+    pub fn has_fighters(&self, data: &GameData, side: usize) -> bool {
+        self.ships.iter().any(|ship| {
+            ship.side as usize == side
+                && ship.status == ShipStatus::Active
+                && (ship.class == ShipClass::Fighter || can_launch(data, ship))
+        })
+    }
+
+    /// Schiffe einer Partei, die einen Platz in der Formation haben.
+    fn formation_members(&self, side: usize) -> Vec<usize> {
+        (0..self.ships.len())
+            .filter(|index| {
+                let ship = &self.ships[*index];
+                ship.side as usize == side
+                    && ship.status.can_act()
+                    && ship.class != ShipClass::Fighter
+            })
+            .collect()
+    }
+
     /// Geschwindigkeit, Gefechtsentfernung und Breitseitenneigung einer Partei aus den
     /// Schiffen, die sie noch hat.
     pub(crate) fn refresh_fleet_profile(&mut self, data: &GameData, side: usize) {
-        let (mut slowest, mut range_sum, mut weight, mut broad, mut broad_weight) =
-            (f32::MAX, 0.0, 0.0, 0.0, 0.0);
-        let mut carrier_range: f32 = 0.0;
-        // Die Linie hält den Abstand, auf den auch ihre kürzesten Hauptwaffen wirken.
-        let mut line_range = f32::MAX;
-        // Träger halten nur Abstand, solange sie Jäger haben; danach zählen ihre Geschütze.
-        let fighters = self.ships.iter().any(|ship| {
-            ship.side as usize == side
-                && (ship.hangar > 0 || (ship.class == ShipClass::Fighter && ship.status.can_act()))
-        });
+        let fighters = self.has_fighters(data, side);
+        // Ohne Jäger rücken die Träger in die Linie, sonst kämen ihre Geschütze nie zum
+        // Zug: Sie stünden weit hinter dem Punkt, von dem aus der Abstand gehalten wird.
+        if !fighters && !self.combatants[side].carriers_in_line {
+            self.combatants[side].carriers_in_line = true;
+            let members = self.formation_members(side);
+            formation::assign_slots(
+                &mut self.ships,
+                &members,
+                self.combatants[side].formation,
+                data.balance.battle.formation_spacing,
+                true,
+            );
+        }
+        /// Schiffe, die gemeinsam den Abstand bestimmen: Reichweite, Bauwert, dazu Platz und
+        /// Lage, mit dem Bauwert gewichtet.
+        #[derive(Default)]
+        struct Group {
+            range: f32,
+            weight: f32,
+            slot: V2,
+            pos: V2,
+        }
+        impl Group {
+            fn add(&mut self, ship: &BattleShip, range: f32) {
+                self.range = range;
+                self.weight += ship.value;
+                self.slot += ship.slot * ship.value;
+                self.pos += ship.pos * ship.value;
+            }
+            fn mean(&self, sum: V2) -> V2 {
+                sum * (1.0 / self.weight.max(1e-6))
+            }
+        }
+        // Die Linie hält den Abstand, auf den auch ihre kürzesten Hauptwaffen wirken; Geleit
+        // allein das Mittel seiner Reichweiten; Träger allein die größte.
+        let (mut line, mut escorts, mut carriers) =
+            (Group::default(), Group::default(), Group::default());
+        line.range = f32::MAX;
+        let mut escort_range_sum = 0.0;
+        let (mut slowest, mut broad, mut broad_weight) = (f32::MAX, 0.0, 0.0);
+        let range_factor = self.combatants[side].modifiers.range;
         for ship in self
             .ships
             .iter()
@@ -590,40 +678,45 @@ impl Battle {
                 continue;
             }
             slowest = slowest.min(ship.max_speed);
-            if ship.class == ShipClass::Carrier {
-                let range = if fighters {
-                    ship.main_range
-                } else {
-                    data.designs[ship.design as usize].stats.gun_range
-                        * self.combatants[side].modifiers.range
-                };
-                carrier_range = carrier_range.max(range);
-            } else {
-                range_sum += ship.main_range * ship.value;
-                weight += ship.value;
-            }
-            if matches!(ship.class, ShipClass::Cruiser | ShipClass::Battleship) {
-                broad += ship.broadside * ship.value;
-                broad_weight += ship.value;
-                line_range = line_range.min(ship.main_range);
+            match ship.class {
+                ShipClass::Carrier => {
+                    // Träger halten nur Abstand, solange es Jäger gibt; danach zählen ihre
+                    // Geschütze.
+                    let range = if fighters {
+                        ship.main_range
+                    } else {
+                        data.designs[ship.design as usize].stats.gun_range * range_factor
+                    };
+                    carriers.add(ship, carriers.range.max(range));
+                }
+                ShipClass::Cruiser | ShipClass::Battleship => {
+                    line.add(ship, line.range.min(ship.main_range));
+                    broad += ship.broadside * ship.value;
+                    broad_weight += ship.value;
+                }
+                _ => {
+                    escort_range_sum += ship.main_range * ship.value;
+                    escorts.add(ship, 0.0);
+                }
             }
         }
+        escorts.range = escort_range_sum / escorts.weight.max(1e-6);
+        let anchor = self.combatants[side].anchor;
+        let (range, offset, center) = [line, escorts, carriers]
+            .into_iter()
+            .find(|group| group.weight > 0.0)
+            .map_or((500.0, V2::ZERO, anchor), |group| {
+                (group.range, group.mean(group.slot), group.mean(group.pos))
+            });
         let combatant = &mut self.combatants[side];
+        combatant.range_center = center;
         combatant.fleet_speed = if slowest == f32::MAX {
             60.0
         } else {
             slowest * 0.9
         };
-        // Träger allein halten den Abstand ihrer Jäger, sonst bestimmt die Linie.
-        combatant.fleet_range = if line_range < f32::MAX {
-            line_range
-        } else if weight > 0.0 {
-            range_sum / weight
-        } else if carrier_range > 0.0 {
-            carrier_range
-        } else {
-            500.0
-        };
+        combatant.fleet_range = range;
+        combatant.range_offset = offset;
         combatant.broadside =
             broad_weight > 0.0 && broad / broad_weight > data.balance.battle.broadside_min;
     }
@@ -642,20 +735,16 @@ impl Battle {
         combatant.doctrine = doctrine;
         if combatant.formation != formation {
             combatant.formation = formation;
-            let members: Vec<usize> = (0..self.ships.len())
-                .filter(|index| {
-                    let ship = &self.ships[*index];
-                    ship.side as usize == side
-                        && ship.status.can_act()
-                        && ship.class != ShipClass::Fighter
-                })
-                .collect();
+            let carriers_in_line = combatant.carriers_in_line;
+            let members = self.formation_members(side);
             formation::assign_slots(
                 &mut self.ships,
                 &members,
                 formation,
                 data.balance.battle.formation_spacing,
+                carriers_in_line,
             );
+            self.refresh_fleet_profile(data, side);
         }
     }
 
@@ -686,11 +775,16 @@ impl Battle {
             .iter()
             .filter(|ship| ship.side as usize == side && ship.status == ShipStatus::Active)
             .map(|ship| {
-                let craft = data.designs[ship.design as usize].stats.craft;
+                // Nur Jäger, die noch starten können, zählen.
+                let craft = data.designs[ship.design as usize]
+                    .stats
+                    .craft
+                    .filter(|_| can_launch(data, ship));
                 let hangar = craft.map_or(0.0, |craft| {
                     ship.hangar as f32 * data.designs[craft as usize].stats.value as f32
                 });
-                ship.value * (0.3 + 0.7 * ship.hull / ship.hull_max.max(1e-6)) + hangar
+                let floor = data.balance.battle.value_hull_floor;
+                ship.value * (floor + (1.0 - floor) * ship.hull / ship.hull_max.max(1e-6)) + hangar
             })
             .sum()
     }
@@ -744,33 +838,49 @@ impl Battle {
         }
     }
 
+    /// Ist ein treibendes Schiff dieser Partei dem Gegner überlassen? Ja, wenn ein Gegner
+    /// noch kämpft und die eigene Seite nicht mehr. Dieselbe Regel gilt am Ende des Gefechts
+    /// (dort wird es zerstört) und in [`Battle::results`].
+    pub(crate) fn adrift_lost(&self, fighting: &[bool], side: usize) -> bool {
+        !fighting[side]
+            && (0..self.combatants.len())
+                .any(|other| self.is_hostile(side as u16, other as u16) && fighting[other])
+    }
+
+    /// Freie Plätze für heimkehrende Bordjäger je Partei: in den Hangars der Träger, die
+    /// nicht verloren sind.
+    fn hangar_room(&self, data: &GameData, fighting: &[bool]) -> Vec<u32> {
+        let mut room = vec![0u32; self.combatants.len()];
+        for ship in &self.ships {
+            if ship.class == ShipClass::Fighter || self.fate(ship, fighting) == Fate::Lost {
+                continue;
+            }
+            let capacity = data.designs[ship.design as usize].stats.fighters;
+            room[ship.side as usize] += capacity - ship.hangar.min(capacity);
+        }
+        room
+    }
+
+    fn fate(&self, ship: &BattleShip, fighting: &[bool]) -> Fate {
+        match ship.status {
+            ShipStatus::Destroyed => Fate::Lost,
+            ShipStatus::Escaped => Fate::Escaped,
+            ShipStatus::Active | ShipStatus::Routing => Fate::Holding,
+            ShipStatus::Disabled if self.adrift_lost(fighting, ship.side as usize) => Fate::Lost,
+            ShipStatus::Disabled => Fate::Holding,
+        }
+    }
+
     /// Was aus jedem Schiff der strategischen Ebene geworden ist, in der Reihenfolge der
     /// Schiffe. Überlebende Bordjäger kehren in die Hangars überlebender Träger ihrer Seite
-    /// zurück, soweit Platz ist; die übrigen gehen verloren. Geht auch mitten im Gefecht
-    /// (als Momentaufnahme).
+    /// zurück, in Reihenfolge der Träger. Am Ende des Gefechts passen sie hinein: Wer keinen
+    /// Platz fand, ist schon als verloren gezählt. Mitten im Gefecht (als Momentaufnahme)
+    /// bleiben Jäger ohne Platz unberücksichtigt.
     pub fn results(&self, data: &GameData) -> Vec<ShipResult> {
         let fighting: Vec<bool> = (0..self.combatants.len())
             .map(|side| self.is_fighting(side))
             .collect();
-        let fate_of = |ship: &BattleShip| -> Fate {
-            match ship.status {
-                ShipStatus::Destroyed => Fate::Lost,
-                ShipStatus::Escaped => Fate::Escaped,
-                ShipStatus::Active | ShipStatus::Routing => Fate::Holding,
-                ShipStatus::Disabled => {
-                    // Treibend: verloren, wenn ein Gegner das Feld hält und die eigene
-                    // Seite nicht mehr.
-                    let side = ship.side as usize;
-                    let enemy_holds = (0..self.combatants.len())
-                        .any(|other| self.is_hostile(ship.side, other as u16) && fighting[other]);
-                    if enemy_holds && !fighting[side] {
-                        Fate::Lost
-                    } else {
-                        Fate::Holding
-                    }
-                }
-            }
-        };
+        let fate_of = |ship: &BattleShip| self.fate(ship, &fighting);
         // Überlebende Bordjäger je Seite.
         let mut returning = vec![0u32; self.combatants.len()];
         for ship in &self.ships {
@@ -845,6 +955,64 @@ impl Battle {
     }
 }
 
+impl Battle {
+    /// Am Ende des Gefechts: Bordjäger, für die in keinem überlebenden Träger ihrer Seite
+    /// Platz ist, gehen verloren und werden so auch gezählt. Die ersten (nach Index) finden
+    /// Platz, die übrigen nicht.
+    pub(crate) fn settle_fighters(&mut self, data: &GameData) {
+        let fighting: Vec<bool> = (0..self.combatants.len())
+            .map(|side| self.is_fighting(side))
+            .collect();
+        let mut room = self.hangar_room(data, &fighting);
+        for index in 0..self.ships.len() {
+            let ship = &self.ships[index];
+            if ship.source.is_some()
+                || ship.class != ShipClass::Fighter
+                || self.fate(ship, &fighting) == Fate::Lost
+            {
+                continue;
+            }
+            let side = ship.side as usize;
+            if room[side] > 0 {
+                room[side] -= 1;
+                continue;
+            }
+            let (escaped, value) = (ship.status == ShipStatus::Escaped, ship.value);
+            let ship = &mut self.ships[index];
+            ship.status = ShipStatus::Destroyed;
+            ship.target = None;
+            let combatant = &mut self.combatants[side];
+            if escaped {
+                combatant.escaped[ShipClass::Fighter.index()] -= 1;
+            }
+            combatant.lost[ShipClass::Fighter.index()] += 1;
+            combatant.lost_value += value;
+        }
+    }
+}
+
+/// Kann der Träger Jäger starten? Er muss kämpfen, Jäger im Hangar haben und noch ein
+/// heiles Hangarmodul.
+pub(crate) fn can_launch(data: &GameData, ship: &BattleShip) -> bool {
+    ship.hangar > 0 && ship.status == ShipStatus::Active && launch_bays(data, ship) > 0
+}
+
+/// Zahl der heilen Hangarmodule.
+pub(crate) fn launch_bays(data: &GameData, ship: &BattleShip) -> usize {
+    data.designs[ship.design as usize]
+        .modules
+        .iter()
+        .zip(&ship.modules)
+        .filter(|(slot, state)| {
+            state.hp > 0.0
+                && matches!(
+                    data.modules[slot.module_id as usize].kind,
+                    ModuleKind::Hangar { .. }
+                )
+        })
+        .count()
+}
+
 /// Ein Anteil auf 0..1 gebracht; Unsinn (NaN, unendlich) gilt als voll.
 fn unit(value: f32) -> f32 {
     if value.is_finite() {
@@ -914,7 +1082,7 @@ fn make_ship(data: &GameData, side: u16, spec: &ShipSpec, combatant: &Combatant)
         slot: V2::ZERO,
         carrier: None,
         hangar: spec.fighters.min(stats.fighters),
-        launch_timer: 3.0,
+        launch_timer: data.balance.battle.first_launch,
         breakaway: 0.0,
         max_speed: stats.speed * modifiers.speed,
         accel: stats.accel * modifiers.speed,
@@ -923,7 +1091,10 @@ fn make_ship(data: &GameData, side: u16, spec: &ShipSpec, combatant: &Combatant)
         signature: stats.signature,
         main_range: stats.main_range * modifiers.range,
         broadside: stats.broadside,
-        value: stats.value as f32,
+        value: (stats.value
+            - stats.craft.map_or(0.0, |craft| {
+                stats.fighters as f64 * data.designs[craft as usize].stats.value
+            })) as f32,
         power: 1.0,
         mobility: 1.0,
     };
@@ -976,14 +1147,23 @@ pub(crate) fn refresh_ship(data: &GameData, ship: &mut BattleShip, modifiers: &C
     ship.shield_max = shield * modifiers.shields;
     ship.shield_regen = regen * modifiers.shields;
     ship.shield = ship.shield.min(ship.shield_max);
-    refresh_armed(data, ship, modifiers.range);
+    // Ob die Punktverteidigung zählt, hängt vom Gegner ab; das entscheidet jeder Takt neu
+    // (siehe `upkeep`). Bis dahin zählt sie.
+    refresh_armed(data, ship, modifiers.range, true);
 }
 
 /// Kann das Schiff noch wirken? Eine Waffe muss arbeiten und, wenn sie Munition braucht,
-/// welche haben; ein Träger wirkt, solange Jäger im Hangar stehen. Dazu die Reichweite der
-/// stärksten Waffengruppe, die noch feuern kann: Ist die Munition fort, rückt ein Schiff auf
-/// die Reichweite seiner Strahlwaffen heran.
-pub(crate) fn refresh_armed(data: &GameData, ship: &mut BattleShip, range_factor: f32) {
+/// welche haben; ein Träger wirkt, solange er Jäger starten kann. Die Punktverteidigung
+/// zählt nur, wenn `point_defense_counts` (der Gegner hat kleine Schiffe oder Lenkwaffen):
+/// Gegen große Schiffe richtet sie nichts aus. Dazu die Reichweite der stärksten
+/// Waffengruppe, die noch feuern kann: Ist die Munition fort, rückt ein Schiff auf die
+/// Reichweite seiner Strahlwaffen heran; bleibt nur die Punktverteidigung, auf deren.
+pub(crate) fn refresh_armed(
+    data: &GameData,
+    ship: &mut BattleShip,
+    range_factor: f32,
+    point_defense_counts: bool,
+) {
     let design = &data.designs[ship.design as usize];
     let ready = |slot: &DesignModule, state: &ModuleState| {
         state.hp > 0.0
@@ -991,19 +1171,22 @@ pub(crate) fn refresh_armed(data: &GameData, ship: &mut BattleShip, range_factor
                 .weapon()
                 .is_some_and(|weapon| weapon.ammo <= 0.0 || ship.ammo >= weapon.ammo)
     };
-    let mut armed = ship.hangar > 0;
+    let mut armed = ship.hangar > 0 && launch_bays(data, ship) > 0;
     let mut best: Option<(f32, f32)> = None;
+    let mut point_defense: f32 = 0.0;
     for (index, (slot, state)) in design.modules.iter().zip(&ship.modules).enumerate() {
         if !ready(slot, state) {
             continue;
         }
-        armed = true;
         let Some(weapon) = data.modules[slot.module_id as usize].weapon() else {
             continue;
         };
         if weapon.kind == WeaponKind::PointDefense {
+            armed |= point_defense_counts;
+            point_defense = point_defense.max(weapon.range);
             continue;
         }
+        armed = true;
         // Gleiche Waffen zählen zusammen; die erste ihrer Art steht für die Gruppe.
         let first = design
             .modules
@@ -1035,9 +1218,11 @@ pub(crate) fn refresh_armed(data: &GameData, ship: &mut BattleShip, range_factor
     }
     ship.armed = armed;
     // Träger halten den Abstand ihrer Jäger; der steht in ihren Kennwerten.
-    if design.stats.fighters == 0
-        && let Some((_, range)) = best
-    {
-        ship.main_range = range * range_factor;
+    if design.stats.fighters == 0 {
+        if let Some((_, range)) = best {
+            ship.main_range = range * range_factor;
+        } else if point_defense > 0.0 && point_defense_counts {
+            ship.main_range = point_defense * range_factor;
+        }
     }
 }

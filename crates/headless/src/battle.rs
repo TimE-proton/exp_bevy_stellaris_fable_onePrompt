@@ -114,8 +114,29 @@ pub fn run(data: &GameData, args: BattleArgs) -> ExitCode {
         bench(data, count, args.seeds.0);
         return ExitCode::SUCCESS;
     }
+    if args.versus_all {
+        let Some(a) = &args.a else {
+            eprintln!("Angabe fehlt: --versus-all braucht --a");
+            return ExitCode::FAILURE;
+        };
+        match Side::parse(data, a) {
+            Ok(mut side) => {
+                side.formation = args.formation_a.into();
+                side.doctrine = args.doctrine_a.into();
+                versus_all(data, &side, args.seeds);
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let (Some(a), Some(b)) = (&args.a, &args.b) else {
-        eprintln!("Angabe fehlt: --a und --b, oder --matrix, --bench N, --designs");
+        eprintln!(
+            "Angabe fehlt: --a und --b, oder --a mit --versus-all, oder --matrix, --mirror, \
+             --bench N, --designs"
+        );
         return ExitCode::FAILURE;
     };
     let side = |text: &str| Side::parse(data, text);
@@ -143,10 +164,6 @@ pub fn run(data: &GameData, args: BattleArgs) -> ExitCode {
     );
     if let Some(every) = args.trace {
         trace(data, args.seeds.0, &[a.clone(), b.clone()], every);
-    }
-    if args.versus_all {
-        versus_all(data, &a, args.seeds);
-        return ExitCode::SUCCESS;
     }
     let sides = [a, b];
     let outcomes = fight_many(data, args.seeds, &sides);
@@ -198,6 +215,7 @@ struct Summary {
     runs: u32,
     wins: [u32; 2],
     timeouts: u32,
+    stalemates: u32,
     loss: [f32; 2],
     /// Mittlere Gefechtsdauer nach dem ersten Kontakt und die längste.
     fighting: f32,
@@ -217,6 +235,9 @@ impl Summary {
             summary.runs += 1;
             if outcome.timed_out {
                 summary.timeouts += 1;
+            }
+            if outcome.stalemate {
+                summary.stalemates += 1;
             }
             if let Some(winner) = outcome.winner() {
                 summary.wins[map(winner)] += 1;
@@ -240,12 +261,13 @@ impl Summary {
         let runs = self.runs.max(1) as f32;
         let decided = self.decided().max(1) as f32;
         format!(
-            "{a} siegt {}×, {b} siegt {}×, offen {}× (Zeit um {}×). Verlust {a} {:.0} %, {b} {:.0} %; \
+            "{a} siegt {}×, {b} siegt {}×, offen {}× (Zeit um {}×, Patt {}×). Verlust {a} {:.0} %, {b} {:.0} %; \
              Sieger {:.0} %, Verlierer {:.0} %. Gefecht nach Kontakt {:.0} s im Mittel, längstens {:.0} s.",
             self.wins[0],
             self.wins[1],
             self.runs - self.decided(),
             self.timeouts,
+            self.stalemates,
             100.0 * self.loss[0] / runs,
             100.0 * self.loss[1] / runs,
             100.0 * self.winner_loss / decided,
@@ -365,6 +387,7 @@ fn describe(outcome: &Outcome) -> String {
         Some(0) => "A siegt",
         Some(_) => "B siegt",
         None if outcome.timed_out => "Zeit um",
+        None if outcome.stalemate => "Patt",
         None => "kein Sieger",
     };
     let side = |index: usize| {

@@ -13,7 +13,7 @@
 use super::math::{distance_to_segment_squared, turn_toward, wrap_angle};
 use super::{
     Battle, BattleShip, Beam, BeamKind, Doctrine, Impact, ShipSpec, ShipStatus, Shot, V2, Wreck,
-    make_ship, refresh_armed, refresh_ship,
+    can_launch, launch_bays, make_ship, refresh_armed, refresh_ship,
 };
 use crate::data::{
     BattleBalance, DesignModule, Facing, GameData, ModuleKind, ShipClass, WeaponDef, WeaponKind,
@@ -77,6 +77,13 @@ fn pair_jitter(seed: u64, shooter: usize, target: u32) -> f32 {
     (x >> 40) as f32 * (1.0 / (1u32 << 24) as f32)
 }
 
+/// Faktor nahe 1 für die Suche nach dem nächsten Ziel. Entscheidet fast gleiche
+/// Entfernungen zufällig je Paar, statt nach der Reihenfolge im Gitter (aufsteigendes y):
+/// Die bevorzugte bei genau gespiegelter Aufstellung die eine Seite.
+fn tie_break(seed: u64, shooter: usize, target: u32) -> f32 {
+    1.0 + 1e-3 * pair_jitter(seed, shooter, target)
+}
+
 /// Braucht ein Jäger Nachschub vom Träger?
 fn needs_rearm(ship: &BattleShip) -> bool {
     ship.class == ShipClass::Fighter
@@ -130,7 +137,7 @@ impl Battle {
         self.move_ships(data, dt, &carriers);
         self.launch_fighters(data, dt);
         self.fire_weapons(data, dt, &mut rng);
-        self.advance_shots(dt);
+        self.advance_shots(balance, dt);
         self.resolve_hits(data, &mut rng);
         self.upkeep(data, dt, &carriers);
         if self.tick.is_multiple_of(command_ticks) {
@@ -195,11 +202,22 @@ impl Battle {
 
         // Rückzug. Die Seiten entscheiden nacheinander, die am schlechtesten stehende
         // zuerst; ein Rückzug gilt sofort, so dass die nächste ihn schon sieht. So ziehen
-        // nie beide Seiten im selben Augenblick ab.
-        let loss_share: Vec<f32> = self
-            .combatants
+        // nie beide Seiten im selben Augenblick ab, außer gemeinsam im Patt.
+        // Verlustanteil an Schiffen; Bordjäger zählen nicht mit, ihr Verschleiß ist ihre
+        // Aufgabe. Sonst zöge eine Trägerflotte ab, sobald ihre Staffeln angegriffen haben.
+        let (mut lost_ships, mut all_ships) = (vec![0.0f32; sides], vec![0.0f32; sides]);
+        for ship in self
+            .ships
             .iter()
-            .map(|combatant| combatant.lost_value / combatant.initial_value.max(1.0))
+            .filter(|ship| ship.class != ShipClass::Fighter)
+        {
+            all_ships[ship.side as usize] += ship.value;
+            if ship.status == ShipStatus::Destroyed {
+                lost_ships[ship.side as usize] += ship.value;
+            }
+        }
+        let loss_share: Vec<f32> = (0..sides)
+            .map(|side| lost_ships[side] / all_ships[side].max(1.0))
             .collect();
         let mut order: Vec<(usize, f32)> = (0..sides)
             .map(|side| {
@@ -218,6 +236,10 @@ impl Battle {
                 .then(pair_jitter(seed, a.0, 0).total_cmp(&pair_jitter(seed, b.0, 0)))
                 .then(a.0.cmp(&b.0))
         });
+        let idle = |battle: &Battle, side: usize| {
+            let combatant = &battle.combatants[side];
+            combatant.contact && battle.time - combatant.last_hit > balance.stalemate_time
+        };
         for (side, _) in order {
             let combatant = &self.combatants[side];
             if combatant.retreating || !combatant.contact {
@@ -229,14 +251,43 @@ impl Battle {
             }
             let own = friendly_strength(self, &strength, side);
             let doctrine = combatant.doctrine;
-            // Wer lange nichts mehr ausrichtet, bricht ab.
-            let idle = self.time - combatant.last_hit > balance.stalemate_time;
             let outmatched = own < doctrine.pick(&balance.retreat_ratio) * enemy;
             let bled = loss_share[side] > doctrine.pick(&balance.retreat_loss)
                 && own < balance.retreat_unless_ahead * enemy;
-            if outmatched || bled || idle {
+            if outmatched || bled {
                 self.order_retreat(side);
                 strength[side] = 0.0;
+                continue;
+            }
+            // Wer lange nichts mehr ausrichtet, bricht ab, wenn der Gegner ihm zusetzt (in
+            // der letzten Zeit durch die Schilde kam). Richtet auch keiner der Gegner, die
+            // noch kämpfen, etwas aus, ist es ein Patt: Alle lösen sich gemeinsam, und niemand
+            // hat gewonnen. Dazwischen wird gewartet; so entscheidet nicht, wer zuletzt
+            // getroffen hat, über Sieg und Niederlage.
+            if idle(self, side) {
+                let opponents: Vec<usize> = (0..sides)
+                    .filter(|other| {
+                        self.is_hostile(side as u16, *other as u16) && strength[*other] > 0.0
+                    })
+                    .collect();
+                let mutual = opponents.iter().all(|other| idle(self, *other));
+                let pressed = opponents.iter().any(|other| {
+                    self.time - self.combatants[*other].last_hit < balance.stalemate_pressure
+                });
+                let leaving = if mutual {
+                    let mut all = vec![side];
+                    all.extend(opponents);
+                    all
+                } else if pressed {
+                    vec![side]
+                } else {
+                    Vec::new()
+                };
+                for leaver in leaving {
+                    self.order_retreat(leaver);
+                    self.combatants[leaver].stalemate = mutual;
+                    strength[leaver] = 0.0;
+                }
             }
         }
 
@@ -267,12 +318,14 @@ impl Battle {
                 0.0
             };
 
-            let to_enemy = enemy_center - combatant.anchor;
+            // Gemessen wird von den Schiffen aus, die den Abstand bestimmen, nicht vom
+            // Bezugspunkt: Stehen sie weit hinten (Träger), käme die Flotte sonst nie an.
+            let to_enemy = enemy_center - combatant.range_center;
             let distance = to_enemy.length();
             let direction = to_enemy.normalized();
             combatant.facing = turn_toward(
                 combatant.facing,
-                to_enemy.angle(),
+                (enemy_center - combatant.anchor).angle(),
                 0.3 * balance.command_every,
             );
             let keep = combatant.fleet_range * combatant.doctrine.pick(&balance.range_keep);
@@ -294,12 +347,27 @@ impl Battle {
             } else {
                 // Reichweitenkontrolle: heran bis zur gewünschten Entfernung, zu nah wird
                 // (außer bei offensiver Doktrin) wieder Abstand genommen.
-                if distance > keep * 1.05 {
+                let bands = &balance.range_bands;
+                if distance > keep * bands.approach {
                     velocity += direction * combatant.fleet_speed;
-                } else if distance < keep * 0.8 && combatant.doctrine != Doctrine::Aggressive {
+                } else if distance < keep * bands.back_off
+                    && combatant.doctrine != Doctrine::Aggressive
+                {
                     // Je näher der Gegner, desto entschiedener wird Abstand genommen.
-                    let urgency = if distance < keep * 0.6 { 1.0 } else { 0.6 };
+                    let urgency = if distance < keep * bands.urgent {
+                        1.0
+                    } else {
+                        bands.back_off_speed
+                    };
                     velocity += direction * (-urgency * combatant.fleet_speed);
+                }
+                // Der Bezugspunkt läuft seinen Schiffen nicht davon: Hängen sie weit nach
+                // (träge Schiffe nach einer Wende), wartet er, statt den Gegner zu überholen.
+                let expected = combatant.anchor + combatant.range_offset.rotated(combatant.facing);
+                let lead = (expected - combatant.range_center).dot(direction);
+                let forward = velocity.dot(direction);
+                if lead > balance.formation_spacing * 2.0 && forward > 0.0 {
+                    velocity += direction * -forward;
                 }
                 if combatant.engaged {
                     // Breitseite: Die Linie läuft quer zum Gegner. Alle Seiten haben
@@ -353,19 +421,20 @@ impl Battle {
                 if distance > reach {
                     return;
                 }
+                let scoring = &balance.targeting;
                 let mut score = weights.of(other.class) / (1.0 + distance / scale);
                 // Angeschlagene Gegner zuerst, Fliehende und Treibende zuletzt.
-                score *= 1.0 + 0.3 * (1.0 - other.hull / other.hull_max);
+                score *= 1.0 + scoring.damaged * (1.0 - other.hull / other.hull_max);
                 score *= match other.status {
-                    ShipStatus::Routing => 0.75,
-                    ShipStatus::Disabled => 0.3,
+                    ShipStatus::Routing => scoring.routing,
+                    ShipStatus::Disabled => scoring.disabled,
                     _ => 1.0,
                 };
                 if ship.target == Some(other_index) {
-                    score *= 1.25;
+                    score *= scoring.keep;
                 }
                 // Kleine feste Streuung, damit nicht alle dasselbe Ziel wählen.
-                score *= 1.0 + 0.15 * pair_jitter(self.seed, index, other_index);
+                score *= 1.0 + scoring.jitter * pair_jitter(self.seed, index, other_index);
                 if best.is_none_or(|(best_index, best_score)| {
                     score > best_score || (score == best_score && other_index < best_index)
                 }) {
@@ -400,7 +469,7 @@ impl Battle {
                 let ship = &self.ships[index];
                 ship.status
                     .can_act()
-                    .then(|| self.steer(index, &leads[ship.side as usize], carriers))
+                    .then(|| self.steer(balance, dt, index, &leads[ship.side as usize], carriers))
             })
             .collect();
         for (index, steering) in steerings.into_iter().enumerate() {
@@ -416,7 +485,11 @@ impl Battle {
             if let Some(breakaway) = steering.breakaway {
                 ship.breakaway = breakaway;
             }
-            let dry = if ship.fuel <= 0.0 { 0.5 } else { 1.0 };
+            let dry = if ship.fuel <= 0.0 {
+                balance.dry_speed
+            } else {
+                1.0
+            };
             let limit = ship.max_speed * ship.mobility.max(0.1) * dry;
             let wanted_speed = steering.velocity.length().min(limit);
             // Mit Fahrt folgt der Bug der Bewegung, im Stand der gewünschten Ausrichtung.
@@ -436,7 +509,7 @@ impl Battle {
             let mut goal_speed = wanted_speed * align;
             if ship.class == ShipClass::Fighter && !needs_rearm(ship) {
                 // Jäger bleiben in Bewegung, außer längsseits ihres Trägers.
-                goal_speed = goal_speed.max(0.55 * limit);
+                goal_speed = goal_speed.max(balance.fighter_min_speed * limit);
             }
             let accel = ship.accel * ship.mobility.max(0.1);
             let change = (goal_speed - ship.speed).clamp(-accel * 1.5 * dt, accel * dt);
@@ -479,7 +552,14 @@ impl Battle {
     }
 
     /// Gewünschte Bewegung eines Schiffs nach seiner Rolle.
-    fn steer(&self, index: usize, lead: &Lead, carriers: &[u32]) -> Steering {
+    fn steer(
+        &self,
+        balance: &BattleBalance,
+        dt: f32,
+        index: usize,
+        lead: &Lead,
+        carriers: &[u32],
+    ) -> Steering {
         let ship = &self.ships[index];
         if ship.status == ShipStatus::Routing {
             // Weg vom Gegner und hinaus zum Rand des Feldes.
@@ -541,14 +621,14 @@ impl Battle {
                     return Steering {
                         velocity: V2::from_angle(ship.heading) * ship.max_speed,
                         heading: ship.heading,
-                        breakaway: Some(ship.breakaway - 0.1),
+                        breakaway: Some(ship.breakaway - dt),
                     };
                 }
                 let offset = target.pos - ship.pos;
                 let distance = offset.length();
                 let lead_time = (distance / ship.max_speed.max(1.0)).min(2.0) * 0.5;
                 let aim = target.pos + target.vel * lead_time;
-                let breakaway = (distance < target.radius + 45.0).then_some(2.2);
+                let breakaway = (distance < target.radius + 45.0).then_some(balance.breakaway_time);
                 Steering {
                     velocity: (aim - ship.pos).normalized() * ship.max_speed,
                     heading: offset.angle(),
@@ -561,18 +641,20 @@ impl Battle {
                 };
                 let offset = ship.pos - target.pos;
                 let distance = offset.length();
-                if !lead.engaged && distance > 1500.0 {
+                let flanking = &balance.flanking;
+                if !lead.engaged && distance > flanking.engage_distance {
                     return hold_slot(lead.facing);
                 }
                 // Flankieren: weit um das Ziel herum und von achtern angreifen.
                 let bow = V2::from_angle(target.heading);
-                let reach = ship.main_range * 0.55;
+                let reach = ship.main_range * flanking.reach;
                 let behind = offset.dot(bow) < -0.25 * distance;
                 let waypoint = if behind || distance < reach * 0.9 {
                     target.pos - bow * reach
                 } else {
                     let side = if bow.cross(offset) >= 0.0 { 1.0 } else { -1.0 };
-                    target.pos + bow.perp() * (side * ship.main_range * 0.9) - bow * (reach * 0.4)
+                    target.pos + bow.perp() * (side * ship.main_range * flanking.wide)
+                        - bow * (reach * 0.4)
                 };
                 let to_waypoint = waypoint - ship.pos;
                 let arrive = (to_waypoint.length() / 90.0).min(1.0);
@@ -588,10 +670,10 @@ impl Battle {
                 let Some(target) = target else {
                     return hold_slot(lead.facing);
                 };
-                if !matches!(target.class, ShipClass::Fighter | ShipClass::Corvette) {
+                if target.signature > balance.small_signature {
                     return hold_slot((target.pos - ship.pos).angle());
                 }
-                let leash = (target.pos - slot_position).clamped(320.0);
+                let leash = (target.pos - slot_position).clamped(balance.frigate_leash);
                 let goal = slot_position + leash * 0.8;
                 Steering {
                     velocity: (lead.anchor_vel + (goal - ship.pos) * 0.5).clamped(ship.max_speed),
@@ -621,6 +703,7 @@ impl Battle {
     /// Träger starten ihre Staffeln, einen Jäger nach dem anderen.
     fn launch_fighters(&mut self, data: &GameData, dt: f32) {
         let mut launches: Vec<(usize, u16)> = Vec::new();
+        let interval = data.balance.battle.launch_interval;
         for (index, ship) in self.ships.iter_mut().enumerate() {
             if ship.hangar == 0 || ship.status != ShipStatus::Active {
                 continue;
@@ -628,25 +711,13 @@ impl Battle {
             let Some(craft) = data.designs[ship.design as usize].stats.craft else {
                 continue;
             };
-            let design = &data.designs[ship.design as usize];
-            let bays = design
-                .modules
-                .iter()
-                .zip(&ship.modules)
-                .filter(|(slot, state)| {
-                    state.hp > 0.0
-                        && matches!(
-                            data.modules[slot.module_id as usize].kind,
-                            ModuleKind::Hangar { .. }
-                        )
-                })
-                .count();
+            let bays = launch_bays(data, ship);
             if bays == 0 {
                 continue;
             }
             ship.launch_timer -= dt * bays as f32;
             if ship.launch_timer <= 0.0 {
-                ship.launch_timer = 1.6;
+                ship.launch_timer = interval;
                 ship.hangar -= 1;
                 launches.push((index, craft));
             }
@@ -709,15 +780,15 @@ impl Battle {
                     continue;
                 }
                 let range = weapon.range * modifiers.range;
-                let Some(aim) = self.pick_aim(index, slot, weapon, range) else {
+                let Some(aim) = self.pick_aim(balance, index, slot, weapon, range) else {
                     continue;
                 };
                 let (origin, own_velocity, side) = {
                     let ship = &mut self.ships[index];
                     let health = ship.modules[slot_index].hp / module.hp;
                     let mut cooldown = weapon.cooldown * rng.range_f32(0.94, 1.06);
-                    if health < 0.5 {
-                        cooldown *= 1.5;
+                    if health < balance.damaged_weapon_below {
+                        cooldown *= balance.damaged_weapon_cooldown;
                     }
                     if weapon.kind == WeaponKind::Beam {
                         cooldown /= ship.power.max(0.3);
@@ -854,6 +925,7 @@ impl Battle {
     /// Punktverteidigung nimmt zuerst Lenkwaffen, dann Jäger und Korvetten.
     fn pick_aim(
         &self,
+        balance: &BattleBalance,
         index: usize,
         slot: &DesignModule,
         weapon: &WeaponDef,
@@ -869,9 +941,9 @@ impl Battle {
             if !other.status.in_play() || !self.is_hostile(ship.side, other.side) {
                 return false;
             }
-            // Lenkwaffen und träge Türme werden nicht an Jäger verschwendet.
-            let too_small = other.class == ShipClass::Fighter
-                && (weapon.kind == WeaponKind::Missile || weapon.tracking < 0.6);
+            // Lenkwaffen und träge Türme werden nicht an winzige Ziele (Jäger) verschwendet.
+            let too_small = other.signature < balance.tiny_signature
+                && (weapon.kind == WeaponKind::Missile || weapon.tracking < balance.slow_tracking);
             !too_small
         };
         let reachable = |other: &BattleShip| {
@@ -889,11 +961,11 @@ impl Battle {
                     return;
                 }
                 let distance = ship.pos.distance(shot.pos);
-                if distance <= range
-                    && in_arc(shot.pos)
-                    && best.is_none_or(|(_, nearest)| distance < nearest)
-                {
-                    best = Some((shot_index, distance));
+                if distance <= range && in_arc(shot.pos) {
+                    let score = distance * tie_break(self.seed, index, shot_index);
+                    if best.is_none_or(|(_, nearest)| score < nearest) {
+                        best = Some((shot_index, score));
+                    }
                 }
             });
             if let Some((shot_index, _)) = best {
@@ -903,18 +975,18 @@ impl Battle {
             self.grid
                 .for_each_near(ship.pos, range + 40.0, |other_index| {
                     let other = &self.ships[other_index as usize];
-                    if !matches!(other.class, ShipClass::Fighter | ShipClass::Corvette)
+                    if other.signature > balance.small_signature
                         || !eligible(other)
                         || !reachable(other)
                     {
                         return;
                     }
-                    let mut distance = ship.pos.distance(other.pos);
-                    if other.class == ShipClass::Corvette {
-                        distance *= 3.0;
-                    }
-                    if best.is_none_or(|(_, nearest)| distance < nearest) {
-                        best = Some((other_index, distance));
+                    // Das kleinste Ziel zuerst, unter gleich kleinen das nächste.
+                    let score = ship.pos.distance(other.pos)
+                        * (1.0 + balance.point_defense_size_bias * other.signature)
+                        * tie_break(self.seed, index, other_index);
+                    if best.is_none_or(|(_, nearest)| score < nearest) {
+                        best = Some((other_index, score));
                     }
                 });
             // Gegen größere Schiffe richtet die Nahbereichsabwehr nichts aus und schweigt.
@@ -934,22 +1006,22 @@ impl Battle {
                 if !eligible(other) || !reachable(other) {
                     return;
                 }
-                let distance = ship.pos.distance(other.pos);
-                if best.is_none_or(|(_, nearest)| distance < nearest) {
-                    best = Some((other_index, distance));
+                let score = ship.pos.distance(other.pos) * tie_break(self.seed, index, other_index);
+                if best.is_none_or(|(_, nearest)| score < nearest) {
+                    best = Some((other_index, score));
                 }
             });
         best.map(|(other_index, _)| Aim::Ship(other_index))
     }
 
     /// Geschosse fliegen; wer trifft, legt einen Treffer für das Ende des Takts ab.
-    fn advance_shots(&mut self, dt: f32) {
+    fn advance_shots(&mut self, balance: &BattleBalance, dt: f32) {
         for index in 0..self.shots.len() {
             if self.shots[index].ttl <= 0.0 || self.shots[index].hp <= 0.0 {
                 continue;
             }
             if self.shots[index].kind == WeaponKind::Missile {
-                self.guide_missile(index, dt);
+                self.guide_missile(balance, index, dt);
             }
             let (previous, position, side, is_missile) = {
                 let shot = &mut self.shots[index];
@@ -1007,7 +1079,7 @@ impl Battle {
     }
 
     /// Lenkwaffe nachführen; ist das Ziel verloren, sucht sie das nächste in ihrer Nähe.
-    fn guide_missile(&mut self, index: usize, dt: f32) {
+    fn guide_missile(&mut self, balance: &BattleBalance, index: usize, dt: f32) {
         let shot = &self.shots[index];
         let mut target = shot
             .target
@@ -1017,14 +1089,14 @@ impl Battle {
             self.grid.for_each_near(shot.pos, 420.0, |other_index| {
                 let other = &self.ships[other_index as usize];
                 if !other.status.in_play()
-                    || other.class == ShipClass::Fighter
+                    || other.signature < balance.tiny_signature
                     || !self.is_hostile(shot.side, other.side)
                 {
                     return;
                 }
-                let distance = shot.pos.distance(other.pos);
-                if best.is_none_or(|(_, nearest)| distance < nearest) {
-                    best = Some((other_index, distance));
+                let score = shot.pos.distance(other.pos) * tie_break(self.seed, index, other_index);
+                if best.is_none_or(|(_, nearest)| score < nearest) {
+                    best = Some((other_index, score));
                 }
             });
             target = best.map(|(other_index, _)| other_index);
@@ -1149,26 +1221,19 @@ impl Battle {
                 if state.hp <= 0.0 {
                     return 0.0;
                 }
+                let hits = &balance.module_hits;
                 match &data.modules[slot.module_id as usize].kind {
                     // Panzerplatten zählen über ihre Punkte, nicht als Modul.
                     ModuleKind::Armor { .. } => 0.0,
-                    ModuleKind::Engine { .. } => {
-                        if facing == Facing::Rear {
-                            3.0
-                        } else {
-                            0.6
-                        }
-                    }
-                    ModuleKind::Weapon(_) => {
-                        if facing == Facing::Front {
-                            1.6
-                        } else {
-                            1.0
-                        }
-                    }
-                    ModuleKind::Hangar { .. } => 1.0,
-                    ModuleKind::Reactor { .. } | ModuleKind::Shield { .. } => 0.8,
-                    ModuleKind::Magazine { .. } | ModuleKind::Tank { .. } => 0.6,
+                    ModuleKind::Engine { .. } if facing == Facing::Rear => hits.engine_rear,
+                    ModuleKind::Engine { .. } => hits.engine,
+                    ModuleKind::Weapon(_) if facing == Facing::Front => hits.weapon_front,
+                    ModuleKind::Weapon(_) => hits.weapon,
+                    ModuleKind::Hangar { .. } => hits.hangar,
+                    ModuleKind::Reactor { .. } => hits.reactor,
+                    ModuleKind::Shield { .. } => hits.shield,
+                    ModuleKind::Magazine { .. } => hits.magazine,
+                    ModuleKind::Tank { .. } => hits.tank,
                 }
             },
         ));
@@ -1215,10 +1280,10 @@ impl Battle {
                 ModuleKind::Magazine { .. } => {
                     // Das Magazin geht hoch: Munition weg, Schaden im Inneren.
                     ship.ammo = 0.0;
-                    ship.hull -= 0.1 * ship.hull_max;
+                    ship.hull -= balance.magazine_blast * ship.hull_max;
                     lost = ship.hull <= 0.0;
                 }
-                ModuleKind::Tank { .. } => ship.fuel *= 0.5,
+                ModuleKind::Tank { .. } => ship.fuel *= 1.0 - balance.tank_leak,
                 _ => {}
             }
         }
@@ -1282,9 +1347,9 @@ impl Battle {
         // Der Verlust erschüttert die Eigenen in der Nähe und ermutigt den Gegner, beides
         // vorübergehend.
         let weight = match class {
-            ShipClass::Fighter => 0.12,
-            _ if class.is_capital() => 2.0,
-            _ => 1.0,
+            ShipClass::Fighter => balance.loss_shock.fighter,
+            _ if class.is_capital() => balance.loss_shock.capital,
+            _ => balance.loss_shock.escort,
         };
         let mut nearby = std::mem::take(&mut self.scratch);
         nearby.clear();
@@ -1314,6 +1379,18 @@ impl Battle {
     /// oder lange genug flieht, ist entkommen. Jäger laden beim Träger nach.
     fn upkeep(&mut self, data: &GameData, dt: f32, carriers: &[u32]) {
         let balance = &data.balance.battle;
+        let point_defense = self.point_defense_counts(data);
+        // Wer nichts mehr ausrichten kann, flieht nur, solange ein Gegner noch kämpft: Weicht
+        // der Gegner, hält auch ein verschossener Verband das Feld.
+        let fighting: Vec<bool> = (0..self.combatants.len())
+            .map(|side| self.is_fighting(side))
+            .collect();
+        let opposed: Vec<bool> = (0..self.combatants.len())
+            .map(|side| {
+                (0..self.combatants.len())
+                    .any(|other| self.is_hostile(side as u16, other as u16) && fighting[other])
+            })
+            .collect();
         for index in 0..self.ships.len() {
             if !self.ships[index].status.in_play() {
                 continue;
@@ -1335,7 +1412,8 @@ impl Battle {
                     }
                 }
             }
-            let combatant = &self.combatants[self.ships[index].side as usize];
+            let side = self.ships[index].side as usize;
+            let combatant = &self.combatants[side];
             let (outlook, range_factor) = (combatant.outlook, combatant.modifiers.range);
             let ship = &mut self.ships[index];
             if ship.status != ShipStatus::Disabled && ship.shield < ship.shield_max {
@@ -1350,8 +1428,8 @@ impl Battle {
                     .clamp(0.0, 100.0);
             match ship.status {
                 ShipStatus::Active => {
-                    refresh_armed(data, ship, range_factor);
-                    if ship.morale < balance.morale_break || !ship.armed {
+                    refresh_armed(data, ship, range_factor, point_defense[side]);
+                    if ship.morale < balance.morale_break || (!ship.armed && opposed[side]) {
                         ship.status = ShipStatus::Routing;
                         ship.target = None;
                     }
@@ -1370,6 +1448,44 @@ impl Battle {
                 _ => {}
             }
         }
+    }
+
+    /// Je Partei: Hat ihre Punktverteidigung etwas zu tun? Nur, wenn ein Gegner kleine
+    /// Schiffe auf dem Feld hat, Jäger starten kann, Lenkwaffen führt oder welche im Flug
+    /// sind. Sonst zählt sie nicht als Bewaffnung: Ein Schiff, dem nur sie bleibt, flieht.
+    fn point_defense_counts(&self, data: &GameData) -> Vec<bool> {
+        let balance = &data.balance.battle;
+        let sides = self.combatants.len();
+        let mut threat = vec![false; sides];
+        for shot in &self.shots {
+            if shot.kind == WeaponKind::Missile && shot.hp > 0.0 && shot.ttl > 0.0 {
+                threat[shot.side as usize] = true;
+            }
+        }
+        for ship in &self.ships {
+            let side = ship.side as usize;
+            if threat[side] || !ship.status.in_play() {
+                continue;
+            }
+            threat[side] = (ship.signature <= balance.small_signature && ship.status.can_act())
+                || can_launch(data, ship)
+                || (ship.status.can_act()
+                    && data.designs[ship.design as usize]
+                        .modules
+                        .iter()
+                        .zip(&ship.modules)
+                        .any(|(slot, state)| {
+                            state.hp > 0.0
+                                && data.modules[slot.module_id as usize]
+                                    .weapon()
+                                    .is_some_and(|weapon| weapon.kind == WeaponKind::Missile)
+                        }));
+        }
+        (0..sides)
+            .map(|side| {
+                (0..sides).any(|other| self.is_hostile(side as u16, other as u16) && threat[other])
+            })
+            .collect()
     }
 
     /// Das Gefecht endet, wenn keine Partei mehr einen Gegner hat, der kämpft oder noch
@@ -1400,12 +1516,10 @@ impl Battle {
         self.finished = true;
         self.timed_out = conflict && timed_out;
         // Wer noch flieht, ist entkommen. Treibende Schiffe bleiben beim Sieger erhalten;
-        // die eines Verlierers gehen verloren.
-        let hostile_victor: Vec<bool> = (0..sides)
-            .map(|side| {
-                (0..sides)
-                    .any(|other| self.is_hostile(side as u16, other as u16) && fighting[other])
-            })
+        // die einer Seite, die nicht mehr kämpft, während ein Gegner es tut, gehen verloren,
+        // auch an der Zeitgrenze (dieselbe Regel wie in `results`).
+        let lost_adrift: Vec<bool> = (0..sides)
+            .map(|side| self.adrift_lost(&fighting, side))
             .collect();
         let mut abandoned: Vec<usize> = Vec::new();
         for (index, ship) in self.ships.iter_mut().enumerate() {
@@ -1415,17 +1529,15 @@ impl Battle {
                     ship.status = ShipStatus::Escaped;
                     self.combatants[side].escaped[ship.class.index()] += 1;
                 }
-                ShipStatus::Disabled
-                    if hostile_victor[side] && !fighting[side] && !self.timed_out =>
-                {
-                    abandoned.push(index)
-                }
+                ShipStatus::Disabled if lost_adrift[side] => abandoned.push(index),
                 _ => {}
             }
         }
         for index in abandoned {
             self.destroy(data, index, false);
         }
+        // Bordjäger ohne Platz in einem überlebenden Träger gehen verloren.
+        self.settle_fighters(data);
         self.shots.clear();
     }
 }
@@ -1465,7 +1577,7 @@ fn hit_chance(
     let follow = weapon.tracking / (rate + 0.03);
     let tracking = follow / (1.0 + follow);
     let exponent = if weapon.kind == WeaponKind::PointDefense {
-        0.2
+        balance.point_defense_signature_weight
     } else {
         balance.beam_signature_weight
     };

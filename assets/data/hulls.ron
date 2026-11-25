@@ -44,7 +44,7 @@
     ),
     (
         key: "traeger", name: "Träger", class: Carrier,
-        hull: 820.0, radius: 36.0, signature: 2.0, speed: 28.0, accel: 8.0, turn: 0.25,
+        hull: 820.0, radius: 36.0, signature: 2.0, speed: 32.0, accel: 8.0, turn: 0.25,
         armor_split: (0.34, 0.25, 0.16), segments: 30.0, build_days: 400, slots: 18,
         ammo: 80.0, fuel: 260.0,
         targets: (fighter: 0.8, corvette: 0.8, frigate: 0.5, cruiser: 0.4, battleship: 0.3, carrier: 0.3),

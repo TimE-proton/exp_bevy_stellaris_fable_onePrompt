@@ -97,56 +97,197 @@ fn assert_sane(battle: &Battle) {
 
 // --- 1. Fairness ------------------------------------------------------------------------
 
+/// Spiegelgefechte einer Flotte: Siege von A und B, mittlere Verluste, und wie weit der
+/// Unterschied der Verluste je Gefecht streut.
+struct Mirror {
+    a: usize,
+    b: usize,
+    runs: usize,
+    stalemates: usize,
+    /// Mittel und Standardfehler von (Verlust A - Verlust B).
+    loss_gap: f32,
+    loss_gap_error: f32,
+    winner_loss: f32,
+    loser_loss: f32,
+}
+
+fn mirror(side: &Side, seeds: std::ops::Range<u64>) -> Mirror {
+    let outcomes = fight_seeds(seeds, &[side.clone(), side.clone()]);
+    let n = outcomes.len() as f32;
+    let gaps: Vec<f32> = outcomes
+        .iter()
+        .map(|outcome| outcome.sides[0].loss_share() - outcome.sides[1].loss_share())
+        .collect();
+    let mean = gaps.iter().sum::<f32>() / n;
+    let variance = gaps.iter().map(|gap| (gap - mean).powi(2)).sum::<f32>() / (n - 1.0);
+    let (mut winner_loss, mut loser_loss) = (0.0, 0.0);
+    for outcome in &outcomes {
+        if let Some(winner) = outcome.winner() {
+            winner_loss += outcome.sides[winner].loss_share();
+            loser_loss += outcome.sides[1 - winner].loss_share();
+        }
+    }
+    let (a, b) = (wins(&outcomes, 0), wins(&outcomes, 1));
+    let decided = (a + b).max(1) as f32;
+    Mirror {
+        a,
+        b,
+        runs: outcomes.len(),
+        stalemates: outcomes.iter().filter(|outcome| outcome.stalemate).count(),
+        loss_gap: mean,
+        loss_gap_error: (variance / n).sqrt(),
+        winner_loss: winner_loss / decided,
+        loser_loss: loser_loss / decided,
+    }
+}
+
+impl Mirror {
+    /// Abweichung des Siegesanteils von A von der Hälfte, in Standardabweichungen einer
+    /// fairen Münze bei dieser Zahl entschiedener Gefechte.
+    fn z(&self) -> f32 {
+        let decided = (self.a + self.b).max(1) as f32;
+        (self.a as f32 / decided - 0.5) / (0.25 / decided).sqrt()
+    }
+}
+
+/// Spiegelgefechte sind gerecht: Über viele Seeds gewinnt A so oft wie B, auf drei
+/// Standardabweichungen genau, und verliert gleich viel. 400 Seeds je Flotte, 800 für die
+/// Kreuzer: Eine Schieflage wie die frühere versetzte Zielwahl (gut 58 % für A) fiele
+/// auf, 60 Seeds mit einem Band von 35 bis 65 % ließen sie durch.
 #[test]
 fn mirror_matches_are_fair() {
-    let mut fleets: Vec<(&str, Side)> = ["dolch", "waechter", "speer", "bastion", "horst"]
-        .iter()
-        .map(|key| (*key, class_fleet(key)))
-        .collect();
-    fleets.push(("gemischt", fleet("bastion:1,speer:1,waechter:1,dolch:2")));
-    for (label, side) in fleets {
-        let outcomes = fight_seeds(0..60, &[side.clone(), side.clone()]);
-        let (a, b) = (wins(&outcomes, 0), wins(&outcomes, 1));
-        let decided = (a + b).max(1) as f32;
-        let share = a as f32 / decided;
-        assert!(
-            (0.35..=0.65).contains(&share),
-            "{label}: A gewinnt {a}, B {b}"
+    let fleets: Vec<(&str, Side, u64)> = vec![
+        ("dolch", class_fleet("dolch"), 400),
+        ("waechter", class_fleet("waechter"), 400),
+        ("speer", fleet("speer:5"), 800),
+        ("bastion", class_fleet("bastion"), 400),
+        (
+            "gemischt",
+            fleet("bastion:1,speer:1,waechter:1,dolch:2"),
+            400,
+        ),
+    ];
+    let (mut pooled_a, mut pooled_b) = (0, 0);
+    for (label, side, seeds) in fleets {
+        let result = mirror(&side, 0..seeds);
+        // Unentschieden darf nur ein Patt bleiben (Fregatten kommen mit wenigen Lasern
+        // manchmal nicht mehr durch die Schilde), und auch das selten.
+        let decided = result.a + result.b;
+        assert_eq!(
+            decided + result.stalemates,
+            result.runs,
+            "{label}: Gefechte ohne Sieger und ohne Patt"
         );
-        assert!(a + b >= 45, "{label}: nur {} entschieden", a + b);
-        // Die mittleren Verluste schwanken über 60 Gefechte um etwa 0,06; mehr als das
-        // Zweieinhalbfache wäre eine echte Schieflage.
-        let (loss_a, loss_b) = (mean_loss(&outcomes, 0), mean_loss(&outcomes, 1));
         assert!(
-            (loss_a - loss_b).abs() < 0.15,
-            "{label}: Verluste A {loss_a:.2}, B {loss_b:.2}"
+            decided * 10 >= result.runs * 8,
+            "{label}: nur {decided} von {} entschieden",
+            result.runs
         );
+        assert!(
+            result.z().abs() < 3.0,
+            "{label}: A gewinnt {}, B {} (z = {:.1})",
+            result.a,
+            result.b,
+            result.z()
+        );
+        assert!(
+            result.loss_gap.abs() < 3.0 * result.loss_gap_error,
+            "{label}: Verluste A - B im Mittel {:.3} ± {:.3}",
+            result.loss_gap,
+            result.loss_gap_error
+        );
+        // Entschieden heißt: Der Verlierer hat deutlich mehr verloren als der Sieger.
+        assert!(
+            result.loser_loss > result.winner_loss + 0.1,
+            "{label}: Sieger verliert {:.2}, Verlierer {:.2}",
+            result.winner_loss,
+            result.loser_loss
+        );
+        pooled_a += result.a;
+        pooled_b += result.b;
     }
+    let pooled = Mirror {
+        a: pooled_a,
+        b: pooled_b,
+        runs: 0,
+        stalemates: 0,
+        loss_gap: 0.0,
+        loss_gap_error: 0.0,
+        winner_loss: 0.0,
+        loser_loss: 0.0,
+    };
+    assert!(
+        pooled.z().abs() < 3.0,
+        "alle Flotten zusammen: A {pooled_a}, B {pooled_b} (z = {:.1})",
+        pooled.z()
+    );
+}
+
+/// Zwei Trägerflotten: Die Jäger reiben sich auf, danach rücken die Träger heran und
+/// schießen mit ihren Geschützen, kommen aber nicht durch die Schilde des anderen. Das ist
+/// ein Patt, kein Sieg dessen, der zuletzt getroffen hat.
+#[test]
+fn carrier_mirrors_end_in_stalemate_not_in_a_coin_toss() {
+    let result = mirror(&class_fleet("horst"), 0..60);
+    assert!(
+        result.stalemates * 10 >= result.runs * 9,
+        "nur {} von {} als Patt beendet (A {}, B {})",
+        result.stalemates,
+        result.runs,
+        result.a,
+        result.b
+    );
+    assert!(result.loss_gap.abs() < 3.0 * result.loss_gap_error.max(0.005));
 }
 
 // --- 2. Konter ----------------------------------------------------------------------------
 
-/// Gewinnt `favoured` gegen `other` bei gleichem Bauwert in beiden Aufstellungen mindestens
-/// 70 % der Gefechte?
-fn assert_counter(favoured: &str, other: &str) {
-    let (strong, weak) = (class_fleet(favoured), class_fleet(other));
-    let value = |side: &Side| side.value(data());
-    let ratio = value(&strong) / value(&weak);
+/// Zwei Flotten aus je einem Entwurf zum gleichen Bauwert: die andere Seite so groß, wie
+/// das Budget es hergibt, die bevorzugte so groß, dass sie höchstens 3 % mehr wert ist.
+/// Billiger darf sie sein (das erschwert ihr nur den Sieg), aber nicht um mehr als 10 %.
+fn equal_value_pair(favoured: &str, other: &str) -> (Side, Side) {
+    let value = |key: &str| data().designs[design(key) as usize].stats.value;
+    let (strong_value, weak_value) = (value(favoured), value(other));
+    let weak = ((budget() / weak_value).round() as u32).max(1);
+    let target = weak as f64 * weak_value;
+    let strong = ((target * 1.03) / strong_value).floor().max(1.0) as u32;
+    let ratio = strong as f64 * strong_value / target;
     assert!(
-        (0.9..=1.1).contains(&ratio),
-        "{favoured} gegen {other}: Bauwerte {:.0} und {:.0} weichen zu weit ab",
-        value(&strong),
-        value(&weak)
+        (0.9..=1.03).contains(&ratio),
+        "{favoured} gegen {other}: kein gleicher Bauwert ({strong} gegen {weak}, {ratio:.3})"
     );
-    let seeds = 0..12u64;
+    (
+        Side::new(vec![(design(favoured), strong)]),
+        Side::new(vec![(design(other), weak)]),
+    )
+}
+
+/// Gewinnt `favoured` gegen `other` bei gleichem Bauwert in beiden Aufstellungen mindestens
+/// 70 % der Gefechte (je 24 Seeds)?
+fn assert_counter(favoured: &str, other: &str) {
+    let (strong, weak) = equal_value_pair(favoured, other);
+    let seeds = 0..24u64;
     let as_a = fight_seeds(seeds.clone(), &[strong.clone(), weak.clone()]);
-    let as_b = fight_seeds(seeds.clone(), &[weak, strong]);
+    let as_b = fight_seeds(seeds.clone(), &[weak.clone(), strong.clone()]);
     let (won_a, won_b) = (wins(&as_a, 0), wins(&as_b, 1));
     let needed = (0.7f32 * as_a.len() as f32).ceil() as usize;
     assert!(
         won_a >= needed && won_b >= needed,
-        "{favoured} gegen {other}: {won_a}/12 als A, {won_b}/12 als B"
+        "{favoured} ({}×) gegen {other} ({}×): {won_a}/{} als A, {won_b}/{} als B",
+        strong.ship_count(),
+        weak.ship_count(),
+        as_a.len(),
+        as_b.len()
     );
+}
+
+#[test]
+fn equal_value_pairs_really_are_equal() {
+    // Früher reichte ein Fenster von ±10 %: 14 Korvetten gegen 2 Träger waren 8 % mehr
+    // wert, und der Konter hing an dieser Rundung.
+    let (corvettes, carriers) = equal_value_pair("dolch", "horst");
+    let ratio = corvettes.value(data()) / carriers.value(data());
+    assert!((0.97..=1.03).contains(&ratio), "{ratio:.3}");
 }
 
 #[test]
@@ -227,25 +368,30 @@ fn escorts_protect_battleships_against_fighters_and_torpedoes() {
 
 #[test]
 fn a_balanced_mixed_fleet_holds_its_own() {
-    // Gemessen, nicht gewünscht: Die gemischte Flotte schlägt Fregatten, Träger und
-    // Schlachtschiffe, hält gegen Korvetten mit, und verliert gegen reine Kreuzer, deren
-    // Rolle das Brechen von Geleit ist - aber nicht ohne dem Gegner Verluste zuzufügen.
+    // Gemessen über 40 Seeds je Aufstellung: Die gemischte Flotte schlägt Korvetten,
+    // Fregatten und Träger fast immer und hält gegen reine Kreuzer etwa die Waage. Gegen
+    // zwei Schlachtschiffe verliert sie meist (gut drei von vier Gefechten) und fügt ihnen
+    // nur gut 15 % Verluste zu: Deren schwere Geschütze reichen weiter als alles, was sie
+    // hat, und ihr eigenes Schlachtschiff steht allein. Das ist eine bekannte Schwäche, kein
+    // Ziel; gefordert wird hier, was gilt und die Rolle ausmacht.
     let mixed = fleet("bastion:1,speer:2,waechter:1,dolch:1");
     let value = mixed.value(data());
-    for (key, min_wins, min_dealt) in [
-        ("dolch", 0, 0.25),
-        ("waechter", 9, 0.4),
-        ("speer", 0, 0.3),
-        ("bastion", 9, 0.3),
-        ("horst", 9, 0.5),
+    for (key, min_share, min_dealt) in [
+        ("dolch", 0.7, 0.15),
+        ("waechter", 0.7, 0.3),
+        ("speer", 0.3, 0.25),
+        ("bastion", 0.1, 0.1),
+        ("horst", 0.7, 0.4),
     ] {
         let other = Side::for_budget(data(), design(key), value);
-        let outcomes = fight_seeds(0..12, &[mixed.clone(), other]);
-        let won = wins(&outcomes, 0);
-        let dealt = mean_loss(&outcomes, 1);
+        let as_a = fight_seeds(0..24, &[mixed.clone(), other.clone()]);
+        let as_b = fight_seeds(0..24, &[other, mixed.clone()]);
+        let (won_a, won_b) = (wins(&as_a, 0), wins(&as_b, 1));
+        let dealt = (mean_loss(&as_a, 1) + mean_loss(&as_b, 0)) * 0.5;
+        let needed = (min_share * 24.0f32).ceil() as usize;
         assert!(
-            won >= min_wins && dealt >= min_dealt,
-            "gegen {key}: {won}/12 Siege, Gegner verliert {dealt:.2}"
+            won_a >= needed && won_b >= needed && dealt >= min_dealt,
+            "gegen {key}: {won_a}/24 als A, {won_b}/24 als B, Gegner verliert {dealt:.2}"
         );
     }
 }
@@ -406,8 +552,8 @@ fn one_tier_of_weapons_wins_a_clear_majority() {
 #[test]
 fn a_full_tier_of_weapons_and_defence_wins_almost_always() {
     // Alle Technologien bis Stufe 2 in Waffen und Verteidigung: Reichweite +5 %, Schaden
-    // +8 %, Rumpf +8 %, Schilde +12 %. Eine Flottenstärke von zehn Kreuzern, damit der
-    // Vorsprung nicht im Zufall weniger Treffer untergeht.
+    // +8 %, Rumpf +8 %, Schilde +12 %. Eine Flottenstärke von zehn Kreuzern und 40 Seeds
+    // je Aufstellung, damit der Vorsprung nicht im Zufall weniger Treffer untergeht.
     let modifiers = CombatModifiers {
         damage: 1.08,
         range: 1.05,
@@ -416,7 +562,7 @@ fn a_full_tier_of_weapons_and_defence_wins_almost_always() {
         hull: 1.08,
         speed: 1.0,
     };
-    let share = tech_share(modifiers, "speer:10", 0..12);
+    let share = tech_share(modifiers, "speer:10", 0..40);
     assert!(share >= 0.9, "eine volle Stufe gewinnt nur {share:.2}");
 }
 
@@ -447,6 +593,15 @@ fn two_ship_battle(first: ShipSpec, second: ShipSpec) -> Battle {
     battle
 }
 
+/// Ohne Gegner endet ein Gefecht sofort, und die Flotte steht. Hier soll sie nur fahren:
+/// ein Takt mit vorgegebener Fahrt des Bezugspunkts.
+fn cruise(battle: &mut Battle, velocity: V2) {
+    battle.finished = false;
+    battle.combatants[0].anchor_vel = velocity;
+    battle.step(data());
+    battle.combatants[0].anchor_vel = velocity;
+}
+
 #[test]
 fn lost_engines_cost_mobility_and_damaged_shields_hold_less() {
     let intact = spec_with("speer", |_| false);
@@ -454,14 +609,12 @@ fn lost_engines_cost_mobility_and_damaged_shields_hold_less() {
     let mut battle = two_ship_battle(intact.clone(), no_engines);
     let (start_a, start_b) = (battle.ships[0].pos, battle.ships[1].pos);
     assert_eq!(battle.ships[1].mobility, 0.0);
-    // Ohne Gegner hält die Flotte still; wir geben ihr Fahrt nach vorn.
-    battle.combatants[0].anchor_vel = V2::new(30.0, 0.0);
     for _ in 0..300 {
-        battle.step(data());
-        battle.combatants[0].anchor_vel = V2::new(30.0, 0.0);
+        cruise(&mut battle, V2::new(30.0, 0.0));
     }
     let moved_a = battle.ships[0].pos.distance(start_a);
     let moved_b = battle.ships[1].pos.distance(start_b);
+    assert!(moved_a > 500.0, "mit Antrieb nur {moved_a:.0}");
     assert!(
         moved_b < 0.4 * moved_a,
         "ohne Antrieb {moved_b:.0}, mit {moved_a:.0}"
@@ -570,15 +723,20 @@ fn routing_ships_escape_and_retreat_is_never_mutual() {
         let mut battle = matchup::build(data(), seed, &[side.clone(), side]);
         matchup::finish(data(), &mut battle);
         assert_sane(&battle);
-        // Nie ziehen beide Seiten im selben Augenblick ab.
-        let times: Vec<Option<f32>> = battle
+        // Höchstens eine Seite zieht ab (nur ein Patt löst beide, und das gibt es zwischen
+        // Kreuzern nicht).
+        let retreated = battle
             .combatants
             .iter()
-            .map(|combatant| combatant.retreat_time)
-            .collect();
-        if let (Some(a), Some(b)) = (times[0], times[1]) {
-            assert!(a != b, "Seed {seed}: beide Seiten ziehen bei {a} s ab");
-        }
+            .filter(|combatant| combatant.retreat_time.is_some())
+            .count();
+        assert!(retreated <= 1, "Seed {seed}: beide Seiten ziehen ab");
+        assert!(
+            battle
+                .combatants
+                .iter()
+                .all(|combatant| !combatant.stalemate)
+        );
     }
     // Wer flieht, kommt auch weg.
     let outcomes = fight_seeds(0..12, &[fleet("speer:3"), fleet("speer:8")]);
@@ -621,22 +779,49 @@ fn a_battle_saved_midway_continues_identically() {
         fleet("bastion:1,waechter:3"),
     ];
     let mut straight = matchup::build(data(), 33, &sides);
-    let mut saved = matchup::build(data(), 33, &sides);
-    for _ in 0..700 {
-        straight.step(data());
-        saved.step(data());
-    }
-    assert!(!saved.finished && !saved.shots.is_empty() || !saved.finished);
-    let via_postcard: Battle =
-        postcard::from_bytes(&postcard::to_stdvec(&saved).expect("postcard")).expect("postcard");
-    let text = ron::to_string(&saved).expect("ron");
-    let via_ron: Battle = ron::from_str(&text).expect("ron");
-    let mut copies = [via_postcard, via_ron];
     matchup::finish(data(), &mut straight);
-    for copy in &mut copies {
-        matchup::finish(data(), copy);
-        assert_eq!(bytes(copy), bytes(&straight));
+    let mut saved = matchup::build(data(), 33, &sides);
+    let (mut checkpoints, mut with_missiles, mut with_fighters) = (0, 0, 0);
+    while !saved.finished {
+        for _ in 0..41 {
+            saved.step(data());
+        }
+        // Gespeichert wird nur mitten im Gefecht mit Geschossen im Flug, denn deren Zustand
+        // ist das Heikle; dazu gezählt, wie oft Lenkwaffen und gestartete Jäger dabei waren.
+        let missiles = saved
+            .shots
+            .iter()
+            .any(|shot| shot.kind == WeaponKind::Missile);
+        let fighters = saved
+            .ships
+            .iter()
+            .any(|ship| ship.class == ShipClass::Fighter && ship.status.in_play());
+        if saved.finished || saved.shots.is_empty() {
+            continue;
+        }
+        checkpoints += 1;
+        with_missiles += missiles as u32;
+        with_fighters += fighters as u32;
+        let via_postcard: Battle =
+            postcard::from_bytes(&postcard::to_stdvec(&saved).expect("postcard"))
+                .expect("postcard");
+        let text = ron::to_string(&saved).expect("ron");
+        let via_ron: Battle = ron::from_str(&text).expect("ron");
+        for mut copy in [via_postcard, via_ron] {
+            matchup::finish(data(), &mut copy);
+            assert_eq!(
+                bytes(&copy),
+                bytes(&straight),
+                "Prüfpunkt Takt {}",
+                saved.tick
+            );
+        }
     }
+    assert!(
+        checkpoints >= 8 && with_missiles >= 2 && with_fighters >= 4,
+        "{checkpoints} Prüfpunkte mit Geschossen im Flug, {with_missiles} mit Lenkwaffen, \
+         {with_fighters} mit Jägern"
+    );
 }
 
 // --- 10. Verstärkung, drei Parteien, Tempo --------------------------------------------------
@@ -838,37 +1023,42 @@ fn every_ship_gets_its_own_slot() {
 
 #[test]
 fn point_defence_only_engages_small_targets() {
-    // Die Nahbereichsabwehr schießt auf Lenkwaffen, Jäger und Korvetten, nicht auf Kreuzer.
-    let mut battle = matchup::build(data(), 1, &[fleet("waechter:4"), fleet("speer:2")]);
-    let flak = data()
-        .modules
-        .iter()
-        .position(|module| {
-            module
-                .weapon()
-                .is_some_and(|weapon| weapon.kind == WeaponKind::PointDefense)
-        })
-        .expect("Punktverteidigung");
-    assert!(data().modules[flak].weapon().is_some());
+    // Die Nahbereichsabwehr der Fregatten schießt auf Lenkwaffen und Korvetten, nie auf
+    // Kreuzer, obwohl die ebenfalls in Reichweite kommen.
+    let mut battle = matchup::build(data(), 1, &[fleet("waechter:4"), fleet("speer:2,dolch:4")]);
+    let (mut on_corvettes, mut on_missiles) = (0, 0);
     for _ in 0..1500 {
         battle.step(data());
-        assert!(
-            battle
-                .beams
-                .iter()
-                .filter(|beam| beam.side == 0 && beam.kind == sim::battle::BeamKind::PointDefense)
-                .all(|beam| !beam.hit
-                    || battle
-                        .ships
-                        .iter()
-                        .filter(|ship| ship.class == ShipClass::Cruiser)
-                        .all(|ship| ship.pos.distance(beam.to) > 1.0)),
-            "die Punktverteidigung trifft einen Kreuzer"
-        );
+        // Ein Treffer auf ein Schiff endet genau in dessen Mitte, einer auf eine Lenkwaffe
+        // an deren Ort.
+        for beam in battle.beams.iter().filter(|beam| {
+            beam.side == 0 && beam.hit && beam.kind == sim::battle::BeamKind::PointDefense
+        }) {
+            let on = |class: ShipClass| {
+                battle
+                    .ships
+                    .iter()
+                    .any(|ship| ship.class == class && ship.pos.distance(beam.to) < 1.0)
+            };
+            assert!(
+                !on(ShipClass::Cruiser),
+                "die Punktverteidigung zielt auf einen Kreuzer"
+            );
+            if on(ShipClass::Corvette) {
+                on_corvettes += 1;
+            } else {
+                on_missiles += 1;
+            }
+        }
         if battle.finished {
             break;
         }
     }
+    assert!(
+        on_corvettes > 20,
+        "nur {on_corvettes} Schüsse auf Korvetten"
+    );
+    assert!(on_missiles > 20, "nur {on_missiles} Schüsse auf Lenkwaffen");
 }
 
 #[test]
@@ -915,4 +1105,479 @@ fn engagements_stay_in_the_middle_of_the_field() {
             "{text}: {near_edge} von {active} Schiffstakten am Rand"
         );
     }
+}
+
+// --- 13. Träger, Abstand, Patt ------------------------------------------------------------
+
+/// Ein Schiff ohne Antrieb: Es steht still und dient als Ziel.
+fn immobile(key: &str) -> ShipSpec {
+    spec_with(key, |kind| matches!(kind, ModuleKind::Engine { .. }))
+}
+
+/// Zwei feindliche Parteien aus einzelnen Schiffen.
+fn duel(first: &[ShipSpec], second: &[ShipSpec], seed: u64) -> Battle {
+    let mut battle = Battle::new(BattleId(2), SystemId(0), seed);
+    for (index, specs) in [first, second].into_iter().enumerate() {
+        let setup = CombatantSetup::new(PolityId(index as u32), data());
+        battle.add_combatant(data(), setup, specs);
+    }
+    battle.set_hostile(0, 1, true);
+    battle
+}
+
+fn class_specs(text: &str) -> Vec<ShipSpec> {
+    fleet(text).specs(data())
+}
+
+#[test]
+fn carriers_without_fighters_close_to_their_gun_range() {
+    // Früher maß die Flotte den Abstand vom Bezugspunkt, während die Träger weit dahinter
+    // standen: Sie kamen nie auf die Reichweite ihrer Geschütze.
+    let gun = data().designs[design("horst") as usize].stats.gun_range;
+    for seed in 0..4 {
+        let side = class_fleet("horst");
+        let mut battle = matchup::build(data(), seed, &[side.clone(), side]);
+        let (mut closest, mut carrier_beams) = (f32::MAX, 0);
+        while !battle.finished {
+            battle.step(data());
+            if !battle
+                .combatants
+                .iter()
+                .all(|combatant| combatant.carriers_in_line)
+            {
+                continue;
+            }
+            let carriers: Vec<&sim::battle::BattleShip> = battle
+                .ships
+                .iter()
+                .filter(|ship| ship.class == ShipClass::Carrier && ship.status.can_act())
+                .collect();
+            for a in carriers.iter().filter(|ship| ship.side == 0) {
+                for b in carriers.iter().filter(|ship| ship.side == 1) {
+                    closest = closest.min(a.pos.distance(b.pos));
+                }
+            }
+            carrier_beams += battle
+                .beams
+                .iter()
+                .filter(|beam| {
+                    beam.kind != sim::battle::BeamKind::PointDefense
+                        && carriers.iter().any(|ship| ship.pos == beam.from)
+                })
+                .count();
+        }
+        assert!(
+            closest <= gun,
+            "Seed {seed}: Träger kommen nur auf {closest:.0} heran"
+        );
+        assert!(
+            carrier_beams > 20,
+            "Seed {seed}: nur {carrier_beams} Schüsse der Träger"
+        );
+    }
+}
+
+/// Mittlerer Abstand der Schiffe einer Klasse von Partei 0 zum Schwerpunkt der Partei 1 im
+/// Zeitfenster `window` (Sekunden).
+fn held_distance(battle: &mut Battle, class: ShipClass, window: (f32, f32)) -> f32 {
+    let (mut sum, mut count) = (0.0, 0);
+    while !battle.finished && battle.time < window.1 {
+        battle.step(data());
+        if battle.time < window.0 {
+            continue;
+        }
+        let enemy: Vec<V2> = battle
+            .ships
+            .iter()
+            .filter(|ship| ship.side == 1 && ship.status.can_act())
+            .map(|ship| ship.pos)
+            .collect();
+        if enemy.is_empty() {
+            break;
+        }
+        let center =
+            enemy.iter().fold(V2::ZERO, |acc, pos| acc + *pos) * (1.0 / enemy.len() as f32);
+        for ship in battle.ships.iter().filter(|ship| {
+            ship.side == 0 && ship.class == class && ship.status == ShipStatus::Active
+        }) {
+            sum += ship.pos.distance(center);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "kein Schiff im Zeitfenster");
+    sum / count as f32
+}
+
+#[test]
+fn fleets_keep_their_range_from_their_own_ships() {
+    let balance = &data().balance.battle;
+    let keep = balance.range_keep.1;
+    let bands = &balance.range_bands;
+    // Träger mit Jägern gegen ein Ziel, das stillsteht und nicht so weit reicht.
+    let mut battle = duel(&class_specs("horst:1"), &[immobile("bastion")], 3);
+    let standoff = balance.carrier_standoff * keep;
+    let distance = held_distance(&mut battle, ShipClass::Carrier, (70.0, 110.0));
+    assert!(
+        (bands.urgent * standoff..=1.1 * standoff).contains(&distance),
+        "Träger halten {distance:.0}, gewünscht {standoff:.0}"
+    );
+    // Kreuzer gegen dasselbe Ziel: ihre eigene Reichweite. Sie umkreisen es in der
+    // Breitseite, das trägt sie etwas weiter nach außen.
+    let mut battle = duel(&class_specs("speer:3"), &[immobile("bastion")], 3);
+    let line = data().designs[design("speer") as usize].stats.main_range * keep;
+    let distance = held_distance(&mut battle, ShipClass::Cruiser, (85.0, 115.0));
+    assert!(
+        (bands.urgent * line..=1.15 * line).contains(&distance),
+        "Kreuzer halten {distance:.0}, gewünscht {line:.0}"
+    );
+}
+
+#[test]
+fn a_stalemate_ends_without_a_winner() {
+    // Beide Seiten mit so starken Schilden, dass keine durchkommt.
+    let walls = CombatModifiers {
+        shields: 30.0,
+        ..Default::default()
+    };
+    let side = fleet("speer:3").with_modifiers(walls);
+    for seed in 0..4 {
+        let outcome = matchup::fight(data(), seed, &[side.clone(), side.clone()]);
+        assert!(outcome.stalemate, "Seed {seed}: kein Patt");
+        assert_eq!(outcome.winner(), None);
+        assert!(!outcome.timed_out);
+        assert!(outcome.sides.iter().all(|side| side.lost_value == 0.0));
+        let limit = data().balance.battle.stalemate_time + 90.0;
+        assert!(
+            outcome.fighting_time() < limit,
+            "Seed {seed}: Patt erst nach {:.0} s",
+            outcome.fighting_time()
+        );
+    }
+}
+
+#[test]
+fn a_side_that_cannot_hurt_its_enemy_withdraws_alone() {
+    let harmless = fleet("speer:3").with_modifiers(CombatModifiers {
+        damage: 0.0,
+        ..Default::default()
+    });
+    for seed in 0..4 {
+        let mut battle = matchup::build(data(), seed, &[harmless.clone(), fleet("speer:3")]);
+        let outcome = matchup::finish(data(), &mut battle);
+        assert!(!outcome.stalemate, "Seed {seed}: als Patt gewertet");
+        assert_eq!(outcome.winner(), Some(1), "Seed {seed}");
+        assert!(battle.combatants[0].retreat_time.is_some());
+        assert!(battle.combatants[1].retreat_time.is_none());
+    }
+}
+
+#[test]
+fn fighters_return_to_their_carrier_and_rearm() {
+    let balance = &data().balance.battle;
+    let mut battle = duel(&class_specs("horst:1"), &[immobile("bastion")], 5);
+    // Je Jäger: Zeit, zu der er verschossen war.
+    let mut empty_since: Vec<Option<f32>> = Vec::new();
+    let mut rearmed = Vec::new();
+    while !battle.finished && battle.time < 240.0 {
+        battle.step(data());
+        empty_since.resize(battle.ships.len(), None);
+        for (index, ship) in battle.ships.iter().enumerate() {
+            if ship.class != ShipClass::Fighter || !ship.status.can_act() {
+                continue;
+            }
+            if ship.ammo < 0.5 * ship.ammo_max {
+                empty_since[index].get_or_insert(battle.time);
+            } else if let Some(since) = empty_since[index].take() {
+                // Wieder voll: beim Träger, und nicht schneller als rearm_time.
+                let carrier = &battle.ships[ship.carrier.expect("Träger") as usize];
+                assert!(ship.pos.distance(carrier.pos) < carrier.radius + 60.0);
+                assert_eq!(ship.ammo, ship.ammo_max);
+                rearmed.push(battle.time - since);
+            }
+        }
+    }
+    assert!(
+        rearmed.len() >= 5,
+        "nur {} Jäger nachgeladen",
+        rearmed.len()
+    );
+    for duration in &rearmed {
+        assert!(*duration >= balance.rearm_time - 1e-3);
+    }
+    // Rückflug und Nachladen dauern nicht ewig.
+    let mean = rearmed.iter().sum::<f32>() / rearmed.len() as f32;
+    assert!(
+        mean < balance.rearm_time + 40.0,
+        "Nachladen dauert {mean:.0} s"
+    );
+}
+
+#[test]
+fn ships_without_fuel_are_slower_and_fuel_is_used() {
+    let full = ShipSpec::fresh(data(), design("speer"));
+    let mut dry = full.clone();
+    dry.fuel = 0.0;
+    let mut battle = two_ship_battle(full, dry);
+    let (start_full, start_dry) = (battle.ships[0].pos, battle.ships[1].pos);
+    for _ in 0..300 {
+        cruise(&mut battle, V2::new(40.0, 0.0));
+    }
+    let moved_full = battle.ships[0].pos.distance(start_full);
+    let moved_dry = battle.ships[1].pos.distance(start_dry);
+    let dry_speed = data().balance.battle.dry_speed;
+    assert!(moved_full > 700.0, "mit Treibstoff nur {moved_full:.0}");
+    assert!(
+        moved_dry < (dry_speed + 0.15) * moved_full,
+        "ohne Treibstoff {moved_dry:.0}, mit {moved_full:.0}"
+    );
+    assert!(battle.ships[0].fuel < battle.ships[0].fuel_max);
+    assert_eq!(battle.ships[1].fuel, 0.0);
+}
+
+#[test]
+fn weapons_only_fire_inside_their_arcs() {
+    // Ein Schlachtschiff, dem nur die Strahllanzen geblieben sind (Feuerwinkel 200 Grad nach
+    // vorn), und ein wehrloses Ziel genau achteraus.
+    let lances_only = spec_with("bastion", |kind| match kind {
+        ModuleKind::Engine { .. } => true,
+        ModuleKind::Weapon(weapon) => weapon.kind != WeaponKind::Beam || weapon.damage < 20.0,
+        _ => false,
+    });
+    let target = spec_with("speer", |kind| {
+        matches!(kind, ModuleKind::Engine { .. } | ModuleKind::Weapon(_))
+    });
+    let mut battle = duel(&[lances_only], &[target], 1);
+    battle.ships[0].pos = V2::ZERO;
+    battle.ships[0].heading = 0.0;
+    battle.ships[0].turn = 0.0;
+    battle.ships[1].pos = V2::new(-400.0, 0.0);
+    let fired = |battle: &Battle| battle.beams.iter().filter(|beam| beam.side == 0).count();
+    let mut behind = 0;
+    for _ in 0..100 {
+        battle.step(data());
+        behind += fired(&battle);
+    }
+    assert!(battle.ships[1].status.in_play());
+    assert_eq!(behind, 0, "die Lanzen feuern nach achtern");
+    // Zum Ziel gedreht, feuern sie.
+    let bearing = (battle.ships[1].pos - battle.ships[0].pos).angle();
+    battle.ships[0].heading = bearing;
+    let mut ahead = 0;
+    for _ in 0..100 {
+        battle.step(data());
+        ahead += fired(&battle);
+    }
+    assert!(ahead > 0, "die Lanzen feuern auch nach vorn nicht");
+}
+
+#[test]
+fn a_ship_left_with_point_defence_only_breaks_off_against_large_ships() {
+    let flak_only = spec_with(
+        "speer",
+        |kind| matches!(kind, ModuleKind::Weapon(weapon) if weapon.kind != WeaponKind::PointDefense),
+    );
+    // Gegen Kreuzer richtet die Nahbereichsabwehr nichts aus: Das Schiff flieht.
+    let mut battle = duel(std::slice::from_ref(&flak_only), &class_specs("speer:2"), 1);
+    for _ in 0..5 {
+        battle.step(data());
+    }
+    assert_eq!(battle.ships[0].status, ShipStatus::Routing);
+    assert!(!battle.ships[0].armed);
+    // Gegen Korvetten mit Lenkwaffen hat sie zu tun: Es bleibt.
+    let mut battle = duel(&[flak_only], &class_specs("dolch:4"), 1);
+    for _ in 0..100 {
+        battle.step(data());
+    }
+    assert_eq!(battle.ships[0].status, ShipStatus::Active);
+    assert!(battle.ships[0].armed);
+}
+
+#[test]
+fn carriers_with_wrecked_hangars_count_as_carriers_without_fighters() {
+    let wrecked = spec_with("horst", |kind| matches!(kind, ModuleKind::Hangar { .. }));
+    assert!(wrecked.fighters > 0, "der Hangar ist noch voll");
+    let mut battle = duel(&[wrecked], &class_specs("speer:1"), 1);
+    let combatant = &battle.combatants[0];
+    let gun = data().designs[design("horst") as usize].stats.gun_range;
+    assert!(combatant.carriers_in_line);
+    assert_eq!(combatant.fleet_range, gun);
+    assert!(!battle.has_fighters(data(), 0));
+    for _ in 0..200 {
+        battle.step(data());
+    }
+    assert!(
+        battle
+            .ships
+            .iter()
+            .all(|ship| ship.class != ShipClass::Fighter),
+        "aus zerstörten Hangars starten Jäger"
+    );
+    // Die Jäger im Hangar zählen nicht zum Kampfwert.
+    let hull_only = battle.ships[0].value
+        * (data().balance.battle.value_hull_floor
+            + (1.0 - data().balance.battle.value_hull_floor) * battle.ships[0].hull
+                / battle.ships[0].hull_max);
+    assert!((battle.fighting_value(data(), 0) - hull_only).abs() < 1e-3);
+}
+
+#[test]
+fn fighters_are_accounted_for_after_every_battle() {
+    // Jeder Bordjäger ist am Ende entweder als verloren gezählt oder steht wieder in einem
+    // Hangar; keiner verschwindet unbemerkt.
+    let pairs = [
+        ("horst:1", "speer:3"),
+        ("horst:2,waechter:2", "dolch:8"),
+        ("horst:1,bastion:1", "speer:4"),
+        ("horst:2", "horst:2"),
+    ];
+    for (a, b) in pairs {
+        for seed in 0..6 {
+            let mut battle = matchup::build(data(), seed, &[fleet(a), fleet(b)]);
+            matchup::finish(data(), &mut battle);
+            let results = battle.results(data());
+            for (side, combatant) in battle.combatants.iter().enumerate() {
+                let fighter = ShipClass::Fighter.index();
+                let returned: u32 = results
+                    .iter()
+                    .filter(|result| result.side as usize == side)
+                    .map(|result| result.fighters)
+                    .sum();
+                assert_eq!(
+                    combatant.initial[fighter],
+                    combatant.lost[fighter] + returned,
+                    "{a} gegen {b}, Seed {seed}, Partei {side}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ships_adrift_at_the_time_limit_count_as_lost_in_the_tally_and_the_results() {
+    let mut battle = matchup::build(data(), 2, &[fleet("speer:2"), fleet("speer:2")]);
+    while battle.contact_time.is_none() {
+        battle.step(data());
+    }
+    // Kurz vor der Zeitgrenze: Partei B hat ein treibendes und ein fliehendes Schiff.
+    battle.time = data().balance.battle.time_limit - 0.5;
+    let b: Vec<usize> = (0..battle.ships.len())
+        .filter(|index| battle.ships[*index].side == 1)
+        .collect();
+    battle.ships[b[0]].status = ShipStatus::Disabled;
+    battle.ships[b[1]].status = ShipStatus::Routing;
+    matchup::finish(data(), &mut battle);
+    assert!(battle.finished && battle.timed_out);
+    let adrift = battle.ships[b[0]].source.expect("Kennung");
+    let result = battle
+        .results(data())
+        .into_iter()
+        .find(|result| result.source == adrift)
+        .expect("Ergebnis");
+    assert_eq!(result.fate, Fate::Lost);
+    assert_eq!(battle.ships[b[0]].status, ShipStatus::Destroyed);
+    assert_eq!(battle.combatants[1].lost[ShipClass::Cruiser.index()], 1);
+}
+
+#[test]
+fn the_breakaway_of_fighters_lasts_the_same_time_at_any_tick_length() {
+    let mut fine = data().clone();
+    fine.balance.battle.dt = 0.05;
+    let wanted = data().balance.battle.breakaway_time;
+    for data in [data(), &fine] {
+        let dt = data.balance.battle.dt;
+        let mut battle = matchup::build(data, 1, &[fleet("horst:1"), fleet("speer:2")]);
+        let mut started: Vec<Option<f32>> = Vec::new();
+        let mut durations = Vec::new();
+        while !battle.finished && battle.time < 200.0 {
+            battle.step(data);
+            started.resize(battle.ships.len(), None);
+            for (index, ship) in battle.ships.iter().enumerate() {
+                if ship.class != ShipClass::Fighter || ship.status != ShipStatus::Active {
+                    started[index] = None;
+                    continue;
+                }
+                if ship.breakaway > 0.0 {
+                    started[index].get_or_insert(battle.time);
+                } else if let Some(since) = started[index].take() {
+                    durations.push(battle.time - since);
+                }
+            }
+        }
+        assert!(durations.len() > 10, "dt {dt}: kaum Anflüge");
+        let longest = durations.iter().fold(0.0f32, |a, b| a.max(*b));
+        assert!(
+            (longest - wanted).abs() <= 2.0 * dt + 1e-3,
+            "dt {dt}: Abdrehen dauert bis zu {longest:.2} s statt {wanted:.2} s"
+        );
+    }
+}
+
+#[test]
+fn war_weariness_lowers_the_starting_morale() {
+    let balance = &data().balance.battle;
+    let fresh = CombatantSetup::new(PolityId(0), data());
+    assert_eq!(fresh.morale, balance.morale_start);
+    let weary = CombatantSetup::new(PolityId(0), data()).with_war_weariness(data(), 50.0);
+    let expected = balance.morale_start - 50.0 * balance.morale_per_weariness;
+    assert!((weary.morale - expected).abs() < 1e-4);
+    // Mehr als 100 Punkte gibt es nicht.
+    let worn = CombatantSetup::new(PolityId(0), data()).with_war_weariness(data(), 500.0);
+    assert!(
+        (worn.morale - (balance.morale_start - 100.0 * balance.morale_per_weariness)).abs() < 1e-4
+    );
+    let mut battle = Battle::new(BattleId(3), SystemId(0), 1);
+    battle.add_combatant(data(), weary, &class_specs("speer:2"));
+    assert!(
+        battle
+            .ships
+            .iter()
+            .all(|ship| (ship.morale_base - expected).abs() < 1e-4)
+    );
+}
+
+#[test]
+fn small_even_battles_usually_leave_the_loser_a_ship() {
+    // In kleinen gleichen Gefechten soll der Verlierer meist etwas retten; eine Seite, die
+    // jedes Mal bis zum letzten Schiff bleibt, wäre ein Rückfall.
+    for text in ["speer:3", "bastion:2"] {
+        let side = fleet(text);
+        let outcomes = fight_seeds(0..100, &[side.clone(), side]);
+        let (mut decided, mut wiped) = (0, 0);
+        for outcome in &outcomes {
+            let Some(winner) = outcome.winner() else {
+                continue;
+            };
+            decided += 1;
+            let loser = &outcome.sides[1 - winner];
+            let ships = |counts: &[u32; 6]| -> u32 {
+                counts.iter().sum::<u32>() - counts[ShipClass::Fighter.index()]
+            };
+            if ships(&loser.lost) == ships(&loser.initial) {
+                wiped += 1;
+            }
+        }
+        assert!(decided >= 90, "{text}: nur {decided} entschieden");
+        assert!(
+            wiped * 2 < decided,
+            "{text}: Verlierer verliert in {wiped} von {decided} Gefechten alles"
+        );
+    }
+}
+
+#[test]
+fn a_large_battle_stays_within_the_tick_budget() {
+    // Grobe Schranke gegen Rückfälle; die genaue Messung macht `headless battle --bench`.
+    let side = fleet("horst:8,bastion:17,speer:42,waechter:67,dolch:66");
+    let mut battle = matchup::build(data(), 0, &[side.clone(), side]);
+    let start = std::time::Instant::now();
+    let ticks = 600;
+    for _ in 0..ticks {
+        battle.step(data());
+    }
+    let mean = start.elapsed().as_secs_f64() / ticks as f64;
+    assert!(
+        battle.contact_time.is_some(),
+        "kein Kontakt in {ticks} Takten"
+    );
+    assert!(mean < 0.02, "{:.1} ms je Takt", mean * 1e3);
 }

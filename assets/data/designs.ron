@@ -20,7 +20,7 @@
             (module: "reaktor_1"),
             (module: "torpedo", facing: 0.0, arc: 80.0),
             (module: "torpedo", facing: 0.0, arc: 80.0),
-            (module: "impulslaser", facing: 0.0, arc: 240.0),
+            (module: "flak", facing: 0.0, arc: 300.0),
             (module: "panzerung_1"),
         ],
     ),

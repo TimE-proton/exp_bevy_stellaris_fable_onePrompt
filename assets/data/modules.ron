@@ -51,13 +51,13 @@
 
     // --- Geschütze ---
     (key: "bordkanone", name: "Bordkanone", hp: 3.0, power: 0.0, cost: [("waffensysteme", 0.05)],
-     kind: Weapon((kind: Kinetic, damage: 1.4, range: 150.0, cooldown: 0.4, tracking: 4.0, speed: 430.0,
+     kind: Weapon((kind: Kinetic, damage: 1.85, range: 150.0, cooldown: 0.4, tracking: 4.0, speed: 430.0,
                    spread: 0.03, ammo: 0.0, vs_shield: 0.5, vs_armor: 0.25, vs_hull: 1.0))),
     (key: "kanone", name: "Schienenkanone", hp: 30.0, power: 2.0, cost: [("waffensysteme", 1.0)],
      kind: Weapon((kind: Kinetic, damage: 17.0, range: 630.0, cooldown: 2.2, tracking: 1.0, speed: 600.0,
                    spread: 0.012, ammo: 1.0, vs_shield: 0.7, vs_armor: 1.4, vs_hull: 1.0))),
     (key: "schwere_kanone", name: "Schwere Schienenkanone", hp: 50.0, power: 5.0, cost: [("waffensysteme", 2.6)],
-     kind: Weapon((kind: Kinetic, damage: 64.0, range: 900.0, cooldown: 5.5, tracking: 0.3, speed: 350.0,
+     kind: Weapon((kind: Kinetic, damage: 74.0, range: 900.0, cooldown: 5.5, tracking: 0.3, speed: 350.0,
                    spread: 0.008, ammo: 4.0, vs_shield: 0.7, vs_armor: 1.5, vs_hull: 1.0))),
     (key: "kanone_2", name: "Spulenkanone", hp: 32.0, power: 3.0, cost: [("waffensysteme", 1.4)],
      tech: Some("waffen_2"),
@@ -66,10 +66,10 @@
 
     // --- Lenkwaffen ---
     (key: "leichter_torpedo", name: "Leichter Torpedo", hp: 3.0, power: 0.0, cost: [("waffensysteme", 0.1)],
-     kind: Weapon((kind: Missile, damage: 34.0, range: 280.0, cooldown: 20.0, tracking: 6.0, speed: 175.0,
+     kind: Weapon((kind: Missile, damage: 45.0, range: 280.0, cooldown: 20.0, tracking: 6.0, speed: 175.0,
                    turn: 1.6, shot_hp: 3.0, ammo: 1.0, vs_shield: 0.8, vs_armor: 1.3, vs_hull: 1.0))),
     (key: "torpedo", name: "Torpedowerfer", hp: 26.0, power: 1.0, cost: [("waffensysteme", 1.2)],
-     kind: Weapon((kind: Missile, damage: 115.0, range: 720.0, cooldown: 12.0, tracking: 6.0, speed: 135.0,
+     kind: Weapon((kind: Missile, damage: 135.0, range: 720.0, cooldown: 12.0, tracking: 6.0, speed: 135.0,
                    turn: 1.1, shot_hp: 6.0, ammo: 2.0, vs_shield: 0.8, vs_armor: 1.3, vs_hull: 1.0))),
 
     // --- Punktverteidigung ---

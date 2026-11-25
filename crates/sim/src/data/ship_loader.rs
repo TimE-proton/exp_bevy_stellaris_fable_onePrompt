@@ -443,16 +443,76 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
         && battle.jump_out_time > 0.0
         && battle.rearm_time > 0.0
         && battle.stalemate_time > 0.0
+        && battle.stalemate_pressure > 0.0
+        && battle.stalemate_pressure <= battle.stalemate_time
         && battle.time_limit > 0.0
         && battle.morale_shock_recovery >= 0.0
         && battle.morale_break < battle.morale_start
         && doctrine_shares(battle.retreat_loss)
         && doctrine_shares(battle.retreat_ratio)
-        && battle.retreat_unless_ahead >= 1.0)
+        && battle.retreat_unless_ahead >= 1.0
+        && (0.0..=100.0).contains(&battle.morale_per_weariness))
     {
         return Err(invalid(
             "balance.ron",
             "battle: Tempo-, Moral- oder Rückzugswerte außerhalb ihres Bereichs".into(),
+        ));
+    }
+    let hits = &battle.module_hits;
+    let weights = [
+        hits.engine_rear,
+        hits.engine,
+        hits.weapon_front,
+        hits.weapon,
+        hits.hangar,
+        hits.reactor,
+        hits.shield,
+        hits.magazine,
+        hits.tank,
+    ];
+    let loss = &battle.loss_shock;
+    let targeting = &battle.targeting;
+    let bands = &battle.range_bands;
+    let flank = &battle.flanking;
+    let non_negative = |value: f32| value.is_finite() && value >= 0.0;
+    if !(weights.iter().all(|weight| non_negative(*weight))
+        && weights.iter().any(|weight| *weight > 0.0)
+        && share(battle.magazine_blast)
+        && share(battle.tank_leak)
+        && share(battle.damaged_weapon_below)
+        && battle.damaged_weapon_cooldown >= 1.0
+        && share(battle.dry_speed)
+        && battle.dry_speed > 0.0
+        && non_negative(loss.fighter)
+        && non_negative(loss.escort)
+        && non_negative(loss.capital)
+        && non_negative(battle.point_defense_signature_weight)
+        && battle.tiny_signature > 0.0
+        && battle.tiny_signature <= battle.small_signature
+        && non_negative(battle.slow_tracking)
+        && non_negative(battle.point_defense_size_bias)
+        && non_negative(targeting.damaged)
+        && targeting.routing > 0.0
+        && targeting.disabled > 0.0
+        && targeting.keep >= 1.0
+        && non_negative(targeting.jitter)
+        && bands.urgent < bands.back_off
+        && bands.back_off < 1.0
+        && bands.approach >= 1.0
+        && share(bands.back_off_speed)
+        && flank.engage_distance > 0.0
+        && flank.reach > 0.0
+        && flank.wide > 0.0
+        && non_negative(battle.frigate_leash)
+        && share(battle.fighter_min_speed)
+        && non_negative(battle.first_launch)
+        && battle.launch_interval > 0.0
+        && battle.breakaway_time > 0.0
+        && share(battle.value_hull_floor))
+    {
+        return Err(invalid(
+            "balance.ron",
+            "battle: Modul-, Ziel-, Bewegungs- oder Trägerwerte außerhalb ihres Bereichs".into(),
         ));
     }
     Ok(())
