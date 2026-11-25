@@ -174,15 +174,17 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 - **Schiffe.** Eine Flotte besteht aus Schiffen mit Entwurf, Rumpf- und Modulzustand,
   Munition, Treibstoff und Bordjägern. Ihre Stärke ist abgeleitet: Bauwert mal Zustand,
   geeicht an der Startflotte. Kaperfahrt, Geleitschutz und Blockade rechnen mit dieser Zahl.
-- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung Kapital steht; je
-  `yard_capital_per_slot` ein Bauplatz, die Hauptwelt hat immer einen. Der Staat kauft
-  täglich den Tagesanteil der Bauteile am Markt des Systems und zahlt der Rüstungsfirma
-  der Welt einen Aufschlag, an dem ihre Anteilseigner mitverdienen. Fehlt ein Bauteil oder
-  Geld, stockt der Bau: Eine blockierte Werft steht still, weil keine Ware mehr ankommt.
+- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung Kapital steht: je
+  `yard_capital_per_slot` ein Bauplatz, mindestens einer. Die Hauptwelt hat auch ohne
+  Rüstungskapital einen. Der Staat kauft täglich den Tagesanteil der Bauteile am Markt des
+  Systems und zahlt der Rüstungsfirma der Welt einen Aufschlag, an dem ihre Anteilseigner
+  mitverdienen. Fehlt ein Bauteil oder Geld, stockt der Bau: Eine blockierte Werft steht
+  still, weil keine Ware mehr ankommt. Ein neues Schiff kommt mit leeren Magazinen und Tanks.
 - **Nachschub.** Im eigenen, nicht blockierten System fasst eine Flotte Munition und
   Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff;
   mit leerem Tank schleppt sich eine Flotte nur noch mit einem Bruchteil ihrer Fahrt.
-- **Instandsetzung.** Im eigenen System mit Werft, gegen Rumpfsegmente vom Markt.
+- **Instandsetzung.** Im eigenen System mit Werft, gegen Rumpfsegmente vom Markt; verlorene
+  Bordjäger kommen aus ihren eigenen Bauteilen.
 - **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
   Haushalte. Reicht die Kasse nicht, wächst der Soldrückstand der Gemeinschaft.
 - **Befehle.** Schiffe bestellen und Aufträge streichen, Flotten teilen und vereinigen,

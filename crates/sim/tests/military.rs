@@ -1040,6 +1040,94 @@ fn damaged_ships_are_repaired_only_at_a_yard_and_only_with_hull_segments() {
     assert_eq!(check_invariants(sim.world()), Ok(()));
 }
 
+#[test]
+fn a_fleet_fights_abroad_comes_home_and_is_made_ready_again() {
+    let data = data();
+    let me = PolityId(0);
+    let mut sim = with_player(20);
+    let home = home_of(&sim, me).1;
+    let (target, _) = nearest_foreign_home(&sim, me);
+    let enemy = sim.galaxy().system_owner(target).unwrap();
+    let defenders = fleets(&sim).of(enemy).next().map(|fleet| fleet.id).unwrap();
+    // Mit doppelter Flotte in das Heimatsystem des Gegners.
+    {
+        let mut fleets = sim.world_mut().resource_mut::<Fleets>();
+        for (design, count) in data.balance.military.starting_fleet_ids.clone() {
+            for _ in 0..count {
+                fleets.add_ship(data, FleetId(0), design).unwrap();
+            }
+        }
+    }
+    let start = data.balance.fleets.start_strength;
+    assert!((fleet(&sim, FleetId(0)).strength - 2.0 * start).abs() < 1e-2);
+    sim.issue(me, SimCommand::DeclareWar { target: enemy });
+    sim.issue(
+        me,
+        SimCommand::MoveFleet {
+            fleet: FleetId(0),
+            to: target,
+        },
+    );
+
+    // Das Gefecht zieht sich über Tage; die Invarianten halten an jedem davon.
+    let mut days_in_battle = 0;
+    for _ in 0..DAYS_PER_YEAR {
+        sim.run_days(1);
+        assert_eq!(check_invariants(sim.world()), Ok(()));
+        if fleet(&sim, FleetId(0)).in_battle {
+            days_in_battle += 1;
+            assert!(fleet(&sim, defenders).in_battle || !fleet(&sim, defenders).alive);
+        }
+        if !fleet(&sim, defenders).alive {
+            break;
+        }
+    }
+    assert!(days_in_battle >= 2, "nur {days_in_battle} Gefechtstage");
+    assert!(!fleet(&sim, defenders).alive && fleet(&sim, defenders).ships.is_empty());
+    assert_eq!(fleets(&sim).ship_count(enemy), 0);
+    let winner = fleet(&sim, FleetId(0));
+    assert!(winner.alive && winner.strength < 2.0 * start);
+    assert!(winner.ships.iter().any(|ship| ship.hull < 1.0));
+    let worn = winner.strength;
+    let fuel_after_march = winner.min_fuel();
+    assert!(fuel_after_march < 1.0);
+    let chronicle = sim.world().resource::<Chronicle>();
+    for text in ["steht im Gefecht", "besteht nicht mehr"] {
+        assert!(
+            chronicle
+                .entries
+                .iter()
+                .any(|entry| entry.text.contains(text)),
+            "Chronik ohne „{text}“"
+        );
+    }
+    // In der Fremde wird weder instand gesetzt noch nachgefasst, auch nach dem Sieg nicht.
+    sim.run_days(10);
+    assert_eq!(fleet(&sim, FleetId(0)).strength, worn);
+    assert_eq!(fleet(&sim, FleetId(0)).min_fuel(), fuel_after_march);
+
+    // Zu Hause, mit Rumpfsegmenten am Markt, kommt die Flotte wieder in Schuss.
+    set_stock(&mut sim, home, &["rumpfsegmente"], 60.0);
+    sim.issue(
+        me,
+        SimCommand::MoveFleet {
+            fleet: FleetId(0),
+            to: home,
+        },
+    );
+    sail(&mut sim, FleetId(0), home);
+    sim.run_days(30);
+    let repaired = fleet(&sim, FleetId(0));
+    assert!(
+        repaired.strength > worn,
+        "{} nach {worn}",
+        repaired.strength
+    );
+    assert!(repaired.min_fuel() > fuel_after_march.min(0.5));
+    assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
 // --- 6. Sold ----------------------------------------------------------------------------
 
 #[test]

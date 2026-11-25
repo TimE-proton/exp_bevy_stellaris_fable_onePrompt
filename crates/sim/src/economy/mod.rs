@@ -455,3 +455,97 @@ pub fn recipes_of(data: &GameData, sector: Sector) -> impl Iterator<Item = (usiz
         .enumerate()
         .filter(move |(_, recipe)| recipe.sector == sector)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn munition_market(stock: f64) -> (GameData, Market, GoodId, f64) {
+        let data = GameData::load_workspace().unwrap();
+        let good = data.good_id("munition").unwrap();
+        let mut market = Market::new(&data);
+        market.stock[good.index()] = stock;
+        let spread = data.balance.economy.spread;
+        (data, market, good, spread)
+    }
+
+    #[test]
+    fn a_purchase_moves_goods_and_money_and_never_more_than_there_is() {
+        let (_, mut market, good, spread) = munition_market(10.0);
+        let ask = market.ask(good, spread);
+        let mut purse = to_money(1000.0);
+
+        // Ein gewöhnlicher Kauf: Ware gegen Geld zum Briefkurs, auf das Tausendstel.
+        let (got, paid) = purchase(&mut market, good, 4.0, &mut purse, spread);
+        assert_eq!((got, paid), (4.0, to_money(4.0 * ask)));
+        assert_eq!(market.stock_of(good), 6.0);
+        assert_eq!(market.cash, paid);
+        assert_eq!(purse, to_money(1000.0) - paid);
+        assert!((market.turnover_today - to_credits(paid)).abs() < 1e-9);
+
+        // Mehr als der Bestand gibt es nicht.
+        let (got, _) = purchase(&mut market, good, 100.0, &mut purse, spread);
+        assert_eq!(got, 6.0);
+        assert_eq!(market.stock_of(good), 0.0);
+
+        // Mehr als der Geldbeutel hergibt, auch nicht: Er wird leer, nie negativ.
+        market.stock[good.index()] = 10.0;
+        let before = market.cash;
+        let mut purse = to_money(2.5 * ask);
+        let (got, paid) = purchase(&mut market, good, 8.0, &mut purse, spread);
+        assert!((got - 2.5).abs() < 1e-3);
+        assert_eq!((purse, market.cash - before), (0, paid));
+
+        // Ohne Geld oder ohne Wunsch geschieht nichts.
+        let stock = market.stock_of(good);
+        assert_eq!(
+            purchase(&mut market, good, 3.0, &mut purse, spread),
+            (0.0, 0)
+        );
+        let mut rich = to_money(100.0);
+        assert_eq!(
+            purchase(&mut market, good, 0.0, &mut rich, spread),
+            (0.0, 0)
+        );
+        assert_eq!(
+            purchase(&mut market, good, -2.0, &mut rich, spread),
+            (0.0, 0)
+        );
+        assert_eq!((market.stock_of(good), rich), (stock, to_money(100.0)));
+    }
+
+    #[test]
+    fn procuring_reports_solvent_demand_and_leaves_stock_for_others() {
+        let (_, mut market, good, spread) = munition_market(10.0);
+        let ask = market.ask(good, spread);
+
+        // Ein einzelner Käufer bekommt höchstens seinen Anteil am Bestand; gemeldet ist der
+        // ganze Wunsch.
+        let mut purse = to_money(10_000.0);
+        let (got, paid) = procure(&mut market, good, 8.0, &mut purse, spread);
+        assert_eq!(got, 10.0 * BUYER_SHARE);
+        assert_eq!(paid, to_money(got * ask));
+        assert_eq!(market.demand_today[good.index()], 8.0);
+
+        // Fehlt die Ware ganz, zählt der Wunsch trotzdem: Knappheit soll den Preis heben.
+        market.stock[good.index()] = 0.0;
+        assert_eq!(
+            procure(&mut market, good, 3.0, &mut purse, spread),
+            (0.0, 0)
+        );
+        assert_eq!(market.demand_today[good.index()], 11.0);
+
+        // Wünsche ohne Geld bewegen keinen Preis: Gemeldet wird nur, was bezahlbar ist.
+        market.stock[good.index()] = 10.0;
+        let mut poor = to_money(1.5 * ask);
+        let (got, _) = procure(&mut market, good, 4.0, &mut poor, spread);
+        assert!((got - 1.5).abs() < 1e-3);
+        assert!((market.demand_today[good.index()] - 12.5).abs() < 1e-3);
+        let mut broke = 0;
+        assert_eq!(
+            procure(&mut market, good, 4.0, &mut broke, spread),
+            (0.0, 0)
+        );
+        assert!((market.demand_today[good.index()] - 12.5).abs() < 1e-3);
+    }
+}
