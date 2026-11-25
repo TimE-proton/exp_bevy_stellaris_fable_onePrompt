@@ -144,6 +144,12 @@ pub struct PolityDef {
     pub short: String,
     pub color: Rgb,
     pub motto: String,
+    /// Technologien, die die Gemeinschaft von Beginn an beherrscht (Schlüssel aus
+    /// `techs.ron`, samt allen Voraussetzungen).
+    #[serde(default)]
+    pub start_techs: Vec<String>,
+    #[serde(skip)]
+    pub start_tech_ids: Vec<u16>,
 }
 
 /// `names.ron`

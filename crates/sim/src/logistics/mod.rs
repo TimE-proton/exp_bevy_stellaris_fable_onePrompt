@@ -72,11 +72,20 @@ pub struct Logistics {
     /// Gelieferte Mengen, monatlich halbiert (gleitendes Bild der letzten Monate).
     pub flows: BTreeMap<FlowKey, f64>,
     pub captured: u64,
+    /// Fahrtfaktor der Technik je Gemeinschaft (1 = Grundstand; fehlende Einträge gelten
+    /// als 1). Das Logistik-Plugin übernimmt ihn täglich aus der Forschung.
+    #[serde(default)]
+    pub tech_speed: Vec<f64>,
 }
 
 impl Logistics {
     pub fn money(&self) -> Money {
         self.houses.iter().map(|house| house.cash).sum()
+    }
+
+    /// Strecke je Tag, die Frachter der Handelshäuser einer Gemeinschaft zurücklegen.
+    pub fn freighter_speed(&self, polity: PolityId, base: f32) -> f32 {
+        base * crate::economy::factor_of(&self.tech_speed, polity) as f32
     }
 
     pub fn active_freighters(&self) -> usize {
@@ -184,6 +193,7 @@ pub fn move_and_trade(
         freighters,
         flows,
         captured,
+        tech_speed,
     } = logistics;
     // Wege je (Gemeinschaft, Startsystem) gelten für den ganzen Tag: einmal rechnen.
     let mut routes: BTreeMap<(PolityId, SystemId), (Vec<f32>, Vec<Option<SystemId>>)> =
@@ -194,6 +204,8 @@ pub fn move_and_trade(
         }
         let house = &mut houses[freighter.house.index()];
         let polity = house.polity;
+        // Bessere Technik macht die Frachter der Gemeinschaft schneller.
+        let speed = balance.speed * crate::economy::factor_of(tech_speed, polity) as f32;
 
         // --- Fahrt ---
         if !freighter.route.is_empty() {
@@ -211,7 +223,7 @@ pub fn move_and_trade(
                         to_money(balance.upkeep_per_day),
                     );
                 }
-                freighter.progress += balance.speed / galaxy.lane(lane).length.max(1.0);
+                freighter.progress += speed / galaxy.lane(lane).length.max(1.0);
                 if freighter.progress < 1.0 {
                     continue;
                 }
@@ -300,7 +312,7 @@ pub fn move_and_trade(
                         continue;
                     }
                     let market = &economy.markets[system.index()];
-                    let days = (distance[system.index()] / balance.speed) as f64 + 1.0;
+                    let days = (distance[system.index()] / speed) as f64 + 1.0;
                     let score = market.bid(good, spread) / days.sqrt();
                     if to_credits(market.cash) > 10.0
                         && market.room(good, data.balance.economy.cover_days) > 1.0
@@ -385,7 +397,7 @@ pub fn move_and_trade(
                         &data.balance.economy,
                     );
                     let sell = market.price[good_index].min(later) * (1.0 - spread);
-                    let days = (distance[index] / balance.speed) as f64 + 1.0;
+                    let days = (distance[index] / speed) as f64 + 1.0;
                     let fuel_cost = distance[index] as f64 * balance.fuel_per_distance * fuel_price;
                     let profit = (quantity * (sell - ask) - fuel_cost) / days;
                     if profit > balance.min_profit_per_day

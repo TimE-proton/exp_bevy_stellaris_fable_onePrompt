@@ -8,6 +8,7 @@ use crate::fleet::Fleets;
 use crate::galaxy::Galaxy;
 use crate::polity::Polities;
 use crate::state::SimConfig;
+use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -34,10 +35,19 @@ fn trade(
     fleets: Res<Fleets>,
     diplomacy: Res<Diplomacy>,
     polities: Res<Polities>,
+    research: Res<Research>,
     mut economy: ResMut<Economy>,
     mut logistics: ResMut<Logistics>,
     mut chronicle: ResMut<Chronicle>,
 ) {
+    // Der Fahrtfaktor der Technik gilt ab dem Tag nach dem Abschluss einer Technologie.
+    logistics.tech_speed.clear();
+    logistics.tech_speed.extend(
+        research
+            .polities
+            .iter()
+            .map(|entry| entry.effects.freighter_speed),
+    );
     move_and_trade(
         &galaxy,
         &mut economy,

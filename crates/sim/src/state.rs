@@ -16,6 +16,7 @@ use crate::hash::Fnv64;
 use crate::ids::PolityId;
 use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
+use crate::tech::{Research, setup_research};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -72,6 +73,7 @@ sim_state! {
     polities: Polities,
     economy: Economy,
     finance: Finance,
+    research: Research,
     logistics: Logistics,
     fleets: Fleets,
     diplomacy: Diplomacy,
@@ -124,6 +126,7 @@ impl SimState {
         economy.initial_money += logistics.money();
         // Die Eliten erhalten ihr Geld aus dem der Haushalte: Die Summe bleibt gleich.
         let finance = setup_finance(data, &galaxy, &polities, &mut economy, &logistics);
+        let research = setup_research(data, &polities);
         let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,
@@ -132,6 +135,7 @@ impl SimState {
             polities,
             economy,
             finance,
+            research,
             logistics,
             fleets,
             diplomacy: Diplomacy::default(),

@@ -2,8 +2,8 @@
 //! werden ausgeglichen.
 
 use super::{
-    Economy, EquityFlows, Money, expected_return, pay, recipes_of, to_credits, to_money,
-    unit_economics,
+    Economy, EquityFlows, Money, expected_return, factor_of, pay, recipes_of, to_credits, to_money,
+    unit_economics_at,
 };
 use crate::data::{GameData, Sector};
 use crate::galaxy::Galaxy;
@@ -26,7 +26,10 @@ pub fn invest_and_depreciate(
     let balance = &data.balance.economy;
     let machines = balance.capital_good_id;
     let Economy {
-        markets, planets, ..
+        markets,
+        planets,
+        tech_yield,
+        ..
     } = economy;
     for market in markets.iter_mut() {
         market.standing[machines.index()] = 0.0;
@@ -43,11 +46,13 @@ pub fn invest_and_depreciate(
         let market = &mut markets[planet.system.index()];
         let local = &mut planets[planet.id.index()];
         let labor_supply = planet.population * balance.workforce_share;
+        // Investoren rechnen mit dem Ertrag, den die Technik der Gemeinschaft hergibt.
+        let tech = factor_of(tech_yield, owner);
 
         // Erwartete Rendite je Rezept zu heutigen Preisen und Löhnen.
         let mut returns = vec![f64::MIN; data.recipes.len()];
         for (index, recipe) in data.recipes.iter().enumerate() {
-            let economics = unit_economics(data, planet, local.wage, market, recipe);
+            let economics = unit_economics_at(data, planet, local.wage, market, recipe, tech);
             if economics.local_yield > 0.0 {
                 // Bestehende Werke rechnen mit ihrer tatsächlichen Auslastung: Wer nicht
                 // absetzen kann, verdient auch bei guten Preisen nichts.
@@ -103,7 +108,7 @@ pub fn invest_and_depreciate(
             let mut monthly_cost = 0.0;
             let mut best: Option<(usize, f64)> = None;
             for (index, recipe) in recipes_of(data, sector) {
-                let economics = unit_economics(data, planet, local.wage, market, recipe);
+                let economics = unit_economics_at(data, planet, local.wage, market, recipe, tech);
                 monthly_cost += local.capital[index]
                     * (economics.inputs + economics.energy + economics.lift + economics.wages)
                     * balance.firm_reserve_days;
@@ -396,22 +401,58 @@ pub fn settle_public_accounts(
         if population <= 0.0 {
             continue;
         }
-        let reserve = to_money(population * balance.state_reserve_per_million)
-            .max(economy.treasury_targets[polity]);
+        let reserve = state_reserve(economy, data, id, population);
         let excess = economy.treasuries[polity] - reserve;
         if excess <= 0 {
             continue;
         }
-        let budget = excess / 2;
-        let mut spent: Money = 0;
-        for planet in galaxy.planets_of(id) {
-            let share = (budget as f64 * planet.population / population) as Money;
-            economy.planets[planet.id.index()].households += share;
-            economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
-            spent += share;
-        }
-        economy.treasuries[polity] -= spent;
+        pay_households(galaxy, economy, id, excess / 2);
     }
+}
+
+/// Rücklage, die ein Staat mit `population` Millionen Einwohnern hält: ein Sockel je
+/// Einwohner, mindestens aber die befohlene (`treasury_targets`). Nur was darüber liegt,
+/// gibt er aus.
+pub fn state_reserve(
+    economy: &Economy,
+    data: &GameData,
+    polity: PolityId,
+    population: f64,
+) -> Money {
+    let ordered = economy
+        .treasury_targets
+        .get(polity.index())
+        .copied()
+        .unwrap_or(0);
+    to_money(population * data.balance.economy.state_reserve_per_million).max(ordered)
+}
+
+/// Der Staat zahlt `budget` an die Haushalte seiner Welten, verteilt nach Bevölkerung:
+/// Leistungen, Gehälter, Sold. Gezahlt wird nie mehr, als die Kasse hergibt; die Kasse
+/// sinkt um genau den Betrag, den die Haushalte erhalten. Gibt ihn zurück.
+pub fn pay_households(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    polity: PolityId,
+    budget: Money,
+) -> Money {
+    let Some(treasury) = economy.treasuries.get(polity.index()).copied() else {
+        return 0;
+    };
+    let budget = budget.min(treasury);
+    let population = galaxy.population_of(polity);
+    if budget <= 0 || population <= 0.0 {
+        return 0;
+    }
+    let mut spent: Money = 0;
+    for planet in galaxy.planets_of(polity) {
+        let share = (budget as f64 * planet.population / population) as Money;
+        economy.planets[planet.id.index()].households += share;
+        economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
+        spent += share;
+    }
+    economy.treasuries[polity.index()] -= spent;
+    spent
 }
 
 /// Geldmengensteuerung: Wächst die Wirtschaft, ohne dass Geld nachkommt, fallen die Preise

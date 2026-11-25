@@ -17,6 +17,7 @@ use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, SystemId};
 use crate::logistics::Logistics;
 use crate::polity::{self, Polities};
+use crate::tech::{self, Research};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,15 @@ pub enum SimCommand {
     /// Kolonie auf einem freien Planeten in Reichweite gründen.
     ClaimPlanet {
         planet: PlanetId,
+    },
+    /// Forschungsziel setzen (Index in `techs.ron`). `None` gibt die Wahl an die
+    /// Automatik zurück.
+    SetResearchTarget {
+        tech: Option<u16>,
+    },
+    /// Anteil der Staatseinnahmen, der in die Forschung fließt (0,1 = 10 %).
+    SetResearchBudget {
+        share: f64,
     },
     /// Flotte auf dem kürzesten Weg in ein System schicken.
     MoveFleet {
@@ -166,6 +176,7 @@ pub struct CommandContext<'w> {
     pub polities: ResMut<'w, Polities>,
     pub economy: ResMut<'w, Economy>,
     pub finance: ResMut<'w, Finance>,
+    pub research: ResMut<'w, Research>,
     pub logistics: Res<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
     pub diplomacy: ResMut<'w, Diplomacy>,
@@ -237,6 +248,17 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             tick,
         )
         .map_err(|error| error.to_string()),
+        SimCommand::SetResearchTarget { tech: target } => tech::set_target(
+            &mut ctx.research,
+            &ctx.data,
+            &ctx.polities,
+            &ctx.diplomacy,
+            polity,
+            *target,
+        ),
+        SimCommand::SetResearchBudget { share } => {
+            tech::set_budget(&mut ctx.research, &ctx.data, &ctx.polities, polity, *share)
+        }
         SimCommand::MoveFleet { fleet, to } => {
             fleet::order_move(&ctx.galaxy, &mut ctx.fleets, polity, *fleet, *to)
         }

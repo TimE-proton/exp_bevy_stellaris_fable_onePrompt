@@ -345,6 +345,44 @@ pub enum TechEffect {
     Research(f64),
 }
 
+impl TechEffect {
+    /// Höhe des Aufschlags, gleich welcher Art.
+    pub fn amount(self) -> f64 {
+        match self {
+            TechEffect::Yield(amount)
+            | TechEffect::FreighterSpeed(amount)
+            | TechEffect::FleetSpeed(amount)
+            | TechEffect::ShipSpeed(amount)
+            | TechEffect::WeaponDamage(amount)
+            | TechEffect::WeaponRange(amount)
+            | TechEffect::Shields(amount)
+            | TechEffect::Armor(amount)
+            | TechEffect::Hull(amount)
+            | TechEffect::GroundAttack(amount)
+            | TechEffect::GroundDefense(amount)
+            | TechEffect::Research(amount) => amount,
+        }
+    }
+
+    /// Beschriftung für Listen, z. B. „Ausstoß der Werke".
+    pub fn label(self) -> &'static str {
+        match self {
+            TechEffect::Yield(_) => "Ausstoß der Werke",
+            TechEffect::FreighterSpeed(_) => "Fahrt der Frachter",
+            TechEffect::FleetSpeed(_) => "Fahrt der Flotten",
+            TechEffect::ShipSpeed(_) => "Fahrt im Gefecht",
+            TechEffect::WeaponDamage(_) => "Waffenschaden",
+            TechEffect::WeaponRange(_) => "Waffenreichweite",
+            TechEffect::Shields(_) => "Schilde",
+            TechEffect::Armor(_) => "Panzerung",
+            TechEffect::Hull(_) => "Rumpf",
+            TechEffect::GroundAttack(_) => "Angriff am Boden",
+            TechEffect::GroundDefense(_) => "Verteidigung am Boden",
+            TechEffect::Research(_) => "Forschung",
+        }
+    }
+}
+
 /// `techs.ron`
 #[derive(Clone, Debug, Deserialize)]
 pub struct TechDef {
@@ -555,12 +593,57 @@ pub struct Flanking {
     pub wide: f32,
 }
 
+/// Ein Wert je Forschungszweig.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+pub struct BranchWeights {
+    pub economy: f64,
+    pub propulsion: f64,
+    pub weapons: f64,
+    pub defense: f64,
+    pub ground: f64,
+}
+
+impl BranchWeights {
+    pub fn of(&self, branch: TechBranch) -> f64 {
+        match branch {
+            TechBranch::Economy => self.economy,
+            TechBranch::Propulsion => self.propulsion,
+            TechBranch::Weapons => self.weapons,
+            TechBranch::Defense => self.defense,
+            TechBranch::Ground => self.ground,
+        }
+    }
+}
+
 /// `balance.ron: research`
 #[derive(Clone, Debug, Deserialize)]
 pub struct ResearchBalance {
+    /// Anteil der Staatseinnahmen, mit dem jede Gemeinschaft beginnt.
     pub budget_share: f64,
+    /// Höchster Anteil, den eine Gemeinschaft einstellen kann.
+    pub max_budget_share: f64,
+    /// Forschungspunkte je ausgegebenem Credit bei einer Milliarde Einwohnern.
     pub efficiency: f64,
+    /// Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
     pub population_exponent: f64,
+    /// Größter Nachlass auf eine Technologie, die Gemeinschaften in Kontakt schon beherrschen.
+    pub spillover_max: f64,
+    /// Sprünge im Routennetz, nach denen das Gewicht eines Nachbarn halbiert ist.
+    pub spillover_half_hops: f64,
+    /// Vorlieben der automatischen Zielwahl im Frieden und im Krieg.
+    pub auto_peace: BranchWeights,
+    pub auto_war: BranchWeights,
+    /// Einblick in fremde Forschung (0..1) ohne jede Verflechtung.
+    pub intel_base: f32,
+    /// Einblick, den Besitz an den Betrieben der anderen höchstens verschafft.
+    pub intel_ties_max: f32,
+    /// Anteil an den Betrieben der anderen, ab dem dieser Einblick erreicht ist.
+    pub intel_ties_share: f64,
+    /// Anteil, um den Einblick aus Ereignissen je Monat auf das Niveau der Verflechtung
+    /// zurückfällt.
+    pub intel_decay: f32,
+    /// Größte Unschärfe einer Schätzung in Stufen nach oben und nach unten.
+    pub estimate_spread: u8,
 }
 
 fn one() -> f32 {

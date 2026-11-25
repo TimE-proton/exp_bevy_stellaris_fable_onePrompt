@@ -1,6 +1,6 @@
 //! Tagesschritt: Produktion, Konsum, Bevölkerung, Preise, Löhne.
 
-use super::{Economy, Money, energy_factor, lift_cost, local_yield, pay, to_money};
+use super::{Economy, Money, energy_factor, factor_of, lift_cost, local_yield, pay, to_money};
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
 use crate::galaxy::Galaxy;
@@ -21,6 +21,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
         planets,
         treasuries,
         tax_rates,
+        tech_yield,
         ..
     } = economy;
 
@@ -61,6 +62,8 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
             local.employment = employment;
             let efactor = energy_factor(planet);
             let fuel_lift = lift_cost(data, planet, fuel);
+            // Technik hebt den Ausstoß aller Werke der Gemeinschaft bei gleichem Einsatz.
+            let tech = factor_of(tech_yield, owner);
 
             for (index, recipe) in data.recipes.iter().enumerate() {
                 // Trend der Auslastung aus dem Vortag fortschreiben.
@@ -72,7 +75,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 if capital <= 0.0 {
                     continue;
                 }
-                let yield_factor = local_yield(recipe, planet);
+                let yield_factor = local_yield(recipe, planet) * tech;
                 if yield_factor <= 0.0 {
                     continue;
                 }
