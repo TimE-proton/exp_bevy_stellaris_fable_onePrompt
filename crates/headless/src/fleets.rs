@@ -73,6 +73,15 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             player: None,
         },
     );
+    if let Some(only) = args.polity
+        && only as usize >= sim.polities().list.len()
+    {
+        eprintln!(
+            "--polity {only}: Diese Partie beginnt mit den Gemeinschaften 0 bis {}.",
+            sim.polities().list.len() - 1
+        );
+        return ExitCode::FAILURE;
+    }
     let order_year = args.order_year.min(args.years);
     sim.run_days(order_year * DAYS_PER_YEAR);
     if !wanted.is_empty() {
@@ -114,7 +123,7 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
         if let CommandOutcome::Rejected(reason) = &entry.outcome {
             println!(
                 "Abgelehnt ({}): {:?}: {reason}",
-                polities.get(entry.polity).name,
+                crate::war::polity_name(&sim, entry.polity),
                 entry.command
             );
         }

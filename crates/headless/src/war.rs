@@ -108,18 +108,38 @@ fn describe(sim: &Headless, report: &BattleReport) -> String {
     text
 }
 
+/// Name einer Gemeinschaft für die Ausgabe. Eine Nummer, die es in der Partie nicht gibt
+/// (ein Tippfehler im Drehbuch, ein Freistaat, der nie entstand), bleibt als Nummer stehen:
+/// Die Ausgabe soll gerade solche Angaben zeigen können.
+pub fn polity_name(sim: &Headless, polity: PolityId) -> String {
+    sim.polities().list.get(polity.index()).map_or_else(
+        || format!("Gemeinschaft {} (unbekannt)", polity.0),
+        |found| found.name.clone(),
+    )
+}
+
+/// Befehle der Partie, die abgelehnt wurden, je einer in einer Zeile.
+pub fn rejected_commands(sim: &Headless) -> Vec<String> {
+    sim.command_log()
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.outcome {
+            CommandOutcome::Rejected(reason) => Some(format!(
+                "Abgelehnt ({}, {}): {:?}: {reason}",
+                date_of_tick(entry.tick),
+                polity_name(sim, entry.polity),
+                entry.command
+            )),
+            CommandOutcome::Applied => None,
+        })
+        .collect()
+}
+
 /// Was die Kriege des Drehbuchs hinterlassen haben: abgelehnte Befehle, laufende Gefechte,
 /// die Bilanzen der jüngsten und die Trümmerfelder.
 pub fn print_aftermath(sim: &Headless) {
-    for entry in &sim.command_log().entries {
-        if let CommandOutcome::Rejected(reason) = &entry.outcome {
-            println!(
-                "Abgelehnt ({}, {}): {:?}: {reason}",
-                date_of_tick(entry.tick),
-                sim.polities().get(entry.polity).name,
-                entry.command
-            );
-        }
+    for line in rejected_commands(sim) {
+        println!("{line}");
     }
     let battles = sim.world().resource::<Battles>();
     println!(
@@ -185,5 +205,54 @@ mod tests {
         assert!(parse_war("12:2:2").is_err());
         assert!(script(&[], &[]).is_empty());
         assert!(!script(&[parse_war("1:0:1").unwrap()], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_script_naming_a_community_that_does_not_exist_is_reported_not_fatal() {
+        let data = sim::GameData::load_workspace().unwrap();
+        // Sechs Gemeinschaften, Nummern 0 bis 5: Die 6 ist der klassische Zählfehler, die 99
+        // ein Tippfehler. Beides einmal als Urheber und einmal als Ziel.
+        let script = script(
+            &[
+                parse_war("0:6:1").unwrap(),
+                parse_war("0:0:99").unwrap(),
+                parse_war("0:2:3").unwrap(),
+            ],
+            &[parse_peace("0:99:0").unwrap()],
+        );
+        let (sim, violation) = sim::harness::run_scripted(&data, 3, 40, &script);
+        assert_eq!(violation, None);
+        assert_eq!(polity_name(&sim, PolityId(2)), sim.polities().list[2].name);
+        assert_eq!(polity_name(&sim, PolityId(6)), "Gemeinschaft 6 (unbekannt)");
+        let rejected = rejected_commands(&sim);
+        assert_eq!(rejected.len(), 3, "{rejected:?}");
+        assert!(
+            rejected
+                .iter()
+                .any(|line| line.contains("Gemeinschaft 6 (unbekannt)"))
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|line| line.contains("Gemeinschaft 99 (unbekannt)"))
+        );
+        assert!(
+            rejected
+                .iter()
+                .all(|line| line.contains("Gemeinschaft besteht nicht mehr")),
+            "{rejected:?}"
+        );
+        // Die ganze Ausgabe läuft durch, samt Zusammenfassung.
+        print_aftermath(&sim);
+        let summary = sim::harness::summarize(&sim);
+        assert_eq!(summary.polities.len(), 6);
+        // Wer einer Gemeinschaft den Krieg erklären wollte, die es nicht gibt, schickt
+        // auch keine Flotte in den Blockadeauftrag: Der gültige Krieg läuft, sonst nichts.
+        let fleets = sim.world().resource::<sim::fleet::Fleets>();
+        assert_eq!(fleets.list[0].stance, sim::fleet::Stance::Guard);
+        assert_eq!(fleets.list[2].stance, sim::fleet::Stance::Blockade);
+        let diplomacy = sim.world().resource::<sim::diplomacy::Diplomacy>();
+        assert!(diplomacy.at_war(PolityId(2), PolityId(3)));
+        assert_eq!(diplomacy.wars.len(), 1);
     }
 }

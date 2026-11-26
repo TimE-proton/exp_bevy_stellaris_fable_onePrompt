@@ -191,8 +191,18 @@ fn main() -> ExitCode {
             let started = std::time::Instant::now();
             let runs = sweep_scripted(&data, &seeds, years * DAYS_PER_YEAR, jobs, &script);
             println!(
-                "{:>6} {:>18} {:>6} {:>8} {:>12} {:>8} {:>8}  größte Gemeinschaft",
-                "Seed", "Hash", "frei", "lebend", "Bevölk. Mio", "Gefechte", "Verluste"
+                "{:>6} {:>18} {:>6} {:>8} {:>12} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}  größte Gemeinschaft",
+                "Seed",
+                "Hash",
+                "frei",
+                "lebend",
+                "Bevölk. Mio",
+                "Vers.",
+                "Zus.",
+                "Preis",
+                "Abspalt.",
+                "Gefechte",
+                "Verluste"
             );
             for run in &runs {
                 let alive = run.polities.iter().filter(|p| p.alive).count();
@@ -210,12 +220,16 @@ fn main() -> ExitCode {
                     })
                     .unwrap_or_default();
                 println!(
-                    "{:>6} {:>18x} {:>6} {:>8} {:>12.0} {:>8} {:>8}  {}",
+                    "{:>6} {:>18x} {:>6} {:>8} {:>12.0} {:>6.2} {:>6.1} {:>6.2} {:>8} {:>8} {:>8}  {}",
                     run.seed,
                     run.hash,
                     run.free_planets,
                     alive,
                     total,
+                    run.economy.essentials_met,
+                    run.economy.cohesion,
+                    run.economy.price_level,
+                    run.economy.secessions,
                     run.battles,
                     run.ships_lost,
                     biggest
@@ -230,7 +244,8 @@ fn main() -> ExitCode {
                 runs.iter().map(f).sum::<f64>() / runs.len().max(1) as f64
             };
             println!(
-                "Mittel: Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}, Zusammenhalt {:.1}",
+                "Mittel: Bevölkerung {:.0} Mio., Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}, Zusammenhalt {:.1}, Abspaltungen {:.1}",
+                mean(|r| r.economy.population),
                 mean(|r| r.economy.essentials_met),
                 mean(|r| r.economy.utilization),
                 mean(|r| r.economy.employment),
@@ -238,7 +253,8 @@ fn main() -> ExitCode {
                 mean(|r| r.economy.price_spread),
                 100.0 * mean(|r| r.economy.pinned_prices),
                 mean(|r| r.economy.freighters as f64),
-                mean(|r| r.economy.cohesion)
+                mean(|r| r.economy.cohesion),
+                mean(|r| r.economy.secessions as f64)
             );
             let per_polity = |f: fn(&sim::harness::PolitySummary) -> f64| {
                 let (sum, count) = runs

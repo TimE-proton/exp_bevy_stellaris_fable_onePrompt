@@ -503,6 +503,17 @@ impl WarScript {
             return;
         }
         sim.issue(a, SimCommand::DeclareWar { target: b });
+        // Nennt das Drehbuch eine Gemeinschaft, die es nicht gibt, wird die Erklärung
+        // abgelehnt und steht so im Protokoll; Flottenbefehle folgen ihr dann nicht.
+        let exists = |polity: PolityId| {
+            sim.polities()
+                .list
+                .get(polity.index())
+                .is_some_and(|found| found.alive)
+        };
+        if !exists(a) || !exists(b) {
+            return;
+        }
         let target = sim
             .polities()
             .list
