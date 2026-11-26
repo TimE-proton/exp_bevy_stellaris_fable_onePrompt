@@ -1050,6 +1050,7 @@ mod tests {
     use crate::ai::best_colony_target;
     use crate::clock::DAYS_PER_YEAR;
     use crate::command::CommandOutcome;
+    use crate::state::{SAVE_FORMAT, SaveError};
 
     fn data() -> GameData {
         GameData::load_workspace().unwrap()
@@ -1276,6 +1277,136 @@ mod tests {
         assert_eq!(plain.hash(), run_ai_game(&data, 4, 200).hash());
     }
 
+    /// Steht eine Flotte im Gefecht, gibt es das Gefecht auch, und umgekehrt.
+    fn fleets_match_battles(sim: &Headless) -> Result<(), String> {
+        let world = sim.world();
+        let fleets = world.resource::<Fleets>();
+        let battles = world.resource::<crate::fleet::Battles>();
+        for fleet in &fleets.list {
+            let entry = battles.of_fleet(fleet.id).map(|(battle, _)| battle.id);
+            if fleet.in_battle != entry.is_some() || fleet.battle != entry {
+                return Err(format!(
+                    "Takt {}: {} im Gefecht {} ({:?}), geführt in {entry:?}",
+                    sim.clock().tick,
+                    fleet.name,
+                    fleet.in_battle,
+                    fleet.battle
+                ));
+            }
+        }
+        check_invariants(world).map_err(|error| format!("Takt {}: {error}", sim.clock().tick))
+    }
+
+    /// Spielt `days` Tage und prüft nach jedem Tag, solange ein Gefecht läuft nach jedem
+    /// Takt, dass Flotten und Gefechte zueinander passen. Gibt die Zahl der Gefechte der
+    /// Partie zurück.
+    fn play_watching_battles(sim: &mut Headless, days: u64, seed: u64) -> u32 {
+        for _ in 0..days {
+            if needs_fine_ticks(sim.world()) {
+                for _ in 0..TICKS_PER_DAY {
+                    sim.tick();
+                    assert_eq!(fleets_match_battles(sim), Ok(()), "Seed {seed}");
+                }
+            } else {
+                sim.run_days(1);
+                assert_eq!(fleets_match_battles(sim), Ok(()), "Seed {seed}");
+            }
+        }
+        sim.world().resource::<crate::fleet::Battles>().next_id
+    }
+
+    #[test]
+    fn a_fleet_in_battle_always_has_its_battle_in_every_war() {
+        let data = data();
+        // Der Grenzkrieg der Sweeps: bis zur Kriegserklärung am Stück, dann sechs
+        // Kriegsjahre unter Beobachtung.
+        let start = 25 * DAYS_PER_YEAR;
+        let script = WarScript::new(border_war());
+        let mut fought = 0;
+        for seed in 0..4 {
+            let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+            script.run_until(&mut sim, start + 1, false);
+            let count = play_watching_battles(&mut sim, 6 * DAYS_PER_YEAR, seed);
+            println!("Grenzkrieg, Seed {seed}: {count} Gefechte");
+            fought += count;
+        }
+        assert!(fought >= 3, "nur {fought} Gefechte in vier Grenzkriegen");
+        // Kriege, in denen das Drehbuch die Flotten gegen den Sitz des Gegners führt: mehr
+        // Gefechte, auch mit drei Parteien, mit Rückzügen und Verlusten.
+        let script = WarScript::new(vec![
+            ScriptedEvent::rest_military(),
+            ScriptedEvent::war(40, PolityId(0), PolityId(1)),
+            ScriptedEvent::war(40, PolityId(2), PolityId(1)),
+        ]);
+        let mut fought = 0;
+        for seed in 0..8 {
+            let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+            script.run_until(&mut sim, 41, false);
+            let count = play_watching_battles(&mut sim, 2 * DAYS_PER_YEAR, seed);
+            println!("Seed {seed}: {count} Gefechte");
+            fought += count;
+        }
+        assert!(
+            fought >= 8,
+            "nur {fought} Gefechte in acht Kriegen nach Drehbuch"
+        );
+    }
+
+    #[test]
+    fn a_finished_battle_stays_readable_for_a_few_days() {
+        use crate::fleet::Battles;
+        let data = data();
+        let script = WarScript::new(vec![
+            ScriptedEvent::rest_military(),
+            ScriptedEvent::war(40, PolityId(0), PolityId(1)),
+            ScriptedEvent::war(40, PolityId(2), PolityId(1)),
+        ]);
+        let mut sim = Headless::new(
+            data,
+            SimConfig {
+                seed: 4,
+                player: None,
+            },
+        );
+        let mut running: Vec<crate::ids::BattleId> = Vec::new();
+        // Tag des Endes je Gefecht, sobald es aus den laufenden verschwunden ist.
+        let mut ended: BTreeMap<crate::ids::BattleId, u64> = BTreeMap::new();
+        for day in 1..=2 * DAYS_PER_YEAR {
+            script.run_until(&mut sim, day, false);
+            let battles = sim.world().resource::<Battles>();
+            for id in running.drain(..) {
+                if battles.get(id).is_none() {
+                    // Eben beendet: Der letzte Stand und die Bilanz sind beide lesbar.
+                    let last = battles.concluded(id).expect("der letzte Stand");
+                    let report = battles.report(id).expect("die Bilanz");
+                    assert!(last.finished && last.id == id && !last.ships.is_empty());
+                    assert_eq!(last.combatants.len(), report.sides.len());
+                    assert_eq!(report.system, last.system);
+                    ended.insert(id, report.ended / TICKS_PER_DAY);
+                }
+            }
+            running.extend(battles.active.iter().map(|battle| battle.id));
+            // Nach wenigen Tagen ist der letzte Stand fort, die Bilanz bleibt.
+            for (id, end) in &ended {
+                // Am Stichtag selbst entscheidet, ob der Tagesanfang schon gerechnet ist.
+                let kept = battles.concluded(*id).is_some();
+                let note = format!("Gefecht {id}, beendet am Tag {end}, heute Tag {day}");
+                assert!(kept || day >= end + Battles::CONCLUDED_DAYS, "{note}");
+                assert!(!kept || day <= end + Battles::CONCLUDED_DAYS, "{note}");
+            }
+            assert!(battles.concluded.len() <= Battles::CONCLUDED);
+            assert_eq!(check_invariants(sim.world()), Ok(()));
+        }
+        assert!(!ended.is_empty(), "kein Gefecht ging zu Ende");
+        // Der aufbewahrte Stand übersteht Speichern und Laden.
+        let text = sim.save().to_ron().unwrap();
+        let loaded = Headless::from_save(
+            sim.world().resource::<GameData>().clone(),
+            SaveGame::from_ron(&text).unwrap(),
+        );
+        assert_eq!(loaded.hash(), sim.hash());
+    }
+
     #[test]
     fn a_script_orders_ships_and_a_programme_replaces_what_a_war_costs() {
         let data = data();
@@ -1391,6 +1522,32 @@ mod tests {
         let mut save = sim.save();
         save.format = 99;
         let text = save.to_ron().unwrap();
-        assert!(SaveGame::from_ron(&text).is_err());
+        assert!(matches!(
+            SaveGame::from_ron(&text),
+            Err(SaveError::Format { found: 99 })
+        ));
+    }
+
+    #[test]
+    fn an_older_format_is_named_even_if_its_state_does_not_decode() {
+        // Ein Spielstand eines älteren Formats, dessen Zustand heute nicht mehr lesbar ist:
+        // Felder fehlen, eines trägt einen anderen Typ.
+        let text = "(format:2,data_hash:7,state:(clock:\"früher ein Text\",fleets:[1,2,3]))";
+        assert!(ron::from_str::<SaveGame>(text).is_err());
+        assert!(matches!(
+            SaveGame::from_ron(text),
+            Err(SaveError::Format { found: 2 })
+        ));
+        // Dasselbe mit der heutigen Nummer scheitert am Zustand, nicht am Format.
+        let current = text.replace("format:2", &format!("format:{SAVE_FORMAT}"));
+        assert!(matches!(
+            SaveGame::from_ron(&current),
+            Err(SaveError::Decode(_))
+        ));
+        // Was gar kein Spielstand ist, bleibt unlesbar.
+        assert!(matches!(
+            SaveGame::from_ron("kein Spielstand"),
+            Err(SaveError::Decode(_))
+        ));
     }
 }

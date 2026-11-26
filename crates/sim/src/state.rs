@@ -227,12 +227,20 @@ impl SaveGame {
     }
 
     pub fn from_ron(text: &str) -> Result<Self, SaveError> {
-        let save: Self =
-            ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))?;
-        if save.format != SAVE_FORMAT {
-            return Err(SaveError::Format { found: save.format });
+        // Erst nur die Formatnummer: Der Zustand eines älteren Formats lässt sich oft gar
+        // nicht entschlüsseln, und gemeldet werden soll das Format, nicht der Folgefehler.
+        #[derive(Deserialize)]
+        struct Header {
+            format: u32,
         }
-        Ok(save)
+        let header: Header =
+            ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))?;
+        if header.format != SAVE_FORMAT {
+            return Err(SaveError::Format {
+                found: header.format,
+            });
+        }
+        ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), SaveError> {

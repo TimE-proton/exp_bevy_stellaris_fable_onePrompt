@@ -166,13 +166,16 @@ fn monthly_books(
         }
     }
 
-    // Staatseinnahmen schätzen und Kriegsmüdigkeit fortschreiben.
+    // Staatseinnahmen glätten und Kriegsmüdigkeit fortschreiben. Maß sind die laufenden
+    // Einnahmen des abgeschlossenen Monats, dieselben, mit denen der Haushalt rechnet
+    // (`BudgetMonth::revenue`): Der Kassenstand taugt dafür nicht, denn der Haushalt gibt
+    // die Einnahmen Monat für Monat wieder aus.
     for polity in &polities.list {
         let index = polity.id.index();
         let treasury = economy.treasuries[index];
+        let income = to_credits(economy.state_income_of(polity.id)).max(0.0);
         let state = &mut finance.polities[index];
-        let change = to_credits(treasury - state.last_treasury).max(0.0);
-        state.revenue += 0.2 * (change - state.revenue);
+        state.revenue += 0.2 * (income - state.revenue);
         state.last_treasury = treasury;
         if diplomacy.is_at_war(polity.id) {
             state.war_weariness = (state.war_weariness + balance.weariness_per_month).min(100.0);

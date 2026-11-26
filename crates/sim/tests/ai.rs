@@ -579,15 +579,15 @@ fn wars_led_by_the_ai_do_not_repeat_the_same_empty_battle_or_sortie() {
 
 #[test]
 fn after_laying_up_ships_the_ai_does_not_order_new_ones_for_years() {
-    // Eine Partie, in der nach dem Grenzkrieg zwei Gemeinschaften ihre Flotte nicht mehr
-    // tragen und Schiffe stilllegen. Monat für Monat: Nach einer Stilllegung kommt im
+    // Eine Partie, in der nach dem Grenzkrieg eine Gemeinschaft ihre Flotte nicht mehr
+    // trägt und Schiffe stilllegt. Monat für Monat: Nach einer Stilllegung kommt im
     // Frieden layup_quiet_months lang kein neuer Auftrag hinzu.
     let quiet = data().balance.military.ai.layup_quiet_months as u64;
     let script = border_war(25, 45);
     let mut sim = Headless::new(
         data().clone(),
         SimConfig {
-            seed: 9,
+            seed: 19,
             player: None,
         },
     );

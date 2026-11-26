@@ -240,7 +240,9 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   abgeschlossene Monat eingebracht hat: Lohnsteuer, Zölle der Kontore, Dividenden auf
   staatliche Anteile. Aus der Kasse bedient der Staat dann seine Ansprüche in fester
   Rangfolge (`economy::Claim`):
-  1. **Schuldendienst:** Zinsen und fällige Anleihen.
+  1. **Schuldendienst:** Zinsen und fällige Anleihen. Den Zins neuer Anleihen misst der
+     Markt an der Schuld im Verhältnis zu den laufenden Einnahmen des Staates, geglättet
+     über die letzten Monate.
   2. **Grundleistungen:** laufende Verwaltung und Versorgung, ein fester Anteil
      (`civil_share`) der Einnahmen, gemittelt über zwölf Monate und gerechnet zum
      üblichen Lohnsteuersatz: Von den Einnahmen geht ab, was an Lohnsteuer wirklich
@@ -498,7 +500,9 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   verloren) drückt die Kurse aller Betriebe der Gemeinschaft. Was verschossen und
   beschädigt wurde, kauft der Staat zu Hause am Markt nach. Im System bleibt ein
   Trümmerfeld, das über die Jahre verblasst. Die Gegner kennen die Technik des jeweils
-  anderen danach besser.
+  anderen danach besser. Der letzte Stand eines beendeten Gefechts, Schiff für Schiff,
+  bleibt noch drei Tage lesbar (`Battles::concluded`), höchstens für acht Gefechte; die
+  Bilanz (`Battles::report`) bleibt länger.
 - **Werften.** Ein fertiges Schiff bleibt im Dock, solange feindliche Flotten im System
   stehen und keine eigene, einsatzbereite es aufnehmen kann.
 

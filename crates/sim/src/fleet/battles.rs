@@ -197,6 +197,16 @@ pub struct Debris {
     pub tick: u64,
 }
 
+/// Ein beendetes Gefecht in seinem letzten Stand: der Rechner, wie er nach dem letzten
+/// Takt stand, mit jedem Schiff. Die Bilanz dazu steht in [`Battles::reports`] unter
+/// derselben Nummer. Reine Auskunft für Ansichten; in der Partie folgt nichts daraus.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConcludedBattle {
+    pub battle: Battle,
+    /// Takt, in dem das Gefecht endete.
+    pub ended: u64,
+}
+
 /// Alle Gefechte der Partie: die laufenden, die Bilanzen der jüngsten, die Trümmer.
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Battles {
@@ -227,6 +237,11 @@ pub struct Battles {
     /// mit [`Battles::won_by`].
     #[serde(default)]
     pub won: Vec<u32>,
+    /// Eben beendete Gefechte in ihrem letzten Stand, ältestes zuerst: höchstens
+    /// [`Battles::CONCLUDED`], jedes [`Battles::CONCLUDED_DAYS`] Tage lang. Lesen mit
+    /// [`Battles::concluded`].
+    #[serde(default)]
+    pub concluded: Vec<ConcludedBattle>,
 }
 
 /// Ist die Partei aus dem Gefecht ausgeschieden?
@@ -247,6 +262,22 @@ fn side_of_fleet(departed: &[Departed], battle: &Battle, fleet: FleetId) -> Opti
 impl Battles {
     /// So viele Bilanzen bleiben im Zustand; ältere fallen heraus.
     pub const REPORTS: usize = 40;
+
+    /// So viele beendete Gefechte bleiben höchstens in ihrem letzten Stand lesbar.
+    pub const CONCLUDED: usize = 8;
+
+    /// So viele Tage nach seinem Ende bleibt der letzte Stand eines Gefechts lesbar.
+    pub const CONCLUDED_DAYS: u64 = 3;
+
+    /// Letzter Stand eines beendeten Gefechts, solange er noch aufbewahrt wird: der
+    /// Rechner nach dem letzten Takt, mit jedem Schiff. Die Bilanz gibt
+    /// [`Battles::report`].
+    pub fn concluded(&self, id: BattleId) -> Option<&Battle> {
+        self.concluded
+            .iter()
+            .find(|entry| entry.battle.id == id)
+            .map(|entry| &entry.battle)
+    }
 
     /// Das Gefecht, das in einem System läuft.
     pub fn in_system(&self, system: SystemId) -> Option<&Battle> {
@@ -413,6 +444,19 @@ impl Battles {
         }
         if self.reports.len() > Self::REPORTS {
             return Some("mehr Gefechtsbilanzen als vorgesehen".into());
+        }
+        if self.concluded.len() > Self::CONCLUDED {
+            return Some("mehr beendete Gefechte aufbewahrt als vorgesehen".into());
+        }
+        if let Some(entry) = self
+            .concluded
+            .iter()
+            .find(|entry| !entry.battle.finished || self.get(entry.battle.id).is_some())
+        {
+            return Some(format!(
+                "Gefecht {}: als beendet aufbewahrt, läuft aber noch",
+                entry.battle.id
+            ));
         }
         for pair in self.debris.windows(2) {
             if pair[0].system >= pair[1].system {
@@ -852,6 +896,10 @@ pub fn open_battles(
             .debris
             .retain(|debris| debris.amount >= DEBRIS_FLOOR);
     }
+    // Der letzte Stand beendeter Gefechte bleibt nur wenige Tage lesbar.
+    battles
+        .concluded
+        .retain(|entry| entry.ended / TICKS_PER_DAY + Battles::CONCLUDED_DAYS > day);
 
     // Einsatzbereite Flotten je System, in Nummernfolge.
     let mut present: BTreeMap<SystemId, Vec<usize>> = BTreeMap::new();
@@ -980,11 +1028,19 @@ pub fn advance_battles(
         .into_iter()
         .partition(|battle| battle.finished);
     battles.active = running;
-    for battle in &finished {
+    for battle in finished {
         conclude(
-            battle, galaxy, fleets, battles, diplomacy, finance, research, logistics, polities,
+            &battle, galaxy, fleets, battles, diplomacy, finance, research, logistics, polities,
             chronicle, data, tick,
         );
+        // Der letzte Stand bleibt für Ansichten noch einige Tage lesbar.
+        if battles.concluded.len() >= Battles::CONCLUDED {
+            battles.concluded.remove(0);
+        }
+        battles.concluded.push(ConcludedBattle {
+            battle,
+            ended: tick,
+        });
     }
     // Stärken nachführen; eine Flotte ohne Schiffe besteht nicht mehr.
     fleets.refresh(data);

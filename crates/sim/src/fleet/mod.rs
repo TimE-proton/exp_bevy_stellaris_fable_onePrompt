@@ -29,9 +29,9 @@ mod supply;
 mod yard;
 
 pub use battles::{
-    BattleOutcome, BattleReport, Battles, Debris, Departed, Departure, SideReport, advance_battles,
-    combat_modifiers, combatant_setup, crew_morale, loss_share, muster_battles, open_battles,
-    order_retreat, relay_orders, retreat_target, withdrawal_route,
+    BattleOutcome, BattleReport, Battles, ConcludedBattle, Debris, Departed, Departure, SideReport,
+    advance_battles, combat_modifiers, combatant_setup, crew_morale, loss_share, muster_battles,
+    open_battles, order_retreat, relay_orders, retreat_target, withdrawal_route,
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
