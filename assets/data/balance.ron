@@ -303,6 +303,10 @@
         // Linien ihrer Seite im System bleibt. Frühestens nach dieser Frist stehen
         // dieselben Gegner einander wieder gegenüber.
         regroup_days: 30,
+        // Waffenruhe nach einem Friedensschluss: So viele Tage lang erklären die beiden
+        // einander keinen neuen Krieg. Nicht kürzer als die Sammelfrist: Frieden und
+        // gleich wieder Krieg beginnt sonst ein laufendes Gefecht von vorn.
+        truce_days: 30,
         // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
         // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
         // Gemessen wird an der Flotte, wie sie in das Gefecht ging, mindestens aber am

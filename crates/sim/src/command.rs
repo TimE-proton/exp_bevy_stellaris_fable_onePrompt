@@ -345,6 +345,7 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             tick,
             polity,
             *target,
+            ctx.data.balance.military.truce_days,
         ),
         SimCommand::BuyShares {
             issuer,

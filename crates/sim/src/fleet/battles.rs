@@ -1197,14 +1197,21 @@ fn conclude(
     let holding: Vec<bool> = (0..parties)
         .map(|side| left[side].is_none() && holds_field(&results, side))
         .collect();
-    // Je Seite gefragt: Hält ein Gegner das Feld, oder jemand, mit dem die Partei nicht im
-    // Krieg liegt?
+    // Je Seite gefragt: Hält ein Gegner das Feld, oder jemand von der eigenen Seite?
     let foe_holds = |side: usize| {
         (0..parties).any(|other| holding[other] && battle.is_hostile(side as u16, other as u16))
     };
+    // Die eigene Seite ist, wer einen Gegner mit der Partei teilt. Wer nur nicht (oder
+    // nach einem Friedensschluss nicht mehr) ihr Gegner ist, deckt ihren Rückzug nicht.
     let friend_holds = |side: usize| {
         (0..parties).any(|other| {
-            other != side && holding[other] && !battle.is_hostile(side as u16, other as u16)
+            other != side
+                && holding[other]
+                && !battle.is_hostile(side as u16, other as u16)
+                && (0..parties).any(|foe| {
+                    battle.is_hostile(side as u16, foe as u16)
+                        && battle.is_hostile(other as u16, foe as u16)
+                })
         })
     };
 

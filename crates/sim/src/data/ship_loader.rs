@@ -536,6 +536,11 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             military.regroup_days >= 1,
         ),
         (
+            // Sonst ließe sich eine Sammelfrist mit Frieden und neuem Krieg abkürzen.
+            "truce_days darf nicht unter regroup_days liegen",
+            military.truce_days >= military.regroup_days,
+        ),
+        (
             "weariness_per_navy_lost muss in 0..100 liegen",
             (0.0..=100.0).contains(&military.weariness_per_navy_lost),
         ),

@@ -444,6 +444,9 @@ pub struct MilitaryBalance {
     pub morale_per_arrears: f32,
     /// Tage, die eine Flotte nach dem Abzug aus einem Gefecht braucht, um sich zu sammeln.
     pub regroup_days: u64,
+    /// Tage Waffenruhe nach einem Friedensschluss: So lange erklären die beiden einander
+    /// keinen neuen Krieg. Mindestens die Sammelfrist.
+    pub truce_days: u64,
     /// Zuwachs der Kriegsmüdigkeit (0..100), wenn eine Gemeinschaft in einem Gefecht den
     /// Bauwert ihrer gesamten Flotte verlöre; kleinere Verluste zählen anteilig.
     pub weariness_per_navy_lost: f64,
