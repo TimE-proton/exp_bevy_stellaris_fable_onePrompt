@@ -523,8 +523,9 @@ pub struct SiegeBalance {
     /// Faktor auf die Stärke einer Seite ohne Nachschub bzw. ohne Vorräte.
     pub unsupplied: f64,
     /// Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Landungstruppe
-    /// sinken; die Landung ist abgeschlagen, wenn die Truppe unter diesen Anteil ihres
-    /// Höchststands fällt.
+    /// sinken; die Oberfläche bricht, wenn sie unter diesen Anteil ihres Anfangs sinken;
+    /// die Landung ist abgeschlagen, wenn die Truppe unter diesen Anteil ihres Höchststands
+    /// fällt.
     pub zone_fall: f64,
     /// Befestigungsfaktor je Zone: Umland, Stadt, Zentrum, Batterie, Schildwerk.
     pub fort: [f64; 5],

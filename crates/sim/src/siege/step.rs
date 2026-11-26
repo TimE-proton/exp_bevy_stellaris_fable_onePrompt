@@ -862,8 +862,19 @@ impl Projection {
         effects
     }
 
-    /// Gelänge der Sturm, wenn jetzt alles landete? Er gilt als gelungen, wenn der Planet
-    /// fällt und die Truppe dabei höchstens den Anteil `storm_loss_limit` verliert.
+    /// Feuerstufe für den nächsten Tag: Mit leeren Magazinen bleibt die Flotte im hohen
+    /// Orbit, statt sich nutzlos den Geschützen auszusetzen.
+    fn fire_while_armed(&self, fire: Fire) -> Fire {
+        if self.orbit.ammo > 0.0 {
+            fire
+        } else {
+            Fire::Hold
+        }
+    }
+
+    /// Gelänge der Sturm, wenn jetzt alles landete und die Feuerstufe bliebe? Er gilt als
+    /// gelungen, wenn der Planet fällt und die Truppe dabei höchstens den Anteil
+    /// `storm_loss_limit` verliert.
     pub fn storm_succeeds(&self, balance: &SiegeBalance) -> bool {
         let mut trial = self.clone();
         let force = trial.siege.army + trial.orbit.embarked.max(0.0);
@@ -871,9 +882,11 @@ impl Projection {
             return false;
         }
         let tolerated = trial.own_losses + balance.storm_loss_limit * force;
+        let fire = trial.siege.orders.fire;
         trial.land(trial.orbit.embarked, balance);
         trial.siege.orders.assault = true;
         for _ in self.days..balance.max_siege_days {
+            trial.siege.orders.fire = trial.fire_while_armed(fire);
             trial.step(balance);
             if trial.repelled || trial.own_losses > tolerated {
                 return false;
@@ -898,14 +911,14 @@ impl Projection {
                 self.siege.orders.assault = false;
             }
             Course::Storm => {
-                self.siege.orders.fire = Fire::Support;
+                self.siege.orders.fire = self.fire_while_armed(Fire::Support);
                 if ready {
                     self.land(self.orbit.embarked, balance);
                 }
                 self.siege.orders.assault = self.siege.army > 0.0;
             }
             Course::Area => {
-                self.siege.orders.fire = Fire::Area;
+                self.siege.orders.fire = self.fire_while_armed(Fire::Area);
                 if ready && self.storm_succeeds(balance) {
                     self.land(self.orbit.embarked, balance);
                 }
@@ -1001,8 +1014,9 @@ pub fn trace(
 /// Rechnet einen Weg des Belagerers voraus, Tag für Tag mit [`resolve`]: Aushungern (kein
 /// Feuer, keine Landung), Sturm (jetzt alles landen, stürmen, Stützfeuer) oder
 /// Flächenbeschuss (gelandet wird, sobald der Sturm mit tragbaren Verlusten gelingt).
-/// Bevölkerung, Zusammenhalt, Versorgung und Marktanteil der Garnison bleiben dabei, wie
-/// die Sicht sie nennt; Magazine, Tanks und Rumpf der Flotte schwinden mit.
+/// Zusammenhalt, Versorgung und Marktanteil der Garnison bleiben dabei, wie die Sicht sie
+/// nennt; Bevölkerung und Wert der Betriebe folgen dem Schaden, Magazine, Tanks und Rumpf
+/// der Flotte schwinden mit. Sind die Magazine leer, stellt die Flotte das Feuer ein.
 pub fn forecast(view: &SiegeView, course: Course, balance: &SiegeBalance) -> Forecast {
     trace(view, course, balance, &mut |_, _| {})
 }
@@ -1864,7 +1878,7 @@ mod tests {
                 firm_value: 12_000.0,
             }
         };
-        for course in [Course::Starve, Course::Storm] {
+        for course in Course::ALL {
             let view = build();
             let mut days = Vec::new();
             let forecast = trace(&view, course, &balance, &mut |projection, effects| {
@@ -1877,7 +1891,8 @@ mod tests {
             assert!(forecast.falls, "{}", course.label());
             assert_eq!(forecast.days as usize, days.len());
 
-            // Derselbe Weg von Hand: Befehle setzen, landen, Tag für Tag rechnen.
+            // Derselbe Weg von Hand: Befehle setzen, landen, Tag für Tag rechnen. Die
+            // Truppe ist stark genug, dass auch unter Flächenbeschuss sofort gelandet wird.
             let (mut siege, mut defense) = (view.siege.clone(), view.defense.clone());
             let (mut facts, mut orbit) = (view.facts, view.orbit);
             let (mut own_losses, mut enemy_losses, mut hull) = (0.0, 0.0, 0.0);
@@ -1890,7 +1905,12 @@ mod tests {
                         siege.orders.assault = false;
                     }
                     _ => {
-                        siege.orders.fire = Fire::Support;
+                        // Mit leeren Magazinen bliebe die Flotte im hohen Orbit.
+                        siege.orders.fire = match course {
+                            _ if orbit.ammo <= 0.0 => Fire::Hold,
+                            Course::Area => Fire::Area,
+                            _ => Fire::Support,
+                        };
                         if orbit.embarked > 0.0 {
                             let landing = land(
                                 &mut siege,
@@ -1938,6 +1958,7 @@ mod tests {
                 _ => {
                     assert_eq!(forecast.outcome, Some(Outcome::Stormed));
                     assert!(forecast.own_losses > 0.0 && forecast.hull_loss > 0.0);
+                    assert_eq!(forecast.prize_loss > 0.02, course == Course::Area);
                 }
             }
         }
