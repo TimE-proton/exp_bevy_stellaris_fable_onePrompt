@@ -269,6 +269,7 @@ fn budget(
              Staatskasse liegt.",
         );
         let slider = egui::Slider::new(&mut wanted, 0.0..=(max_share * 100.0) as f32)
+            .step_by(1.0)
             .fixed_decimals(0)
             .suffix(" % der laufenden Staatseinnahmen");
         if ui.add(slider).changed() {

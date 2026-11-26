@@ -167,22 +167,48 @@ fn report_rejections(
     }
 }
 
+/// Speicherformat, das am Anfang eines Spielstands steht, ohne den Zustand zu lesen. Für
+/// Stände, deren Zustand sich gar nicht mehr deuten lässt: So erfährt der Spieler trotzdem,
+/// dass es am Alter des Stands liegt und nicht an einer beschädigten Datei.
+fn declared_format(path: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let number = text
+        .trim_start()
+        .strip_prefix('(')?
+        .trim_start()
+        .strip_prefix("format")?
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let end = number
+        .find(|sign: char| !sign.is_ascii_digit())
+        .unwrap_or(number.len());
+    number[..end].parse().ok()
+}
+
 /// Was der Spieler erfährt, wenn sich ein Spielstand nicht laden lässt. Ein Stand aus
 /// einer anderen Fassung des Spiels wird am Speicherformat erkannt und abgelehnt; die
 /// laufende Partie bleibt davon unberührt.
 fn load_failure(path: &Path, error: &SaveError) -> String {
-    match error {
-        SaveError::Format { found } if *found < SAVE_FORMAT => format!(
+    let other_format = match error {
+        SaveError::Format { found } => Some(*found),
+        // Der Kern prüft das Format erst, nachdem er den ganzen Zustand gelesen hat. Einem
+        // Stand, an dem er schon dabei scheitert, sieht man sein Format am Dateianfang an.
+        SaveError::Decode(_) => declared_format(path).filter(|found| *found != SAVE_FORMAT),
+        _ => None,
+    };
+    match other_format {
+        Some(found) if found < SAVE_FORMAT => format!(
             "{} stammt aus einer älteren Fassung des Spiels (Speicherformat {found}) und lässt \
              sich nicht mehr laden. Diese Fassung liest Format {SAVE_FORMAT}.",
             path.display()
         ),
-        SaveError::Format { found } => format!(
+        Some(found) => format!(
             "{} stammt aus einer neueren Fassung des Spiels (Speicherformat {found}). Diese \
              Fassung liest Format {SAVE_FORMAT}.",
             path.display()
         ),
-        other => other.to_string(),
+        None => error.to_string(),
     }
 }
 
@@ -524,13 +550,45 @@ mod tests {
         let tick = game.resource::<SimClock>().tick;
         game.send(SessionRequest::Load(path.clone()));
         game.frames(4);
-        let _ = std::fs::remove_file(&path);
         assert_eq!(game.state(), AppState::InGame);
         assert_eq!(game.resource::<SimConfig>().seed, 3);
         assert!(game.resource::<SimClock>().tick > tick);
         assert!(!game.resource::<SimSpeed>().paused);
         let notice = game.resource::<Notice>();
         assert!(notice.is_error && notice.text.contains("älteren Fassung"));
+
+        // Ein alter Stand, dessen Zustand sich gar nicht mehr lesen lässt, wird ebenso am
+        // Format erkannt; eine beschädigte Datei im geltenden Format ist schlicht unlesbar,
+        // und ein Stand aus einer neueren Fassung heißt auch so.
+        let cases = [
+            (
+                format!("(format:{older},data_hash:1,state:(galaxy:42))"),
+                "älteren Fassung",
+            ),
+            (
+                format!("(format:{SAVE_FORMAT},data_hash:1,state:(galaxy:42))"),
+                "Spielstand unlesbar",
+            ),
+            (
+                format!("(format:{},data_hash:1,state:())", SAVE_FORMAT + 1),
+                "neueren Fassung",
+            ),
+            ("kein Spielstand".to_string(), "Spielstand unlesbar"),
+        ];
+        for (content, expected) in cases {
+            std::fs::write(&path, &content).unwrap();
+            game.send(SessionRequest::Load(path.clone()));
+            game.frames(3);
+            let notice = game.resource::<Notice>();
+            assert!(
+                notice.is_error && notice.text.contains(expected),
+                "{content}: {}",
+                notice.text
+            );
+            assert_eq!(game.state(), AppState::InGame);
+            assert_eq!(game.resource::<SimConfig>().seed, 3);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

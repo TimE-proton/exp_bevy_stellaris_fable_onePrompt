@@ -323,7 +323,8 @@ pub fn chains_window(
                             None => inputs.join(" + "),
                         };
                         ui.label(source);
-                        ui.label("→");
+                        // Der Pfeil „→“ fehlt in der Schrift der Oberfläche.
+                        ui.label(RichText::new("▶").color(MUTED));
                         ui.label(format!(
                             "{} {}",
                             decimal(recipe.output.1 as f64, 2),

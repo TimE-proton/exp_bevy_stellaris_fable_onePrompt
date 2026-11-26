@@ -222,12 +222,16 @@ fn fleet_row(
         // Die Spalten sind so breit wie ihr Text; umbrochen wird in der Tabelle nicht.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.label(location(sim, fleet));
-        let mut note = state.label();
-        if !fleet.has_fuel() && !state.in_battle() {
-            note.push_str(", Tank leer");
-        }
-        let shown = ui.label(detail(note).color(state.color()));
-        if !fleet.has_fuel() {
+        // Ein leerer Tank ändert, was die Flotte leisten kann; im Gefecht zählt er nicht.
+        let dry = !fleet.has_fuel() && !state.in_battle();
+        let note = match state {
+            FleetState::Stationed if dry => "ohne Treibstoff".to_string(),
+            _ if dry => format!("{}, Tank leer", state.label()),
+            _ => state.label(),
+        };
+        let color = if dry { REGROUP } else { state.color() };
+        let shown = ui.label(detail(note).color(color));
+        if dry {
             shown.on_hover_text(
                 "Ohne Treibstoff schleppt sich die Flotte nur noch voran; sie sperrt kein \
                  System, kapert nicht und gibt kein Geleit.",

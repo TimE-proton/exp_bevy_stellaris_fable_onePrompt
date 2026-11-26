@@ -436,11 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn better_propulsion_moves_the_marker_further_each_day() {
+    fn the_marker_follows_propulsion_and_fuel() {
         let data = sim::GameData::load_workspace().unwrap();
-        let mut slow = marching(&data);
+        let mut plain = marching(&data);
         let mut fast = marching(&data);
-        // Dieselbe Partie, einmal mit der nächsten Antriebstechnik.
+        let mut dry = marching(&data);
+        // Dieselbe Partie, einmal mit der nächsten Antriebstechnik …
         let boost = (0..data.techs.len() as u16)
             .find(|tech| {
                 !fast.research().knows(PolityId(0), *tech)
@@ -453,16 +454,28 @@ mod tests {
         fast.world_mut()
             .resource_mut::<Research>()
             .grant(&data, PolityId(0), boost);
-        let start = markers_of(&slow)[0].at;
-        for sim in [&mut slow, &mut fast] {
+        // … und einmal mit leeren Tanks: Die Flotte schleppt sich nur noch voran.
+        for ship in &mut dry.world_mut().resource_mut::<Fleets>().list[0].ships {
+            ship.fuel = 0.0;
+        }
+        let start = markers_of(&plain)[0].at;
+        for sim in [&mut plain, &mut fast, &mut dry] {
             for _ in 0..TICKS_PER_DAY / 2 {
                 sim.tick();
             }
         }
-        let (plain, boosted) = (markers_of(&slow)[0].at, markers_of(&fast)[0].at);
+        let moved = |sim: &Headless| markers_of(sim)[0].at.distance(start);
         assert!(
-            boosted.distance(start) > plain.distance(start) * 1.05,
-            "{plain:?} ohne, {boosted:?} mit besserem Antrieb"
+            moved(&fast) > moved(&plain) * 1.05,
+            "{} ohne, {} mit besserem Antrieb",
+            moved(&plain),
+            moved(&fast)
+        );
+        assert!(
+            moved(&dry) < moved(&plain) * 0.6,
+            "{} mit vollem, {} mit leerem Tank",
+            moved(&plain),
+            moved(&dry)
         );
     }
 
