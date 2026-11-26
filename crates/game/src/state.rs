@@ -24,8 +24,7 @@ pub enum AppState {
 pub enum ViewState {
     #[default]
     Galaxy,
-    /// 3D-Schlachtansicht (ab Meilenstein 4).
-    #[allow(dead_code)]
+    /// 3D-Schlachtansicht eines Gefechts der Partie.
     Battle,
     /// Belagerungsansicht (ab Meilenstein 5).
     #[allow(dead_code)]

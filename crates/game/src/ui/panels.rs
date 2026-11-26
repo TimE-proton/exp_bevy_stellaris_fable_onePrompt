@@ -1,7 +1,8 @@
 //! Die einzelnen Fenster und Leisten.
 
 use super::format::{decimal, percent, population};
-use super::{LeftTab, UiState, economy, finance, fleets};
+use super::{LeftTab, UiState, economy, finance, fleets, tech};
+use crate::battle_view::campaign::{BattleMarker, WATCH, can_watch};
 use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
@@ -9,17 +10,18 @@ use crate::time_control::{SPEED_LABELS, SimSpeed};
 use bevy_egui::egui::{self, Align, Align2, Color32, Layout, RichText};
 use sim::chronicle::{Chronicle, ChronicleKind};
 use sim::clock::{SimClock, date_of_tick};
-use sim::command::SimCommand;
+use sim::command::{QueuedCommand, SimCommand};
 use sim::data::{GameData, Rgb};
 use sim::diplomacy::Diplomacy;
 use sim::economy::{Economy, to_credits};
 use sim::finance::Finance;
-use sim::fleet::Fleets;
+use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
-use sim::ids::{PlanetId, SystemId};
+use sim::ids::{BattleId, PlanetId, PolityId, SystemId};
 use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
 use sim::state::SimConfig;
+use sim::tech::Research;
 
 /// Lesender Blick auf die laufende Partie.
 pub struct SimRefs<'a> {
@@ -33,8 +35,26 @@ pub struct SimRefs<'a> {
     pub finance: &'a Finance,
     pub logistics: &'a Logistics,
     pub fleets: &'a Fleets,
+    pub battles: &'a Battles,
+    pub research: &'a Research,
     pub diplomacy: &'a Diplomacy,
     pub history: &'a PriceHistory,
+    /// Befehle, die auf den nächsten Takt warten (die Zeit steht). Nur zum Lesen: Was
+    /// schon vorgemerkt ist, bietet die Oberfläche nicht an, als wäre nichts geschehen.
+    pub pending: &'a [QueuedCommand],
+}
+
+/// Der Teil des Bildschirms unter der Kopfleiste. Die Fenster der Partie bleiben in ihm,
+/// auch wenn das Spielfenster kleiner wird: Datum, Pause und Stufen bleiben erreichbar.
+pub fn window_area(ctx: &egui::Context, bar_bottom: f32) -> egui::Rect {
+    let screen = ctx.content_rect();
+    egui::Rect::from_min_max(egui::pos2(screen.left(), bar_bottom), screen.max)
+}
+
+/// Höchste Höhe für den Inhalt eines Fensters, das in `area` ganz Platz haben soll: Titel
+/// und Rahmen brauchen ihren Teil.
+pub fn window_room(area: egui::Rect) -> f32 {
+    (area.height() - 64.0).max(160.0)
 }
 
 /// Was der Spieler in der Oberfläche ausgelöst hat.
@@ -48,18 +68,68 @@ pub enum UiAction {
     /// Emittenten an der Börse zeigen.
     ShowIssuer(sim::ids::IssuerId),
     Command(SimCommand),
+    /// Ein laufendes Gefecht der Partie in der Schlachtansicht zeigen.
+    WatchBattle(sim::ids::BattleId),
     Quit,
 }
 
 pub const ACCENT: Color32 = Color32::from_rgb(250, 180, 64);
 pub const MUTED: Color32 = Color32::from_rgb(140, 150, 165);
 
+/// Text für Einzelheiten und Erläuterungen: kleiner als der Fließtext, aber gut lesbar.
+pub fn detail(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(11.0)
+}
+
 pub fn apply_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = Color32::from_rgba_unmultiplied(14, 17, 26, 238);
-    visuals.window_fill = Color32::from_rgba_unmultiplied(18, 22, 33, 245);
+    // Deckend: Durch leicht durchsichtige Leisten, Tafeln und Fenster schienen die
+    // Beschriftungen der Karte und die Markierungen der Schlacht in ihren Text.
+    visuals.panel_fill = Color32::from_rgb(14, 17, 26);
+    visuals.window_fill = Color32::from_rgb(18, 22, 33);
     visuals.selection.bg_fill = Color32::from_rgb(60, 90, 140);
     ctx.set_visuals(visuals);
+}
+
+/// Leiste aus einer linken und einer rechtsbündigen Gruppe. Reicht die Breite nicht für
+/// beide nebeneinander (schmales Fenster), rückt die rechte Gruppe in eine zweite Zeile,
+/// statt die linke zu überdecken.
+pub fn split_bar(
+    ui: &mut egui::Ui,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
+) {
+    // Wie breit die rechte Gruppe ist, zeigt sich erst beim Zeichnen; es zählt die Breite
+    // aus dem vorigen Durchlauf.
+    let id = ui.id().with("rechte_gruppe");
+    let known: Option<f32> = ui.data(|data| data.get_temp(id));
+    let full = ui.available_width();
+    let gap = ui.spacing().item_spacing.x * 2.0;
+    let mut right = Some(right);
+    let mut measured = None;
+    ui.horizontal(|ui| {
+        left(ui);
+        let used = ui.min_rect().width();
+        if known.is_none_or(|width| used + gap + width <= full)
+            && let Some(right) = right.take()
+        {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                right(ui);
+                measured = Some(ui.min_rect().width());
+            });
+        }
+    });
+    if let Some(right) = right {
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                right(ui);
+                measured = Some(ui.min_rect().width());
+            });
+        });
+    }
+    if let Some(width) = measured {
+        ui.data_mut(|data| data.insert_temp(id, width));
+    }
 }
 
 pub fn color32(color: Rgb) -> Color32 {
@@ -145,14 +215,16 @@ pub fn in_game(
     state: &mut UiState,
     speed: &SimSpeed,
     selection: &Selection,
+    markers: &[BattleMarker],
     actions: &mut Vec<UiAction>,
 ) {
-    egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
+    let bar =
+        egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
     egui::Panel::bottom("chronik")
         .resizable(true)
         .default_size(118.0)
         .size_range(60.0..=320.0)
-        .show(root, |ui| chronicle(ui, sim));
+        .show(root, |ui| chronicle(ui, sim, actions));
     egui::Panel::left("auswahl")
         .resizable(true)
         .default_size(430.0)
@@ -165,17 +237,62 @@ pub fn in_game(
         .show(root, |ui| polities_panel(ui, sim, actions));
 
     let ctx = root.ctx().clone();
+    battle_markers(&ctx, root.available_rect_before_wrap(), markers, actions);
     let shown_planet = shown_planet(sim, selection);
-    economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
-    economy::flows_window(&ctx, sim, &mut state.flows_open, None);
-    fleets::fleets_window(&ctx, sim, &mut state.fleets_open, selection, actions);
-    finance::exchange_window(&ctx, sim, state, actions);
-    finance::treasury_window(&ctx, sim, state, actions);
+    let area = window_area(&ctx, bar.response.rect.bottom());
+    economy::chains_window(&ctx, area, sim, &mut state.chains_open, shown_planet);
+    economy::flows_window(&ctx, area, sim, &mut state.flows_open, None);
+    fleets::fleets_window(&ctx, area, sim, state, selection, actions);
+    tech::tech_window(&ctx, area, sim, state, actions);
+    finance::exchange_window(&ctx, area, sim, state, actions);
+    finance::treasury_window(&ctx, area, sim, state, actions);
     if state.menu_open {
         pause_menu(root.ctx(), state, actions);
     }
     if state.help_open {
         help_window(root.ctx(), &mut state.help_open, false);
+    }
+}
+
+/// Ein Knopf zur Schlachtansicht, wie er an mehreren Stellen steht. `place` unterscheidet
+/// die Stellen für Vorleseprogramme.
+pub fn watch_button(ui: &mut egui::Ui, place: &str) -> bool {
+    let button = ui
+        .small_button(RichText::new(WATCH).color(Color32::from_rgb(235, 110, 95)))
+        .on_hover_text(
+            "Zeigt das laufende Gefecht in der Schlachtansicht. Es läuft mit der Zeit der \
+             Partie weiter; „Verlassen“ führt jederzeit zurück zur Karte.",
+        );
+    if !place.is_empty() {
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{WATCH}: {place}"))
+        });
+    }
+    button.clicked()
+}
+
+/// An der Marke jedes sichtbaren Gefechts auf der Karte steht der Knopf zur
+/// Schlachtansicht, soweit die Marke im freien Teil der Karte liegt. Die Knöpfe liegen
+/// in der Ebene der Karte, unter allen Fenstern.
+fn battle_markers(
+    ctx: &egui::Context,
+    free: egui::Rect,
+    markers: &[BattleMarker],
+    actions: &mut Vec<UiAction>,
+) {
+    for marker in markers {
+        let pos = egui::pos2(marker.at.x + 14.0, marker.at.y + 12.0);
+        if !free.shrink(8.0).contains(pos) {
+            continue;
+        }
+        egui::Area::new(egui::Id::new(("gefechtsmarke", marker.id.0)))
+            .order(egui::Order::Background)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                if watch_button(ui, &marker.system) {
+                    actions.push(UiAction::WatchBattle(marker.id));
+                }
+            });
     }
 }
 
@@ -193,7 +310,7 @@ fn top_bar(
     speed: &SimSpeed,
     actions: &mut Vec<UiAction>,
 ) {
-    ui.horizontal(|ui| {
+    let left = |ui: &mut egui::Ui| {
         ui.add_space(4.0);
         match sim.config.player {
             Some(player) => {
@@ -253,38 +370,53 @@ fn top_bar(
         if speed.paused {
             ui.label(RichText::new("PAUSIERT").color(ACCENT).strong());
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Menü").on_hover_text("Esc").clicked() {
-                state.menu_open = !state.menu_open;
-            }
-            if ui.button("Hilfe").on_hover_text("F1").clicked() {
-                state.help_open = !state.help_open;
-            }
-            ui.separator();
-            ui.toggle_value(&mut state.fleets_open, "Flotten");
-            ui.toggle_value(&mut state.treasury_open, "Staat");
-            ui.toggle_value(&mut state.exchange_open, "Börse");
-            ui.toggle_value(&mut state.chains_open, "Ketten");
-            ui.toggle_value(&mut state.flows_open, "Warenflüsse");
-            ui.separator();
-            let free = sim
-                .galaxy
-                .planets
-                .iter()
-                .filter(|planet| planet.owner.is_none())
-                .count();
-            ui.label(
-                RichText::new(format!(
-                    "{free} von {} Planeten frei",
-                    sim.galaxy.planets.len()
-                ))
-                .color(if free == 0 { ACCENT } else { MUTED }),
-            );
-        });
-    });
+    };
+    let right = |ui: &mut egui::Ui| {
+        if ui.button("Menü").on_hover_text("Esc").clicked() {
+            state.menu_open = !state.menu_open;
+        }
+        if ui.button("Hilfe").on_hover_text("F1").clicked() {
+            state.help_open = !state.help_open;
+        }
+        ui.separator();
+        ui.toggle_value(&mut state.fleets_open, fleets::TITLE);
+        ui.toggle_value(&mut state.tech_open, tech::TITLE);
+        ui.toggle_value(&mut state.treasury_open, "Staat");
+        ui.toggle_value(&mut state.exchange_open, "Börse");
+        ui.toggle_value(&mut state.chains_open, "Ketten");
+        ui.toggle_value(&mut state.flows_open, "Warenflüsse");
+        ui.separator();
+        let free = sim
+            .galaxy
+            .planets
+            .iter()
+            .filter(|planet| planet.owner.is_none())
+            .count();
+        ui.label(
+            RichText::new(format!(
+                "{free} von {} Planeten frei",
+                sim.galaxy.planets.len()
+            ))
+            .color(if free == 0 { ACCENT } else { MUTED }),
+        );
+    };
+    split_bar(ui, left, right);
 }
 
-fn chronicle(ui: &mut egui::Ui, sim: &SimRefs) {
+/// Das laufende Gefecht, von dem ein Eintrag der Chronik berichtet, wenn der Spieler es
+/// ansehen darf.
+fn battle_of_entry(sim: &SimRefs, entry: &sim::chronicle::ChronicleEntry) -> Option<BattleId> {
+    if entry.kind != ChronicleKind::War {
+        return None;
+    }
+    let battle = sim.battles.in_system(entry.system?)?;
+    // Einträge aus der Zeit vor dem Gefecht gelten einem früheren.
+    let began = sim.clock.tick.saturating_sub(battle.tick);
+    (entry.tick >= began && can_watch(sim.galaxy, sim.fleets, sim.config.player, battle))
+        .then_some(battle.id)
+}
+
+fn chronicle(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>) {
     ui.label(RichText::new("Chronik").strong());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -302,6 +434,11 @@ fn chronicle(ui: &mut egui::Ui, sim: &SimRefs) {
                         None => chronicle_color(entry.kind),
                     };
                     ui.label(RichText::new(&entry.text).color(color));
+                    if let Some(battle) = battle_of_entry(sim, entry)
+                        && watch_button(ui, "Chronik")
+                    {
+                        actions.push(UiAction::WatchBattle(battle));
+                    }
                 });
             }
         });
@@ -605,11 +742,12 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
         .iter()
         .map(|planet| planet.population)
         .sum();
+    let mut truces: Vec<(PolityId, u64)> = Vec::new();
     egui::Grid::new("gemeinschaften")
         .striped(true)
-        .num_columns(5)
+        .num_columns(6)
         .show(ui, |ui| {
-            for title in ["", "Planeten", "Bevölkerung", "Anteil", ""] {
+            for title in ["", "Planeten", "Bevölkerung", "Anteil", "Schiffe", ""] {
                 ui.label(RichText::new(title).color(MUTED).small());
             }
             ui.end_row();
@@ -635,6 +773,17 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.label(sim.galaxy.planets_of(polity.id).count().to_string());
                 ui.label(population(people));
                 ui.label(percent((people / total.max(1.0)) as f32));
+                // Die Gemeinschaften rüsten selbst: Die Zahl zeigt, wer wie stark ist.
+                let (fleets, ships) = sim
+                    .fleets
+                    .of(polity.id)
+                    .fold((0, 0), |(fleets, ships), fleet| {
+                        (fleets + 1, ships + fleet.ships.len())
+                    });
+                ui.label(ships.to_string()).on_hover_text(format!(
+                    "{ships} Schiffe in {fleets} {}",
+                    if fleets == 1 { "Flotte" } else { "Flotten" }
+                ));
                 match sim.config.player {
                     Some(player) if player != polity.id && polity.alive => {
                         if sim.diplomacy.at_war(player, polity.id) {
@@ -647,6 +796,17 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                                     target: polity.id,
                                 }));
                             }
+                        } else if let Some(until) =
+                            sim.diplomacy
+                                .truce_until(player, polity.id, sim.clock.day())
+                        {
+                            // Der Kern lehnte die Erklärung ab; die Frist nennt er selbst.
+                            // Der Knopf bleibt so schmal wie seine Spalte, die Tage stehen
+                            // unter der Liste: Eine längere Beschriftung liefe aus dem Fenster.
+                            let days = until - sim.clock.day();
+                            ui.add_enabled(false, egui::Button::new("Krieg").small())
+                                .on_disabled_hover_text(truce_text(days));
+                            truces.push((polity.id, days));
                         } else if ui
                             .small_button("Krieg")
                             .on_hover_text(
@@ -666,6 +826,34 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.end_row();
             }
         });
+    for (a, b) in &sim.diplomacy.wars {
+        ui.label(detail(war_line(sim, *a, *b)).color(MUTED));
+    }
+    for (polity, days) in truces {
+        ui.label(detail(truce_line(&sim.polities.get(polity).name, days)).color(MUTED));
+    }
+}
+
+/// Eine Zeile je Krieg: Wer mit wem im Krieg liegt, sieht auch, wer nicht beteiligt ist.
+pub fn war_line(sim: &SimRefs, a: PolityId, b: PolityId) -> String {
+    format!(
+        "Krieg: {} gegen {}",
+        sim.polities.get(a).name,
+        sim.polities.get(b).name
+    )
+}
+
+/// Warum der Knopf „Krieg“ gesperrt ist: Nach einem Friedensschluss gilt eine Waffenruhe.
+pub fn truce_text(days: u64) -> String {
+    format!(
+        "Waffenruhe: Nach dem Friedensschluss lässt sich noch {days} Tage kein Krieg \
+         erklären."
+    )
+}
+
+/// Eine Zeile je Waffenruhe des Spielers unter der Liste: mit wem und wie lange noch.
+pub fn truce_line(name: &str, days: u64) -> String {
+    format!("Waffenruhe mit {name}: noch {days} Tage")
 }
 
 fn pause_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
@@ -767,11 +955,13 @@ pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
             if battle {
                 ui.label("Kleine Markierungen stehen für Schiffe, die aus der Ferne kaum zu sehen sind:");
                 ui.label("Dreieck = Jäger und Korvette, Raute = Fregatte, Pfeil = Kreuzer,");
-                ui.label("Sechseck = Schlachtschiff, Rechteck = Träger. Hohl = auf dem Rückzug, grau = treibt.");
+                ui.label("Sechseck = Schlachtschiff, Rechteck = Träger. Hohl = auf dem Rückzug, grau = treibt,");
+                ui.label("Kreuz = Wrack.");
                 ui.label("Ein Klick auf ein Schiff zeigt Rumpf, Schild, Panzerung und jedes Modul.");
             } else {
                 ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
                 ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
+                ui.label("Dreiecke sind Flotten. Roter Ring = im Gefecht, gelber Bogen = sammelt sich nach einem Abzug.");
                 ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
             }
         });
@@ -781,8 +971,13 @@ pub fn notice(root: &mut egui::Ui, notice: &Notice) {
     if notice.seconds_left <= 0.0 || notice.text.is_empty() {
         return;
     }
+    // Unter der Kopfleiste, auch wenn sie in einem schmalen Fenster zwei Zeilen hat.
+    let top = (root.available_rect_before_wrap().top() + 21.0).max(44.0);
     egui::Area::new("hinweis".into())
-        .anchor(Align2::CENTER_TOP, [0.0, 44.0])
+        // Über allen Fenstern: Ein Klick in ein Fenster hebt es sonst über den Hinweis, und
+        // eine Ablehnung bliebe ungelesen.
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_TOP, [0.0, top])
         .interactable(false)
         .show(root.ctx(), |ui| {
             let color = if notice.is_error {
@@ -833,6 +1028,9 @@ mod tests {
                 finance: &self.state.finance,
                 logistics: &self.state.logistics,
                 fleets: &self.state.fleets,
+                battles: &self.state.battles,
+                pending: &[],
+                research: &self.state.research,
                 diplomacy: &self.state.diplomacy,
                 history,
             }
@@ -886,6 +1084,7 @@ mod tests {
                 flows_open: true,
                 chains_open: true,
                 fleets_open: true,
+                tech_open: true,
                 exchange_open: true,
                 exchange_all: true,
                 treasury_open: true,
@@ -901,7 +1100,9 @@ mod tests {
                         planet,
                     };
                     let mut actions = Vec::new();
-                    frame(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut actions));
+                    frame(|ui| {
+                        in_game(ui, &refs, &mut state, &speed, &selection, &[], &mut actions)
+                    });
                     assert!(
                         actions.is_empty(),
                         "ohne Eingabe darf nichts ausgelöst werden"
@@ -916,10 +1117,265 @@ mod tests {
                     &mut state,
                     &speed,
                     &Selection::default(),
+                    &[],
                     &mut actions,
                 )
             });
         }
+    }
+
+    #[test]
+    fn bars_panels_and_windows_of_the_campaign_are_opaque() {
+        use crate::ui::testing::Screen;
+
+        let fixture = fixture();
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection {
+            system: Some(SystemId(0)),
+            planet: None,
+        };
+        let mut state = UiState {
+            menu_open: true,
+            help_open: true,
+            flows_open: true,
+            chains_open: true,
+            fleets_open: true,
+            tech_open: true,
+            exchange_open: true,
+            treasury_open: true,
+            ..Default::default()
+        };
+        let mut notice_text = Notice::default();
+        notice_text.info("Gespeichert: saves/schnell.ron");
+        let mut screen = Screen::new(1600.0, 900.0);
+        let mut draw = |ui: &mut egui::Ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            );
+            notice(ui, &notice_text);
+        };
+        // Neue Fenster blenden sich über einige Durchläufe ein; gemessen wird danach.
+        for _ in 0..8 {
+            screen.settle(&mut draw);
+        }
+        let painted = screen.settle(&mut draw);
+        // Kopfleiste, Chronik, beide Seitentafeln, acht Fenster und der Hinweis: Durch
+        // keinen dieser Hintergründe scheint die Karte.
+        let backgrounds: Vec<_> = painted
+            .rects
+            .iter()
+            .filter(|(rect, _)| rect.width() >= 200.0 && rect.height() >= 20.0)
+            .collect();
+        assert!(
+            backgrounds.len() >= 13,
+            "{} Hintergründe",
+            backgrounds.len()
+        );
+        for (rect, color) in backgrounds {
+            assert_eq!(color.a(), 255, "Hintergrund {rect:?} ist durchsichtig");
+        }
+        // Die vier Leisten und Tafeln sind darunter: je ein Hintergrund an jedem Rand.
+        let at_edge = |edge: fn(&egui::Rect) -> bool| {
+            painted
+                .rects
+                .iter()
+                .any(|(rect, color)| edge(rect) && color.a() == 255)
+        };
+        assert!(
+            at_edge(|rect| rect.top() <= 0.0 && rect.width() >= 1590.0),
+            "Kopfleiste"
+        );
+        assert!(
+            at_edge(|rect| rect.bottom() >= 900.0 && rect.width() >= 1590.0),
+            "Chronik"
+        );
+        assert!(
+            at_edge(|rect| rect.left() <= 0.0 && rect.height() >= 300.0 && rect.width() < 800.0),
+            "linke Tafel"
+        );
+        assert!(
+            at_edge(|rect| rect.right() >= 1600.0
+                && rect.height() >= 300.0
+                && rect.width() < 800.0),
+            "rechte Tafel"
+        );
+    }
+
+    #[test]
+    fn the_top_bar_wraps_instead_of_overlapping_in_narrow_windows() {
+        use crate::ui::testing::{Screen, overlap};
+
+        let fixture = fixture();
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection::default();
+        for (width, rows) in [(1600.0, 1), (1280.0, 2), (1024.0, 2)] {
+            let mut state = UiState::default();
+            let mut screen = Screen::new(width, 720.0);
+            let painted = screen.settle(|ui| {
+                in_game(
+                    ui,
+                    &refs,
+                    &mut state,
+                    &speed,
+                    &selection,
+                    &[],
+                    &mut Vec::new(),
+                )
+            });
+            // Was über den Reitern der linken Tafel steht, gehört zur Kopfleiste.
+            let below = painted.text("Übersicht").expect("Reiter").top();
+            let bar: Vec<(String, egui::Rect)> = painted
+                .texts
+                .iter()
+                .filter(|(_, rect)| rect.bottom() <= below)
+                .cloned()
+                .collect();
+            assert!(bar.len() >= 15, "{} Texte in der Leiste", bar.len());
+            assert_eq!(overlap(&bar), None, "Kopfleiste bei {width} Pixeln Breite");
+            let bottom = bar
+                .iter()
+                .map(|(_, rect)| rect.bottom())
+                .fold(0.0, f32::max);
+            assert_eq!(bottom > 30.0, rows == 2, "Leiste endet bei {bottom}");
+        }
+        // Die Knöpfe der zweiten Zeile tun weiter ihren Dienst.
+        let mut state = UiState::default();
+        let mut screen = Screen::new(1024.0, 720.0);
+        let painted = screen.settle(|ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
+        });
+        let at = painted.text("Flotten").unwrap().center();
+        assert!(!state.fleets_open);
+        screen.click(at, |ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
+        });
+        assert!(state.fleets_open);
+    }
+
+    #[test]
+    fn the_production_tab_reckons_with_the_technology_of_the_owner() {
+        use crate::ui::testing::Screen;
+        use sim::economy::{expected_return, unit_economics_at};
+
+        // Die erste Gemeinschaft beherrscht den ganzen Zweig Wirtschaft: Ihre Werke werfen
+        // deutlich mehr ab, und damit rechnet der Kern.
+        let mut fixture = fixture();
+        let me = sim::ids::PolityId(0);
+        let top = fixture
+            .data
+            .techs
+            .iter()
+            .rposition(|tech| tech.branch == sim::data::TechBranch::Economy)
+            .expect("Zweig Wirtschaft") as u16;
+        fixture.state.research.grant(&fixture.data, me, top);
+        let (economy, logistics) = (&mut fixture.state.economy, &mut fixture.state.logistics);
+        fixture.state.research.publish_effects(economy, logistics);
+        let factor = fixture.state.economy.yield_factor(me);
+        assert!(factor > 1.2, "Ertragsfaktor {factor}");
+
+        let capital = fixture.state.polities.get(me).capital.unwrap();
+        let planet = fixture.state.galaxy.planet(capital);
+        let local = fixture.state.economy.planet(capital);
+        let market = fixture.state.economy.market(planet.system);
+        // Die Rendite jedes Rezepts, das sich hier betreiben lässt, einmal mit der Technik
+        // der Gemeinschaft und einmal ohne.
+        let returns = |tech: f64| -> Vec<(String, String)> {
+            fixture
+                .data
+                .recipes
+                .iter()
+                .map(|recipe| {
+                    let unit =
+                        unit_economics_at(&fixture.data, planet, local.wage, market, recipe, tech);
+                    (recipe, unit)
+                })
+                .filter(|(_, unit)| unit.local_yield > 0.0)
+                .map(|(recipe, unit)| {
+                    let yearly = expected_return(&fixture.data, market, &unit);
+                    (recipe.name.clone(), percent(yearly as f32))
+                })
+                .collect()
+        };
+        let (with_tech, without) = (returns(factor), returns(1.0));
+        assert!(with_tech.len() >= 4 && with_tech != without);
+
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection {
+            system: Some(planet.system),
+            planet: Some(capital),
+        };
+        let mut state = UiState {
+            tab: LeftTab::Production,
+            ..Default::default()
+        };
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = screen.settle(|ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
+        });
+        // Unter „Was sich hier lohnt“ steht je Rezept die Rendite rechts neben dem Namen.
+        let heading = painted
+            .text("Was sich hier lohnt")
+            .expect("Abschnitt")
+            .bottom();
+        let mut checked = 0;
+        for ((name, expected), (_, plain)) in with_tech.iter().zip(&without) {
+            let Some(row) = painted
+                .all(name)
+                .into_iter()
+                .find(|rect| rect.top() > heading)
+            else {
+                // Die Liste zeigt nur die acht besten.
+                continue;
+            };
+            let shown = painted
+                .texts
+                .iter()
+                .filter(|(_, rect)| {
+                    (rect.center().y - row.center().y).abs() < 4.0 && rect.left() > row.right()
+                })
+                .min_by(|a, b| a.1.left().total_cmp(&b.1.left()))
+                .map(|(text, _)| text.as_str())
+                .expect("Rendite neben dem Namen");
+            assert_eq!(shown, expected, "{name}: ohne Technik wären es {plain}");
+            checked += 1;
+        }
+        assert!(checked >= 4, "nur {checked} Rezepte geprüft");
     }
 
     #[test]

@@ -1189,7 +1189,8 @@ pub fn glow_disc() -> MeshData {
     ])
 }
 
-/// Drei unregelmäßige Trümmerstücke, jedes etwa eine Einheit groß.
+/// Drei unregelmäßige Trümmerstücke, jedes etwa eine Einheit groß. Blankes, helles Metall:
+/// Dunkel gestrichene Stücke wären vor dem schwarzen Himmel nicht zu sehen.
 pub fn debris() -> [MeshData; 3] {
     let shard = MeshData::loft(
         &[
@@ -1206,7 +1207,7 @@ pub fn debris() -> [MeshData; 3] {
                 Vec3::new(0.5, -0.04, -0.05),
             ],
         ],
-        PLATE,
+        HULL,
     );
     let plate = MeshData::loft(
         &[
@@ -1231,7 +1232,7 @@ pub fn debris() -> [MeshData; 3] {
             ring(Vec3::new(0.1, 0.05, 0.0), 5, 0.26, 0.2, 0.9),
             ring(Vec3::new(0.4, -0.04, 0.03), 5, 0.1, 0.14, 0.2),
         ],
-        DARK,
+        PLATE,
     );
     [shard, plate, block]
 }
@@ -1467,10 +1468,7 @@ mod tests {
 
     #[test]
     fn fore_and_aft_halves_cover_the_hull() {
-        for class in ShipClass::ALL
-            .into_iter()
-            .filter(|class| class.is_capital())
-        {
+        for class in ShipClass::ALL {
             let model = ClassModel::of(class);
             let what = class.label();
             let (fore, aft) = model.hull.split_x(model.break_at);

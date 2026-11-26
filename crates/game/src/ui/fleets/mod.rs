@@ -1,0 +1,1354 @@
+//! Flotten des Spielers: Liste mit Zustand und Befehlen, die Schiffe der gewählten Flotte
+//! mit Vereinigen und Abteilen (`detail`), Werften, Bauaufträge und Kosten (`yards`).
+
+mod detail;
+mod yards;
+
+use super::format::{decimal, percent};
+use super::panels::{
+    MUTED, SimRefs, UiAction, color32, detail as small, watch_button, window_room,
+};
+use super::{FleetsTab, UiState};
+use crate::battle_view::campaign::can_watch;
+use crate::map::Selection;
+use bevy_egui::egui::{self, Color32, RichText};
+use sim::chronicle::Chronicle;
+use sim::clock::Date;
+use sim::command::{CommandSource, SimCommand};
+use sim::data::{GameData, ShipClass};
+use sim::economy::Economy;
+use sim::fleet::{
+    Battles, Fleet, Fleets, cancel_order, lay_up, merge_fleets, order_ship, split_fleet,
+};
+use sim::ids::{FleetId, PolityId, SystemId};
+
+/// Beschriftungen des Fensters. Das README nennt sie; ein Test hält beide beieinander.
+pub const TITLE: &str = "Flotten";
+pub const TAB_FLEETS: &str = "Flotten und Schiffe";
+pub const TAB_YARDS: &str = "Werften und Kosten";
+pub const MARCH: &str = "Marsch zum Ziel";
+pub const RETREAT: &str = "Rückzug";
+pub const SHOW_ON_MAP: &str = "Auf der Karte zeigen";
+pub const MERGE: &str = "Vereinigen mit";
+pub const SPLIT: &str = "Abteilen";
+pub const LAY_UP: &str = "Stilllegen";
+pub const ORDER: &str = "Bestellen";
+pub const CANCEL: &str = "Streichen";
+
+const BATTLE: Color32 = Color32::from_rgb(235, 110, 95);
+const REGROUP: Color32 = Color32::from_rgb(240, 190, 80);
+pub(super) const WARN: Color32 = REGROUP;
+
+/// Macht aus dem Grund, den der Kern nennt, einen Satz für die Oberfläche.
+pub(super) fn sentence(reason: String) -> String {
+    let mut chars = reason.chars();
+    let mut text: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => return reason,
+    };
+    if !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
+}
+
+/// Warum ein Knopf gesperrt ist, dessen Befehl schon auf den nächsten Takt wartet.
+pub const WAITING: &str =
+    "Der Befehl ist vorgemerkt; er gilt, sobald die Zeit weiterläuft (Leertaste).";
+
+/// Befehle des Spielers, die auf den nächsten Takt warten (die Zeit steht).
+pub(super) fn waiting<'a>(sim: &'a SimRefs) -> impl Iterator<Item = &'a SimCommand> {
+    let player = sim.config.player;
+    sim.pending
+        .iter()
+        .filter(move |entry| entry.source == CommandSource::Player && Some(entry.polity) == player)
+        .map(|entry| &entry.command)
+}
+
+/// Wartet genau dieser Befehl schon? Ihn noch einmal zu geben, lehnte der Kern ab.
+pub(super) fn is_waiting(sim: &SimRefs, command: &SimCommand) -> bool {
+    waiting(sim).any(|entry| entry == command)
+}
+
+/// Führt die wartenden Befehle des Spielers an Flotten und Werften auf der Kopie aus, in
+/// ihrer Reihenfolge und mit den Funktionen des Kerns: So prüft der Probelauf gegen den
+/// Stand, den der Kern beim nächsten Takt vorfindet. Was er ablehnte, ändert auch hier
+/// nichts. Ein wartendes Stilllegen verkauft Bauteile am Markt; es läuft auf `economy`,
+/// der Kopie der Wirtschaft des Aufrufers, oder ohne sie auf einer eigenen.
+pub(super) fn apply_waiting(
+    sim: &SimRefs,
+    scratch: &mut Fleets,
+    mut economy: Option<&mut Economy>,
+) {
+    let Some(player) = sim.config.player else {
+        return;
+    };
+    let mut own: Option<Economy> = None;
+    let known = sim.research.known(player);
+    let day = sim.clock.day();
+    let order = |scratch: &mut Fleets, planet, design| {
+        let _ = order_ship(
+            sim.data,
+            sim.galaxy,
+            sim.economy,
+            sim.polities,
+            scratch,
+            player,
+            planet,
+            design,
+            known,
+            day,
+        );
+    };
+    for command in waiting(sim) {
+        match command {
+            SimCommand::BuildShip { planet, design } => order(scratch, *planet, *design),
+            SimCommand::BuildClass { planet, class } => {
+                if let Some(design) = sim.data.best_design(*class, known) {
+                    order(scratch, *planet, design);
+                }
+            }
+            SimCommand::CancelBuild { order } => {
+                let _ = cancel_order(scratch, player, *order);
+            }
+            SimCommand::MergeFleets { from, into } => {
+                let _ = merge_fleets(sim.data, scratch, player, *from, *into);
+            }
+            SimCommand::SplitFleet { fleet, ships } => {
+                let _ = split_fleet(sim.data, sim.polities, scratch, player, *fleet, ships);
+            }
+            SimCommand::LayUpShips { fleet, ships } => {
+                let economy = match economy.as_deref_mut() {
+                    Some(economy) => economy,
+                    None => own.get_or_insert_with(|| sim.economy.clone()),
+                };
+                let _ = lay_up(
+                    sim.data,
+                    sim.galaxy,
+                    economy,
+                    sim.polities,
+                    scratch,
+                    &mut Chronicle::default(),
+                    sim.clock.tick,
+                    player,
+                    *fleet,
+                    ships,
+                );
+            }
+            // Alles andere ändert nicht, was die Prüfungen dieses Fensters lesen.
+            _ => {}
+        }
+    }
+}
+
+/// Fragt den Kern, ob er einen Befehl an die Flotten annähme: Der Befehl läuft auf einer
+/// Kopie der Flotten, die danach verworfen wird. So sperrt die Oberfläche einen Knopf aus
+/// genau dem Grund, mit dem der Kern ablehnen würde, ohne seine Regeln nachzubauen. Was
+/// der Spieler bei stehender Zeit schon vorgemerkt hat, gilt auf der Kopie als geschehen.
+pub(super) fn dry_run<T>(
+    sim: &SimRefs,
+    order: impl FnOnce(&mut Fleets) -> Result<T, String>,
+) -> Result<(), String> {
+    let mut scratch = sim.fleets.clone();
+    apply_waiting(sim, &mut scratch, None);
+    order(&mut scratch).map(|_| ()).map_err(sentence)
+}
+
+/// Wie [`dry_run`], für einen Befehl, den es nur einmal geben kann: Wartet er schon, ist
+/// das der Grund der Sperre.
+pub(super) fn dry_run_once<T>(
+    sim: &SimRefs,
+    command: &SimCommand,
+    order: impl FnOnce(&mut Fleets) -> Result<T, String>,
+) -> Result<(), String> {
+    if is_waiting(sim, command) {
+        return Err(WAITING.into());
+    }
+    dry_run(sim, order)
+}
+
+/// Ein Knopf, der gesperrt ist, wenn der Kern den Befehl ablehnen würde; der Grund steht
+/// im Schwebetext. `name` ist die Beschriftung für Vorleseprogramme, wo mehrere Knöpfe
+/// gleich heißen. Liefert, ob geklickt wurde.
+pub(super) fn gated_button(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    name: Option<String>,
+    check: &Result<(), String>,
+    hover: &str,
+) -> bool {
+    let enabled = check.is_ok();
+    let mut response = ui.add_enabled(enabled, egui::Button::new(text));
+    if let Some(name) = name {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name.clone())
+        });
+    }
+    if !hover.is_empty() {
+        response = response.on_hover_text(hover);
+    }
+    if let Err(reason) = check {
+        response = response.on_disabled_hover_text(reason);
+    }
+    response.clicked()
+}
+
+/// Was eine Flotte gerade tut, so wie Karte und Flottenliste es zeigen. Gelesen wird nur,
+/// was der Kern an der Flotte und an ihrem Gefecht führt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FleetState {
+    /// Steht in einem Gefecht und kämpft.
+    Fighting,
+    /// Steht in einem Gefecht; der Rückzug ist befohlen, die Schiffe verlassen das Feld.
+    Retreating,
+    /// Sammelt sich nach dem Abzug aus einem Gefecht, bis zu diesem Tag.
+    Regrouping { until: u64 },
+    /// Auf dem Marsch.
+    Marching,
+    /// Liegt einsatzbereit in einem System.
+    Stationed,
+}
+
+impl FleetState {
+    pub fn of(fleet: &Fleet, battles: &Battles) -> Self {
+        if fleet.in_battle {
+            let retreating = battles
+                .of_fleet(fleet.id)
+                .is_some_and(|(battle, side)| battle.combatants[side].retreating);
+            if retreating {
+                Self::Retreating
+            } else {
+                Self::Fighting
+            }
+        } else if let Some(until) = fleet.regroup_until {
+            Self::Regrouping { until }
+        } else if !fleet.route.is_empty() {
+            Self::Marching
+        } else {
+            Self::Stationed
+        }
+    }
+
+    /// Steht die Flotte in einem Gefecht? Dann nimmt sie keinen Marschbefehl an.
+    pub fn in_battle(self) -> bool {
+        matches!(self, Self::Fighting | Self::Retreating)
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Fighting => "im Gefecht".into(),
+            Self::Retreating => "im Gefecht, Rückzug befohlen".into(),
+            Self::Regrouping { until } => format!("sammelt sich bis {}", Date::from_day(until)),
+            Self::Marching => "auf dem Marsch".into(),
+            Self::Stationed => "einsatzbereit".into(),
+        }
+    }
+
+    fn color(self) -> Color32 {
+        match self {
+            Self::Fighting | Self::Retreating => BATTLE,
+            Self::Regrouping { .. } => REGROUP,
+            Self::Marching | Self::Stationed => MUTED,
+        }
+    }
+}
+
+/// Schiffe einer Flotte je Klasse, schwere zuerst: „1 Kreuzer, 2 Fregatten, 3 Korvetten“.
+pub fn ships_by_class(data: &GameData, fleet: &Fleet) -> String {
+    let mut counts = [0u32; 6];
+    for ship in &fleet.ships {
+        counts[data.designs[ship.design as usize].stats.class.index()] += 1;
+    }
+    let parts: Vec<String> = [
+        ShipClass::Carrier,
+        ShipClass::Battleship,
+        ShipClass::Cruiser,
+        ShipClass::Frigate,
+        ShipClass::Corvette,
+        ShipClass::Fighter,
+    ]
+    .into_iter()
+    .filter(|class| counts[class.index()] > 0)
+    .map(|class| {
+        let count = counts[class.index()];
+        let name = if count == 1 {
+            class.label()
+        } else {
+            class.plural()
+        };
+        format!("{count} {name}")
+    })
+    .collect();
+    if parts.is_empty() {
+        "keine Schiffe".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Wo die Flotte steht; mit einer Route das zuletzt verlassene System und ihr Ziel.
+pub(super) fn location(sim: &SimRefs, fleet: &Fleet) -> String {
+    let here = &sim.galaxy.system(fleet.system).name;
+    match fleet.route.last() {
+        Some(target) => format!("{} nach {}", here, sim.galaxy.system(*target).name),
+        None => here.clone(),
+    }
+}
+
+/// Auswahlfeld für einen stehenden Befehl; liefert die neue Wahl, wenn sie sich ändert.
+pub(super) fn pick<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: (&str, u32),
+    current: T,
+    options: &[T],
+    label: fn(T) -> &'static str,
+) -> Option<T> {
+    let mut chosen = current;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(current))
+        .width(92.0)
+        .show_ui(ui, |ui| {
+            for option in options {
+                ui.selectable_value(&mut chosen, *option, label(*option));
+            }
+        });
+    (chosen != current).then_some(chosen)
+}
+
+/// Marsch oder Rückzug: Was die Flotte in ihrem Zustand annimmt, wird angeboten.
+fn movement_button(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    fleet: &Fleet,
+    state: FleetState,
+    target: Option<SystemId>,
+    actions: &mut Vec<UiAction>,
+) {
+    match state {
+        FleetState::Fighting | FleetState::Retreating => {
+            // Im Gefecht gibt es keinen Marsch: Der Weg hinaus ist der Rückzug.
+            let command = SimCommand::Retreat { fleet: fleet.id };
+            let waits = is_waiting(sim, &command);
+            let ordered = state == FleetState::Retreating || waits;
+            let button = egui::Button::new(RichText::new(RETREAT).color(BATTLE));
+            let response = ui
+                .add_enabled(!ordered, button)
+                .on_hover_text(
+                    "Die Schiffe verlassen das Feld; was entkommt, weicht in ein Nachbarsystem \
+                     aus und sammelt sich. Nicht umkehrbar.",
+                )
+                .on_disabled_hover_text(if waits {
+                    WAITING
+                } else {
+                    "Der Rückzug ist befohlen; die Schiffe verlassen das Feld."
+                });
+            if response.clicked() {
+                actions.push(UiAction::Command(command));
+            }
+        }
+        FleetState::Regrouping { until } => {
+            ui.add_enabled(false, egui::Button::new(MARCH))
+                .on_disabled_hover_text(format!(
+                    "Die Flotte sammelt sich bis zum {} und nimmt so lange keinen Marschbefehl \
+                     an. Einen Abzug führt sie zu Ende.",
+                    Date::from_day(until)
+                ));
+        }
+        FleetState::Marching | FleetState::Stationed => {
+            let can_move =
+                target.is_some_and(|system| system != fleet.system || !fleet.route.is_empty());
+            let response = ui
+                .add_enabled(can_move, egui::Button::new(MARCH))
+                .on_disabled_hover_text(match target {
+                    Some(system) => format!(
+                        "Die Flotte liegt schon in {}.",
+                        sim.galaxy.system(system).name
+                    ),
+                    None => "Zuerst ein System auf der Karte wählen.".to_string(),
+                });
+            if response.clicked()
+                && let Some(to) = target
+            {
+                actions.push(UiAction::Command(SimCommand::MoveFleet {
+                    fleet: fleet.id,
+                    to,
+                }));
+            }
+        }
+    }
+}
+
+/// Die stehenden Befehle einer Flotte in Worten.
+fn orders_text(fleet: &Fleet) -> String {
+    format!("{} · {}", fleet.formation.label(), fleet.doctrine.label())
+}
+
+fn fleet_row(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    fleet: &Fleet,
+    chosen: &mut Option<FleetId>,
+    target: Option<SystemId>,
+    actions: &mut Vec<UiAction>,
+) {
+    let state = FleetState::of(fleet, sim.battles);
+    if ui
+        .selectable_label(*chosen == Some(fleet.id), &fleet.name)
+        .on_hover_text("Schiffe und Befehle dieser Flotte zeigen")
+        .clicked()
+    {
+        *chosen = Some(fleet.id);
+    }
+    ui.vertical(|ui| {
+        // Die Spalten sind so breit wie ihr Text; umbrochen wird in der Tabelle nicht.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        ui.label(location(sim, fleet));
+        // Ein leerer Tank ändert, was die Flotte leisten kann; im Gefecht zählt er nicht.
+        let dry = !fleet.has_fuel() && !state.in_battle();
+        let note = match state {
+            FleetState::Stationed if dry => "ohne Treibstoff".to_string(),
+            _ if dry => format!("{}, Tank leer", state.label()),
+            _ => state.label(),
+        };
+        let color = if dry { REGROUP } else { state.color() };
+        let shown = ui.label(small(note).color(color));
+        if dry {
+            shown.on_hover_text(
+                "Ohne Treibstoff schleppt sich die Flotte nur noch voran; sie sperrt kein \
+                 System, kapert nicht und gibt kein Geleit.",
+            );
+        }
+    });
+    ui.vertical(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        ui.label(ships_by_class(sim.data, fleet));
+        let (ammo, fuel) = fleet.supply(sim.data);
+        ui.label(
+            small(format!(
+                "Stärke {} · Munition {} · Treibstoff {}",
+                decimal(fleet.strength as f64, 0),
+                percent(ammo),
+                percent(fuel)
+            ))
+            .color(MUTED),
+        );
+    });
+    ui.vertical(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        ui.label(fleet.stance.label());
+        ui.label(small(orders_text(fleet)).color(MUTED));
+    });
+    movement_button(ui, sim, fleet, state, target, actions);
+    ui.end_row();
+}
+
+/// Die Flotte, deren Einzelheiten gezeigt werden: die gewählte, solange es sie gibt, sonst
+/// die erste eigene.
+fn shown_fleet<'a>(
+    sim: &'a SimRefs,
+    player: PolityId,
+    chosen: &mut Option<FleetId>,
+) -> Option<&'a Fleet> {
+    let found = chosen
+        .and_then(|id| sim.fleets.get(id))
+        .filter(|fleet| fleet.alive && fleet.owner == player)
+        .or_else(|| sim.fleets.of(player).next());
+    *chosen = found.map(|fleet| fleet.id);
+    found
+}
+
+fn fleets_tab(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    player: PolityId,
+    state: &mut UiState,
+    selection: &Selection,
+    actions: &mut Vec<UiAction>,
+) {
+    let target = selection.system;
+    match target {
+        Some(system) => ui.label(format!(
+            "Marschziel: {} (auf der Karte gewählt)",
+            sim.galaxy.system(system).name
+        )),
+        None => ui.label("Für einen Marschbefehl zuerst ein System auf der Karte wählen."),
+    };
+    let shown = shown_fleet(sim, player, &mut state.fleet_chosen);
+    egui::Grid::new("flotten")
+        .striped(true)
+        .num_columns(5)
+        .show(ui, |ui| {
+            for title in [
+                "Flotte",
+                "Ort und Zustand",
+                "Schiffe und Vorräte",
+                "Auftrag, Aufstellung, Doktrin",
+                "",
+            ] {
+                ui.label(RichText::new(title).color(MUTED).small());
+            }
+            ui.end_row();
+            let mut any = false;
+            for fleet in sim.fleets.of(player) {
+                any = true;
+                fleet_row(ui, sim, fleet, &mut state.fleet_chosen, target, actions);
+            }
+            if !any {
+                ui.label(RichText::new("keine Flotte mehr").color(MUTED));
+                ui.end_row();
+            }
+        });
+    if let Some(fleet) = shown {
+        ui.separator();
+        detail::fleet_detail(ui, sim, player, fleet, state, actions);
+    }
+    ui.separator();
+    yards::fleet_cost_line(ui, sim, player);
+    egui::CollapsingHeader::new("Aufträge und Gefechte")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(small(
+                "Wache: hält die Stellung. Blockade: sperrt ein feindliches System, sobald \
+                 dort keine Flotte des Besitzers mehr steht. Kaperfahrt: bringt feindliche \
+                 Frachter auf. Geleitschutz: schützt eigene Frachter im selben System.",
+            ));
+            ui.label(small(format!(
+                "Treffen verfeindete Flotten in einem System aufeinander, beginnt ein \
+                 Gefecht. Solange es läuft, nimmt die Flotte keinen Marschbefehl an; \
+                 Aufstellung und Doktrin gelten sofort, und der Rückzug lässt sich \
+                 befehlen. Wer das Feld räumt, sammelt sich {} Tage und ist so lange aus \
+                 dem Spiel.",
+                sim.data.balance.military.regroup_days
+            )));
+        });
+
+    if let Some(system) = target {
+        let others: Vec<&Fleet> = sim
+            .fleets
+            .docked_in(system)
+            .filter(|fleet| fleet.owner != player)
+            .collect();
+        if !others.is_empty() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Fremde Flotten in {}",
+                        sim.galaxy.system(system).name
+                    ))
+                    .color(MUTED),
+                );
+                // Ein Gefecht dort lässt sich ansehen, wo der Spieler selbst vor Ort ist.
+                if let Some(battle) = sim.battles.in_system(system)
+                    && can_watch(sim.galaxy, sim.fleets, sim.config.player, battle)
+                    && watch_button(ui, &sim.galaxy.system(system).name)
+                {
+                    actions.push(UiAction::WatchBattle(battle.id));
+                }
+            });
+            for fleet in others {
+                let owner = sim.polities.get(fleet.owner);
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} · Stärke {} · {} · {}",
+                        fleet.name,
+                        ships_by_class(sim.data, fleet),
+                        decimal(fleet.strength as f64, 0),
+                        fleet.stance.label(),
+                        FleetState::of(fleet, sim.battles).label()
+                    ))
+                    .color(color32(owner.color)),
+                );
+            }
+        }
+    }
+}
+
+pub fn fleets_window(
+    ctx: &egui::Context,
+    area: egui::Rect,
+    sim: &SimRefs,
+    state: &mut UiState,
+    selection: &Selection,
+    actions: &mut Vec<UiAction>,
+) {
+    let mut open = state.fleets_open;
+    // Das Fenster rollt, wo Liste, Schiffe und Werften nicht mehr auf den Schirm passen.
+    // Die Höhe gilt in jedem Frame, nicht nur beim ersten Öffnen: Wird das Spielfenster
+    // kleiner, schrumpft das Fenster mit und bleibt unter der Kopfleiste.
+    let room = window_room(area);
+    egui::Window::new(TITLE)
+        .open(&mut open)
+        .default_pos([300.0, 56.0])
+        .default_width(820.0)
+        .default_height((room - 60.0).max(160.0))
+        .max_height(room)
+        .constrain_to(area)
+        .vscroll(true)
+        .show(ctx, |ui| {
+            let Some(player) = sim.config.player else {
+                ui.label("Beobachter führen keine Flotten.");
+                return;
+            };
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut state.fleets_tab, FleetsTab::Fleets, TAB_FLEETS);
+                ui.selectable_value(&mut state.fleets_tab, FleetsTab::Yards, TAB_YARDS);
+            });
+            ui.separator();
+            match state.fleets_tab {
+                FleetsTab::Fleets => fleets_tab(ui, sim, player, state, selection, actions),
+                FleetsTab::Yards => yards::yards_tab(ui, sim, player, state, actions),
+            }
+        });
+    state.fleets_open = open;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Notice;
+    use crate::testing::TestGame;
+    use crate::time_control::SimSpeed;
+    use crate::ui::UiState;
+    use sim::command::{CommandLog, CommandOutcome, CommandQueue, CommandSource};
+    use sim::galaxy::Galaxy;
+    use sim::polity::Polities;
+    use sim::state::{SimConfig, SimState};
+
+    #[test]
+    fn ships_are_counted_by_class_and_the_state_follows_the_core() {
+        let data = GameData::load_workspace().unwrap();
+        let mut state = SimState::generate(
+            &data,
+            SimConfig {
+                seed: 3,
+                player: Some(PolityId(0)),
+            },
+        );
+        state.galaxy.rebuild_index();
+        // Die Startflotte aus den Spieldaten, schwere Schiffe zuerst.
+        let mut expected = Vec::new();
+        for class in [
+            ShipClass::Carrier,
+            ShipClass::Battleship,
+            ShipClass::Cruiser,
+            ShipClass::Frigate,
+            ShipClass::Corvette,
+        ] {
+            let count: u32 = data
+                .balance
+                .military
+                .starting_fleet_ids
+                .iter()
+                .filter(|(design, _)| data.designs[*design as usize].stats.class == class)
+                .map(|(_, count)| *count)
+                .sum();
+            match count {
+                0 => {}
+                1 => expected.push(format!("1 {}", class.label())),
+                more => expected.push(format!("{more} {}", class.plural())),
+            }
+        }
+        let fleet = &mut state.fleets.list[0];
+        assert_eq!(ships_by_class(&data, fleet), expected.join(", "));
+        assert!(expected.len() >= 2, "eine gemischte Startflotte");
+
+        let battles = Battles::default();
+        assert_eq!(FleetState::of(fleet, &battles), FleetState::Stationed);
+        let neighbor = state.galaxy.neighbors(fleet.system)[0].system;
+        fleet.route = vec![neighbor];
+        assert_eq!(FleetState::of(fleet, &battles), FleetState::Marching);
+        // Wer sich sammelt, sammelt sich, auch auf dem Abzug.
+        fleet.regroup_until = Some(45);
+        let regrouping = FleetState::of(fleet, &battles);
+        assert_eq!(regrouping, FleetState::Regrouping { until: 45 });
+        assert_eq!(regrouping.label(), "sammelt sich bis 16.02.2400");
+        // Das Gefecht geht allem vor.
+        fleet.in_battle = true;
+        assert!(FleetState::of(fleet, &battles).in_battle());
+        assert!(!regrouping.in_battle() && !FleetState::Marching.in_battle());
+    }
+
+    fn run(game: &mut TestGame, frames: usize) {
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 5,
+        };
+        game.frames(frames);
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(2);
+    }
+
+    /// Lässt die Partie laufen, bis `done` zutrifft; höchstens `limit` Frames.
+    fn run_until(game: &mut TestGame, limit: usize, what: &str, done: impl Fn(&TestGame) -> bool) {
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 5,
+        };
+        for _ in 0..limit {
+            if done(game) {
+                game.world_mut().resource_mut::<SimSpeed>().paused = true;
+                game.frames(2);
+                return;
+            }
+            game.frames(1);
+        }
+        panic!("nach {limit} Frames noch nicht: {what}");
+    }
+
+    fn fleet(game: &TestGame, id: FleetId) -> &Fleet {
+        game.resource::<Fleets>().get(id).expect("Flotte")
+    }
+
+    fn home_of(game: &TestGame, polity: PolityId) -> SystemId {
+        let capital = game.resource::<Polities>().get(polity).capital.unwrap();
+        game.resource::<Galaxy>().planet(capital).system
+    }
+
+    fn command(game: &mut TestGame, polity: PolityId, command: SimCommand) {
+        game.world_mut().resource_mut::<CommandQueue>().push(
+            polity,
+            CommandSource::Player,
+            command,
+        );
+    }
+
+    #[test]
+    fn a_fleet_in_a_battle_offers_retreat_and_not_march() {
+        use crate::map::Selection;
+
+        let mut game = TestGame::start("--seed 3");
+        game.frames(4);
+        let me = game.resource::<SimConfig>().player.expect("Spieler");
+        let mine = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let home = home_of(&game, me);
+        // Die nächstgelegene andere Gemeinschaft; ihre Flotte liegt in ihrem Heimatsystem.
+        let enemy = {
+            let galaxy = game.resource::<Galaxy>();
+            game.resource::<Polities>()
+                .alive()
+                .filter(|polity| polity.id != me)
+                .map(|polity| {
+                    let path = galaxy
+                        .shortest_path(home, home_of(&game, polity.id), |_| true)
+                        .expect("Weg");
+                    (polity.id, galaxy.path_length(&path))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("eine andere Gemeinschaft")
+                .0
+        };
+        let front = home_of(&game, enemy);
+        command(&mut game, me, SimCommand::DeclareWar { target: enemy });
+        command(
+            &mut game,
+            me,
+            SimCommand::MoveFleet {
+                fleet: mine,
+                to: front,
+            },
+        );
+        game.click_on("Flotten");
+        run(&mut game, 4);
+        // Marschziel ist das eigene Heimatsystem: Für eine Flotte, die woanders steht, ist
+        // der Marsch dorthin ein gültiger Befehl.
+        *game.world_mut().resource_mut::<Selection>() = Selection {
+            system: Some(home),
+            planet: None,
+        };
+        game.frames(3);
+        // Unterwegs: Die Liste nennt die Schiffe und bietet den Marsch an, keinen Rückzug.
+        assert!(!fleet(&game, mine).in_battle);
+        let ships = ships_by_class(game.resource::<GameData>(), fleet(&game, mine));
+        assert!(
+            game.text(&ships).is_some(),
+            "„{ships}“ steht nicht in der Liste"
+        );
+        assert!(game.text("auf dem Marsch").is_some());
+        assert!(game.button("Marsch zum Ziel").is_some());
+        assert_eq!(game.button("Rückzug"), None);
+
+        // Am Ziel beginnt das Gefecht.
+        run_until(&mut game, 4000, "Gefecht", |game| {
+            fleet(game, mine).in_battle
+        });
+        assert_eq!(fleet(&game, mine).system, front);
+        assert!(game.text("im Gefecht").is_some());
+        assert_eq!(
+            game.button("Marsch zum Ziel"),
+            None,
+            "im Gefecht wird kein Marsch angeboten"
+        );
+        assert!(game.button("Rückzug").is_some());
+        // Ein Marschbefehl, der trotzdem ankommt, wird abgelehnt, und der Spieler erfährt es.
+        command(
+            &mut game,
+            me,
+            SimCommand::MoveFleet {
+                fleet: mine,
+                to: home,
+            },
+        );
+        run(&mut game, 2);
+        let notice = game.resource::<Notice>();
+        assert!(
+            notice.is_error && notice.text.contains("steht im Gefecht"),
+            "{}",
+            notice.text
+        );
+        assert!(fleet(&game, mine).in_battle && fleet(&game, mine).route.is_empty());
+
+        // Der Rückzug geht als Befehl an den Kern. Solange die Zeit steht, wartet er, und
+        // der Knopf bietet ihn nicht noch einmal an.
+        let entries = game.resource::<CommandLog>().entries.len();
+        game.click_on("Rückzug");
+        game.frames(2);
+        assert_eq!(game.resource::<CommandLog>().entries.len(), entries);
+        assert_eq!(game.button("Rückzug"), None, "der Rückzug ist vorgemerkt");
+        run(&mut game, 2);
+        let log = game.resource::<CommandLog>();
+        assert_eq!(log.entries.len(), entries + 1);
+        let sent = log.entries.last().unwrap();
+        assert_eq!(sent.command, SimCommand::Retreat { fleet: mine });
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        let battles = game.resource::<Battles>();
+        let (battle, side) = battles.of_fleet(mine).expect("die Flotte steht im Gefecht");
+        assert!(battle.combatants[side].retreating);
+        assert_eq!(
+            FleetState::of(fleet(&game, mine), battles),
+            FleetState::Retreating
+        );
+        // Befohlen ist befohlen: Der Knopf ist gesperrt, die Liste sagt, was geschieht.
+        assert!(game.text("im Gefecht, Rückzug befohlen").is_some());
+        assert_eq!(game.button("Rückzug"), None);
+        assert_eq!(game.button("Marsch zum Ziel"), None);
+
+        // Die Schiffe verlassen das Feld; danach sammelt sich die Flotte und nimmt so
+        // lange keinen Marschbefehl an.
+        run_until(&mut game, 4000, "Gefecht verlassen", |game| {
+            !fleet(game, mine).in_battle
+        });
+        let after = fleet(&game, mine).clone();
+        assert!(after.alive, "die Flotte hat den Rückzug überstanden");
+        let until = after.regroup_until.expect("die Flotte sammelt sich");
+        // Hat der Marsch den Tank geleert, sagt die Liste auch das.
+        let label = FleetState::Regrouping { until }.label();
+        let shown: Vec<String> = game
+            .labels()
+            .into_iter()
+            .map(|(text, _)| text)
+            .filter(|text| text.contains("sammelt sich"))
+            .collect();
+        assert!(
+            shown
+                .iter()
+                .any(|text| *text == label || *text == format!("{label}, Tank leer")),
+            "die Liste zeigt die Sammelfrist nicht: {shown:?}"
+        );
+        assert_eq!(game.button("Marsch zum Ziel"), None);
+        assert_eq!(game.button("Rückzug"), None);
+
+        // Nach der Frist ist sie wieder einsatzbereit: Der Marsch wird wieder angeboten.
+        run_until(&mut game, 4000, "Sammelfrist vorbei", |game| {
+            !fleet(game, mine).is_regrouping()
+        });
+        assert!(game.button("Marsch zum Ziel").is_some());
+        assert_eq!(game.button("Rückzug"), None);
+    }
+
+    /// Eine laufende Partie mit geöffnetem Flottenfenster.
+    fn campaign_with_window() -> (TestGame, PolityId) {
+        let mut game = TestGame::start("--seed 3");
+        game.frames(4);
+        game.click_on(TITLE);
+        game.frames(3);
+        assert!(game.window_rect(TITLE).is_some());
+        let me = game.resource::<SimConfig>().player.expect("Spieler");
+        (game, me)
+    }
+
+    #[test]
+    fn the_window_fits_both_sizes_and_keeps_clicks_from_the_map() {
+        use bevy::prelude::Vec2;
+
+        let (mut game, _) = campaign_with_window();
+        let home = game.resource::<Selection>().system;
+        assert!(home.is_some());
+        for size in [Vec2::new(1280.0, 720.0), Vec2::new(1600.0, 900.0)] {
+            game.resize(size);
+            game.frames(4);
+            for tab in [TAB_YARDS, TAB_FLEETS] {
+                game.click_on(tab);
+                game.frames(3);
+                let rect = game.window_rect(TITLE).expect("Fenster");
+                assert!(
+                    rect.left() >= 0.0
+                        && rect.top() >= 0.0
+                        && rect.right() <= size.x
+                        && rect.bottom() <= size.y,
+                    "das Fenster {rect:?} ragt bei {size} im Reiter „{tab}“ über den Rand"
+                );
+            }
+            // Das Fenster ist bei 1600x900 geöffnet worden und schrumpft mit: Es bleibt
+            // unter der Kopfleiste, deren Knöpfe erreichbar bleiben.
+            let rect = game.window_rect(TITLE).expect("Fenster");
+            let bar = game.button(TITLE).expect("Knopf der Kopfleiste");
+            assert!(
+                rect.top() > bar.y,
+                "das Fenster {rect:?} liegt bei {size} über der Kopfleiste (Knopf bei {bar})"
+            );
+            // Ein Klick in die Titelleiste gilt dem Fenster, nicht der Karte dahinter.
+            game.click(Vec2::new(rect.center().x, rect.top() + 12.0));
+            assert_eq!(game.resource::<Selection>().system, home, "{size}");
+        }
+        game.click_on(TITLE);
+        game.frames(10);
+        assert!(game.window_rect(TITLE).is_none());
+        // Dasselbe gilt für das Fenster des Staats: groß geöffnet, dann verkleinert.
+        game.click_on("Staat");
+        game.frames(4);
+        game.resize(Vec2::new(1280.0, 720.0));
+        game.frames(4);
+        let rect = game.window_rect("Staatsfinanzen").expect("Fenster");
+        let bar = game.button("Staat").expect("Knopf der Kopfleiste");
+        assert!(
+            rect.top() > bar.y && rect.bottom() <= 720.0,
+            "das Fenster {rect:?} passt nicht unter die Kopfleiste (Knopf bei {bar})"
+        );
+    }
+
+    #[test]
+    fn commands_waiting_for_the_next_tick_are_not_offered_again() {
+        let (mut game, me) = campaign_with_window();
+        assert!(
+            game.resource::<SimSpeed>().paused,
+            "die Partie beginnt angehalten"
+        );
+        game.click_on(TAB_YARDS);
+        game.frames(2);
+        let data = game.resource::<GameData>().clone();
+        let capital = game.resource::<Polities>().get(me).capital.unwrap();
+        let world = game.resource::<Galaxy>().planet(capital).name.clone();
+        let corvette = data.design_index("dolch").expect("Entwurf");
+        let name = data.designs[corvette as usize].name.clone();
+        let limit = data.balance.military.yard_queue as usize;
+        // So oft bestellt, wie die Werft Aufträge annimmt: Jede Bestellung wartet, und die
+        // Werft zeigt, wie viele es sind.
+        for count in 1..=limit {
+            game.click_on(&format!("{ORDER}: {name}"));
+            assert!(
+                game.text(&yards::waiting_orders(count)).is_some(),
+                "{count} vorgemerkte Bestellungen stehen nicht an der Werft"
+            );
+        }
+        assert_eq!(game.resource::<Fleets>().orders_at(capital).count(), 0);
+        // Die nächste lehnte der Kern ab: Kein Knopf bietet sie mehr an, weder für den
+        // Entwurf noch für eine Klasse, und der Grund des Kerns steht da.
+        assert_eq!(game.button(&format!("{ORDER}: {name}")), None);
+        assert_eq!(
+            game.button(&format!("{ORDER}: Klasse {}", ShipClass::Corvette.label())),
+            None
+        );
+        assert!(
+            game.text(&format!(
+                "Die Werft von {world} nimmt nicht mehr als {limit} Aufträge an."
+            ))
+            .is_some()
+        );
+        run(&mut game, 3);
+        assert_eq!(game.resource::<Fleets>().orders_at(capital).count(), limit);
+        let rejected = |game: &TestGame| {
+            game.resource::<CommandLog>()
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.outcome, CommandOutcome::Rejected(_)))
+                .count()
+        };
+        assert_eq!(
+            rejected(&game),
+            0,
+            "kein angebotener Befehl wurde abgelehnt"
+        );
+        assert_eq!(game.text(&yards::waiting_orders(limit)), None);
+
+        // Streichen gibt es je Auftrag einmal; danach ist wieder ein Platz frei, schon
+        // bevor die Zeit weiterläuft.
+        let first = game
+            .resource::<Fleets>()
+            .orders_at(capital)
+            .next()
+            .unwrap()
+            .id;
+        game.click_on(&format!("{CANCEL}: Nr. {first}"));
+        assert_eq!(game.button(&format!("{CANCEL}: Nr. {first}")), None);
+        assert!(game.button(&format!("{ORDER}: {name}")).is_some());
+        run(&mut game, 3);
+        assert_eq!(
+            game.resource::<Fleets>().orders_at(capital).count(),
+            limit - 1
+        );
+        assert_eq!(rejected(&game), 0);
+    }
+
+    #[test]
+    fn fleets_are_split_and_merged_through_the_window() {
+        let (mut game, me) = campaign_with_window();
+        let first = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let ships: Vec<_> = fleet(&game, first).ships.iter().map(|s| s.id).collect();
+        assert!(ships.len() >= 3);
+        // Ohne gewählte Schiffe ist „Abteilen“ gesperrt, und der Grund des Kerns steht da.
+        assert_eq!(game.button(SPLIT), None);
+        assert!(
+            game.text("Keine Schiffe für die neue Flotte genannt.")
+                .is_some()
+        );
+        // Allein im System: Auch zu vereinigen gibt es nichts.
+        assert_eq!(game.button("Vereinigen"), None);
+        let home = game
+            .resource::<Galaxy>()
+            .system(home_of(&game, me))
+            .name
+            .clone();
+        assert!(
+            game.text(&format!("Keine zweite eigene Flotte liegt in {home}."))
+                .is_some()
+        );
+        // Alle Schiffe gewählt: Eines muss bleiben.
+        for ship in &ships {
+            game.click_on(&format!("Schiff {ship}"));
+        }
+        assert_eq!(game.button(SPLIT), None);
+        assert!(
+            game.text("Mindestens ein Schiff muss in der Flotte bleiben.")
+                .is_some()
+        );
+        // Zwei Schiffe bleiben gewählt und werden abgeteilt.
+        for ship in &ships[2..] {
+            game.click_on(&format!("Schiff {ship}"));
+        }
+        assert!(
+            game.text(&format!("2 von {} Schiffen gewählt", ships.len()))
+                .is_some()
+        );
+        game.click_on(SPLIT);
+        run(&mut game, 3);
+        let log = game.resource::<CommandLog>();
+        let sent = log.entries.last().expect("ein Befehl");
+        assert_eq!(
+            sent.command,
+            SimCommand::SplitFleet {
+                fleet: first,
+                ships: ships[..2].to_vec()
+            }
+        );
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        let mine: Vec<FleetId> = game.resource::<Fleets>().of(me).map(|f| f.id).collect();
+        assert_eq!(mine.len(), 2);
+        let second = mine[1];
+        let taken: Vec<_> = fleet(&game, second).ships.iter().map(|s| s.id).collect();
+        assert_eq!(taken, ships[..2]);
+        assert_eq!(fleet(&game, first).ships.len(), ships.len() - 2);
+        // Beide Flotten stehen in der Liste; die neue lässt sich wählen und zeigt ihre Schiffe.
+        let name = fleet(&game, second).name.clone();
+        game.click_on(&name);
+        assert_eq!(game.resource::<UiState>().fleet_chosen, Some(second));
+        assert!(game.button(&format!("Schiff {}", ships[0])).is_some());
+        assert_eq!(game.button(&format!("Schiff {}", ships[2])), None);
+        // Zurück in die erste Flotte.
+        let into = fleet(&game, first).name.clone();
+        game.click_on(&format!("{MERGE} {into}"));
+        run(&mut game, 3);
+        let log = game.resource::<CommandLog>();
+        let sent = log.entries.last().expect("ein Befehl");
+        assert_eq!(
+            sent.command,
+            SimCommand::MergeFleets {
+                from: second,
+                into: first
+            }
+        );
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        assert_eq!(game.resource::<Fleets>().of(me).count(), 1);
+        assert_eq!(fleet(&game, first).ships.len(), ships.len());
+        // Das Fenster zeigt wieder die eine Flotte mit allen Schiffen.
+        assert_eq!(game.resource::<UiState>().fleet_chosen, Some(first));
+        for ship in &ships {
+            assert!(game.button(&format!("Schiff {ship}")).is_some());
+        }
+    }
+
+    #[test]
+    fn a_ship_is_laid_up_through_the_window() {
+        let (mut game, me) = campaign_with_window();
+        let first = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let ships: Vec<_> = fleet(&game, first).ships.iter().map(|s| s.id).collect();
+        // Ohne gewählte Schiffe ist der Knopf gesperrt, und der Grund des Kerns steht da.
+        assert!(game.disabled_button(LAY_UP).is_some());
+        assert!(game.text("Keine Schiffe zum Stilllegen genannt.").is_some());
+        // Der Tagesanfang mit seinen Zahlungen ist vorbei: Bis zum nächsten Tag bewegt
+        // nur noch der Befehl die Staatskasse.
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 0,
+        };
+        for _ in 0..400 {
+            if game.resource::<sim::clock::SimClock>().tick >= 2 {
+                break;
+            }
+            game.frames(1);
+        }
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(2);
+        let day = game.resource::<sim::clock::SimClock>().day();
+        game.click_on(&format!("Schiff {}", ships[0]));
+        game.frames(2);
+        // Das Fenster nennt, was der Kern auf einer Kopie erlöst und was die Flotte spart.
+        let claim = |game: &TestGame| {
+            let world = game.world();
+            sim::fleet::fleet_claim(
+                world.resource::<GameData>(),
+                world.resource::<Galaxy>(),
+                world.resource::<Economy>(),
+                world.resource::<Fleets>(),
+                world.resource::<Polities>().get(me),
+            )
+        };
+        let treasury = |game: &TestGame| game.resource::<Economy>().treasury(me);
+        let (before, cash) = (claim(&game), treasury(&game));
+        let line = game
+            .labels()
+            .into_iter()
+            .map(|(text, _)| text)
+            .find(|text| text.starts_with(&format!("1 von {} Schiffen: bringt ", ships.len())))
+            .expect("Erlös und Ersparnis stehen neben dem Knopf");
+        game.click_on(LAY_UP);
+        // Vorgemerkt: Die Zeit steht, das Schiff ist noch da, der Knopf ist gesperrt.
+        game.frames(2);
+        game.click_on(&format!("Schiff {}", ships[0]));
+        game.frames(2);
+        assert!(game.disabled_button(LAY_UP).is_some());
+        assert!(game.text(WAITING).is_some());
+        game.click_on(&format!("Schiff {}", ships[0]));
+        // Ein Takt: Der Kern nimmt den Befehl an.
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 0,
+        };
+        for _ in 0..200 {
+            if !game.resource::<CommandLog>().entries.is_empty() {
+                break;
+            }
+            game.frames(1);
+        }
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(2);
+        let log = game.resource::<CommandLog>();
+        let sent = log.entries.last().expect("ein Befehl");
+        assert_eq!(
+            sent.command,
+            SimCommand::LayUpShips {
+                fleet: first,
+                ships: vec![ships[0]]
+            }
+        );
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        assert_eq!(game.resource::<sim::clock::SimClock>().day(), day);
+        // Das Schiff ist fort, die Kasse hat den Erlös, die Flotte verlangt weniger.
+        let left: Vec<_> = fleet(&game, first).ships.iter().map(|s| s.id).collect();
+        assert_eq!(left, ships[1..]);
+        assert_eq!(game.button(&format!("Schiff {}", ships[0])), None);
+        let (after, now) = (claim(&game), treasury(&game));
+        assert!(after < before, "die Flotte kostet {after} statt {before}");
+        assert!(now > cash, "die Kasse hat {now} statt {cash}");
+        let said = format!(
+            "1 von {} Schiffen: bringt {} Credits am heutigen Markt und spart {} Credits im \
+             Monat an Sold und Ersatzteilen.",
+            ships.len(),
+            crate::ui::format::grouped(sim::economy::to_credits(now - cash)),
+            crate::ui::format::grouped(sim::economy::to_credits(before - after))
+        );
+        assert_eq!(line, said);
+    }
+
+    #[test]
+    fn a_truce_locks_the_war_button_and_the_core_names_its_reason() {
+        use crate::ui::panels::truce_line;
+        use bevy::prelude::Vec2;
+        let (mut game, me) = campaign_with_window();
+        game.click_on(TITLE);
+        let enemy = game
+            .resource::<Polities>()
+            .list
+            .iter()
+            .find(|polity| polity.alive && polity.id != me)
+            .unwrap()
+            .id;
+        command(&mut game, me, SimCommand::DeclareWar { target: enemy });
+        run(&mut game, 3);
+        command(&mut game, me, SimCommand::MakePeace { target: enemy });
+        run(&mut game, 3);
+        let day = game.resource::<sim::clock::SimClock>().day();
+        let until = game
+            .resource::<sim::diplomacy::Diplomacy>()
+            .truce_until(me, enemy, day)
+            .expect("nach dem Frieden gilt eine Waffenruhe");
+        // Der Knopf ist gesperrt, die Tage des Kerns stehen unter der Liste. Knopf und Zeile
+        // liegen in beiden Fenstergrößen ganz im Fenster: Der gesperrte Knopf steht in der
+        // Spalte der übrigen und ist nicht breiter als sie.
+        let name = game.resource::<Polities>().get(enemy).name.clone();
+        let line = truce_line(&name, until - day);
+        for size in [Vec2::new(1280.0, 720.0), Vec2::new(1600.0, 900.0)] {
+            game.resize(size);
+            game.frames(4);
+            let locked = game
+                .disabled_button("Krieg")
+                .expect("kein gesperrter Knopf „Krieg“");
+            let open = game.button("Krieg").expect("kein offener Knopf „Krieg“");
+            assert!(
+                (locked.x - open.x).abs() < 0.5,
+                "gesperrt bei {}, offen bei {}",
+                locked.x,
+                open.x
+            );
+            assert!(
+                locked.x + 24.0 < size.x,
+                "Knopf bei {} von {}",
+                locked.x,
+                size.x
+            );
+            let (_, rect) = game
+                .labels()
+                .into_iter()
+                .find(|(text, _)| *text == line)
+                .unwrap_or_else(|| panic!("keine Zeile „{line}“"));
+            assert!(
+                rect.right() <= size.x,
+                "Zeile bis {} von {}",
+                rect.right(),
+                size.x
+            );
+        }
+        // Solange der Krieg lief, stand er bei den Gemeinschaften; jetzt nicht mehr.
+        assert!(
+            !game
+                .labels()
+                .iter()
+                .any(|(text, _)| text.starts_with("Krieg: "))
+        );
+        // Kommt der Befehl dennoch, sagt der Spieler-Hinweis den Grund des Kerns.
+        command(&mut game, me, SimCommand::DeclareWar { target: enemy });
+        run(&mut game, 3);
+        let notice = game.resource::<Notice>().text.clone();
+        assert!(
+            notice.starts_with("Befehl abgelehnt: nach dem Friedensschluss gilt noch "),
+            "{notice}"
+        );
+        assert!(notice.ends_with("Tage Waffenruhe."), "{notice}");
+    }
+
+    #[test]
+    fn a_ship_ordered_in_the_window_is_built_and_joins_a_fleet() {
+        let (mut game, me) = campaign_with_window();
+        game.click_on(TAB_YARDS);
+        game.frames(2);
+        let data = game.resource::<GameData>().clone();
+        let capital = game.resource::<Polities>().get(me).capital.unwrap();
+        let world = game.resource::<Galaxy>().planet(capital).name.clone();
+        assert_eq!(game.resource::<UiState>().yard_chosen, Some(capital));
+        let corvette = data.design_index("dolch").expect("Entwurf");
+        let name = data.designs[corvette as usize].name.clone();
+        // Ein Entwurf, dessen Technologie fehlt, ist gesperrt und nennt sie.
+        let locked = data.design_index("speer_2").expect("Entwurf");
+        let locked_name = &data.designs[locked as usize].name;
+        assert_eq!(game.button(&format!("{ORDER}: {locked_name}")), None);
+        let tech = &data.techs[data.designs[locked as usize].stats.techs[0] as usize].name;
+        assert!(game.text(&format!("gesperrt · braucht: {tech}")).is_some());
+
+        let ships_before = game.resource::<Fleets>().ship_count(me);
+        game.click_on(&format!("{ORDER}: {name}"));
+        run(&mut game, 3);
+        let order = {
+            let fleets = game.resource::<Fleets>();
+            let orders: Vec<_> = fleets.orders_of(me).collect();
+            assert_eq!(orders.len(), 1);
+            assert_eq!((orders[0].planet, orders[0].design), (capital, corvette));
+            orders[0].clone()
+        };
+        // Die Werft zeigt den Auftrag mit seinem Stand, wie der Kern ihn nennt.
+        assert!(game.text(&format!("Nr. {}", order.id)).is_some());
+        assert!(game.text(&order.status_text(&data)).is_some());
+        // Ein zweiter Auftrag über die Klasse; er lässt sich wieder streichen.
+        game.click_on(&format!("{ORDER}: Klasse {}", ShipClass::Frigate.label()));
+        run(&mut game, 3);
+        let second = {
+            let fleets = game.resource::<Fleets>();
+            let orders: Vec<_> = fleets.orders_of(me).collect();
+            assert_eq!(orders.len(), 2);
+            assert_eq!(
+                Some(orders[1].design),
+                data.best_design(
+                    ShipClass::Frigate,
+                    game.resource::<sim::tech::Research>().known(me)
+                )
+            );
+            orders[1].id
+        };
+        game.click_on(&format!("{CANCEL}: Nr. {second}"));
+        run(&mut game, 3);
+        assert_eq!(game.resource::<Fleets>().orders_of(me).count(), 1);
+
+        // Die Partie läuft, bis das Schiff fertig ist: Es stößt zur Flotte im System.
+        run_until(&mut game, 20_000, "das Schiff ist gebaut", |game| {
+            game.resource::<Fleets>().orders_of(me).count() == 0
+        });
+        let fleets = game.resource::<Fleets>();
+        assert_eq!(fleets.ship_count(me), ships_before + 1);
+        let joined = fleets
+            .of(me)
+            .flat_map(|fleet| fleet.ships.iter())
+            .filter(|ship| ship.design == corvette)
+            .count();
+        let start = data
+            .balance
+            .military
+            .starting_fleet_ids
+            .iter()
+            .filter(|(design, _)| *design == corvette)
+            .map(|(_, count)| *count as usize)
+            .sum::<usize>();
+        assert_eq!(joined, start + 1);
+        // Die Kosten der Flotte stehen im Fenster, wie der Haushalt sie führt.
+        let budget = game.resource::<sim::economy::Economy>().budget(me).unwrap();
+        let line = budget.last().unwrap().line(sim::economy::Claim::Fleet);
+        let wanted = crate::ui::format::grouped(sim::economy::to_credits(line.wanted));
+        assert!(
+            game.text(&wanted).is_some(),
+            "{wanted} steht nicht im Fenster"
+        );
+
+        // Eine volle Werft nimmt nichts mehr an: Der Knopf ist gesperrt, der Grund steht da.
+        let limit = data.balance.military.yard_queue;
+        for _ in 0..limit {
+            game.world_mut().resource_mut::<CommandQueue>().push(
+                me,
+                CommandSource::Player,
+                SimCommand::BuildShip {
+                    planet: capital,
+                    design: corvette,
+                },
+            );
+        }
+        run(&mut game, 3);
+        assert_eq!(
+            game.resource::<Fleets>().orders_at(capital).count(),
+            limit as usize
+        );
+        assert_eq!(game.button(&format!("{ORDER}: {name}")), None);
+        assert!(
+            game.text(&format!(
+                "Die Werft von {world} nimmt nicht mehr als {limit} Aufträge an."
+            ))
+            .is_some()
+        );
+    }
+}

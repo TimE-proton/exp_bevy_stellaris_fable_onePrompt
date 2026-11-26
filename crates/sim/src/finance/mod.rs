@@ -14,7 +14,8 @@ pub mod shares;
 
 pub use bonds::{Bond, bond_yield, issue_bonds, service_bonds};
 pub use cohesion::{
-    CohesionFactors, Region, Stage, cohesion_target, ownership_of_region, update_cohesion,
+    CohesionFactors, Region, Secession, Stage, apply_secession, cohesion_target,
+    ownership_of_region, update_cohesion,
 };
 pub use investors::invest_holders;
 pub use plugin::{EquityFlows, FinancePlugin};
@@ -121,9 +122,12 @@ pub struct PolityFinance {
     pub war_weariness: f64,
     /// Rendite, die Käufer heute für neue Anleihen verlangen.
     pub bond_yield: f64,
-    /// Geglättete Monatseinnahmen des Staates in Credits.
+    /// Geglättete Monatseinnahmen des Staates in Credits: die laufenden Einnahmen der
+    /// abgeschlossenen Monate (`Economy::state_income_of`), an denen der Markt die
+    /// Schuldenlast misst.
     pub revenue: f64,
-    /// Staatskasse am letzten Monatsende, um die Einnahmen zu schätzen.
+    /// Staatskasse am letzten Monatsende. Nur noch Auskunft; die Einnahmen werden nicht
+    /// mehr daraus geschätzt.
     pub last_treasury: Money,
     pub defaults: u32,
 }

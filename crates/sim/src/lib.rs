@@ -26,6 +26,7 @@ pub mod logistics;
 pub mod polity;
 pub mod rng;
 pub mod state;
+pub mod tech;
 
 use bevy_app::prelude::*;
 use bevy_app::{PluginGroup, PluginGroupBuilder};
@@ -48,6 +49,11 @@ pub struct SimRoot;
 /// Die eine, verkettete Reihenfolge eines Takts. Die Kausalität des Spiels steht hier:
 /// Befehle und Entscheidungen, dann Warenflüsse und Produktion, daraus Preise und
 /// Finanzen, daraus Zusammenhalt; danach Krieg und seine Folgen.
+///
+/// Wer wie viel aus der Staatskasse bekommt, entscheidet am Monatsersten der
+/// Staatshaushalt im Monatsabschluss (`Finance`, [`economy::settle_budget`]): Er bedient
+/// die Ansprüche in ihrer Rangfolge ([`economy::Claim`]) und bewilligt Flotte und Forschung,
+/// was sie später im selben Takt ausgeben (`Fleets`, `Research`).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Commands,
@@ -58,8 +64,8 @@ pub enum SimSet {
     Prices,
     Finance,
     Cohesion,
-    Research,
     Fleets,
+    Research,
     SpaceCombat,
     Siege,
     Aftermath,
@@ -93,8 +99,8 @@ impl Plugin for CorePlugin {
                 SimSet::Prices,
                 SimSet::Finance,
                 SimSet::Cohesion,
-                SimSet::Research,
                 SimSet::Fleets,
+                SimSet::Research,
                 SimSet::SpaceCombat,
                 SimSet::Siege,
                 SimSet::Aftermath,
@@ -130,6 +136,7 @@ impl PluginGroup for SimPlugins {
             .add(logistics::LogisticsPlugin)
             .add(economy::EconomyPlugin)
             .add(finance::FinancePlugin)
+            .add(tech::TechPlugin)
             .add(fleet::FleetPlugin)
             .add(ai::AiPlugin)
     }
@@ -144,9 +151,13 @@ fn advance_clock(mut clock: ResMut<SimClock>) {
 }
 
 /// Braucht die Simulation gerade jeden Takt? Sonst darf ein Headless-Lauf direkt zum
-/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts.
+/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts. Jeden
+/// Takt braucht sie, solange Befehle warten oder ein Gefecht läuft.
 pub fn needs_fine_ticks(world: &World) -> bool {
     world
         .get_resource::<command::CommandQueue>()
         .is_some_and(|queue| !queue.pending.is_empty())
+        || world
+            .get_resource::<fleet::Battles>()
+            .is_some_and(|battles| !battles.active.is_empty())
 }

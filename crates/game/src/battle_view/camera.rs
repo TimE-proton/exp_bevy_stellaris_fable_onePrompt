@@ -4,23 +4,51 @@
 
 use super::feed::BattleFeed;
 use super::{BattleViewSet, Part, ViewFrame, ViewTimings, to_world};
+use crate::pointer::{PointerOwner, WorldMouse, track_pointer};
+use bevy::camera::CameraUpdateSystems;
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
 use bevy::window::PrimaryWindow;
-use bevy_egui::input::{
-    EguiWantsInput, egui_wants_any_keyboard_input, egui_wants_any_pointer_input,
-};
+use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input};
 use sim::battle::Battle;
 
 /// Senkrechter Bildwinkel der Schlachtkamera.
 pub const FOV: f32 = 50.0 * std::f32::consts::PI / 180.0;
 const NEAR: f32 = 2.0;
-/// Weiter als so kommt die Kamera nicht vom Feld weg.
+/// Weiter als so kommt die Kamera im freien Flug nicht vom Feld weg (die Übersicht darf
+/// weiter zurück, wenn die Schiffe es verlangen).
 const MAX_DISTANCE: f32 = 14_000.0;
+/// Neigung der Übersicht unter die Waagerechte.
+const OVERVIEW_PITCH: f32 = 0.654;
+/// Kleinster und größter Halbmesser, den die Übersicht zeigt. Was weiter als der größte
+/// von der Feldmitte treibt, bleibt außen vor: Sonst schrumpfte das Gefecht zum Punkt.
+const OVERVIEW_MIN: f32 = 650.0;
+const OVERVIEW_MAX: f32 = 12_000.0;
+/// Neigung der Blicke von vorn und von der Seite: flach, aber nicht so flach, dass die
+/// Schiffe einander verdecken.
+const SIDE_PITCH: f32 = 0.3;
+/// Freier Rand der Übersicht und der Richtungsblicke, als Anteil der halben Bildbreite und
+/// -höhe.
+const FIT_MARGIN: f32 = 0.04;
+/// Abstand in Pixeln, den solche Blicke zu den Tafeln halten.
+pub const LAYOUT_GAP: f32 = 10.0;
+/// Näher als auf diesen Umkreis um die Mitte der Schiffe gehen die Richtungsblicke nicht
+/// heran.
+const SIDE_VIEW_MIN: f32 = 150.0;
 /// Markierungen kleiner Schiffe lassen sich in diesem Umkreis (Pixel) anklicken.
 const PICK_PIXELS: f32 = 11.0;
+/// Höhe der Zwischenbilder, aus denen der Leuchtschein um helle Stellen entsteht, solange
+/// das Fenster es zulässt (der Vorgabewert der Engine).
+const GLOW_HEIGHT: u32 = 512;
+/// Kantenlänge, die jede Grafikkarte für eine Textur zulässt, wenn keine befragt werden
+/// kann (ohne Renderer, in den Systemtests).
+const SAFE_TEXTURE_SIZE: u32 = 2048;
+/// Grenzen der Fluggeschwindigkeit, als Vielfaches der Grundgeschwindigkeit.
+const FLY_SPEED_MIN: f32 = 0.04;
+const FLY_SPEED_MAX: f32 = 12.0;
 
 #[derive(Component)]
 pub struct BattleCamera;
@@ -53,6 +81,32 @@ impl Default for ViewOptions {
     }
 }
 
+/// Was die Tafeln der Schlachtansicht vom Bild belegen, in Pixeln und schon mit Abstand
+/// ([`LAYOUT_GAP`]). Die Tafeln melden es in jedem Frame, in dem sie gezeichnet werden;
+/// Übersicht und Richtungsblicke stellen kein Schiff darunter.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct HudLayout {
+    /// Unterkante der Kopfleiste.
+    pub top: f32,
+    /// Breite und Unterkante der Lagetafeln in den beiden oberen Ecken.
+    pub corner: Vec2,
+    /// Breite der Tafel des gewählten Schiffs, solange sie offen ist. Sie steht an einer
+    /// Seite und reicht bis zum unteren Bildrand.
+    pub column: Option<f32>,
+}
+
+impl Default for HudLayout {
+    /// Solange noch keine Tafel gezeichnet ist: der Platz, den die Lagetafeln höchstens
+    /// brauchen (alle sechs Klassen, Jäger im Hangar und die Befehle des Spielers).
+    fn default() -> Self {
+        Self {
+            top: 34.0,
+            corner: Vec2::new(319.0, 394.0),
+            column: None,
+        }
+    }
+}
+
 /// Bitte an die Kamera.
 #[derive(Message, Clone, Copy, Debug, PartialEq)]
 pub enum CameraRequest {
@@ -63,11 +117,54 @@ pub enum CameraRequest {
     /// Zum Schwerpunkt des Gefechts.
     FocusFight,
     FocusShip(u32),
+    /// Blick aus einer festen Richtung auf das gewählte Schiff, ohne Auswahl auf alle
+    /// Schiffe auf dem Feld.
+    View(ViewSide),
     /// Feste Stelle und Blickpunkt (Selbsttest).
     Place {
         eye: Vec3,
         target: Vec3,
     },
+}
+
+/// Richtung, aus der ein fester Blick auf das Gefecht fällt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewSide {
+    /// Senkrecht von oben; Norden ist im Bild oben, die erste Partei steht links.
+    Top,
+    Bottom,
+    /// Von Süden, wie die Übersicht, aber flach.
+    Front,
+    Back,
+    /// Von Osten, über die zweite Partei hinweg.
+    Right,
+    Left,
+}
+
+impl ViewSide {
+    pub fn opposite(self) -> Self {
+        match self {
+            ViewSide::Top => ViewSide::Bottom,
+            ViewSide::Bottom => ViewSide::Top,
+            ViewSide::Front => ViewSide::Back,
+            ViewSide::Back => ViewSide::Front,
+            ViewSide::Right => ViewSide::Left,
+            ViewSide::Left => ViewSide::Right,
+        }
+    }
+
+    /// Gier- und Nickwinkel der Kamera.
+    fn angles(self) -> (f32, f32) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        match self {
+            ViewSide::Top => (0.0, -FRAC_PI_2),
+            ViewSide::Bottom => (0.0, FRAC_PI_2),
+            ViewSide::Front => (0.0, -SIDE_PITCH),
+            ViewSide::Back => (PI, -SIDE_PITCH),
+            ViewSide::Right => (FRAC_PI_2, -SIDE_PITCH),
+            ViewSide::Left => (-FRAC_PI_2, -SIDE_PITCH),
+        }
+    }
 }
 
 /// Blick der Kamera als reine Rechnung: bildet Weltpunkte auf den Bildschirm ab und
@@ -81,9 +178,12 @@ pub struct Projector {
     pub size: Vec2,
 }
 
+/// Bildgröße, mit der gerechnet wird, solange das Fenster noch nicht bekannt ist.
+const DEFAULT_SIZE: Vec2 = Vec2::new(1600.0, 900.0);
+
 impl Default for Projector {
     fn default() -> Self {
-        Self::new(&overview_transform(2400.0), FOV, Vec2::new(1600.0, 900.0))
+        Self::new(&resting_view(), FOV, DEFAULT_SIZE)
     }
 }
 
@@ -195,23 +295,209 @@ pub fn pick_ship(
     by_plane.or(by_ray).map(|(index, _)| index)
 }
 
-/// Blick schräg von oben auf einen Kreis mit Halbmesser `extent` um die Feldmitte. Die
-/// erste Partei steht dabei links, die zweite rechts.
-pub fn overview_transform(extent: f32) -> Transform {
-    Transform::from_xyz(0.0, extent * 0.95, extent * 1.3)
-        .looking_at(Vec3::new(0.0, 0.0, extent * 0.06), Vec3::Y)
+/// Wie weit ein Punkt seitlich, nach oben und nach unten von der Blickachse abliegen darf,
+/// je Einheit Tiefe.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    side: f32,
+    above: f32,
+    below: f32,
 }
 
-/// Halbmesser, den die Übersicht zeigen muss, damit alle Schiffe auf dem Feld im Bild
-/// sind: so eng wie möglich, höchstens das ganze Feld.
-pub fn overview_extent(battle: &Battle, field: f32) -> f32 {
-    let reach = battle
+/// Blick aus der Richtung `yaw`/`pitch` auf einen Kreis in der Gefechtsebene, so nah wie
+/// möglich und doch so, dass der ganze Kreis zu sehen ist: mit etwas Rand, unterhalb der
+/// Kopfleiste und unter keiner Tafel. Dafür liegt er entweder in der Spalte zwischen den
+/// Tafeln oder ganz unter den Lagetafeln, je nachdem, was näher heranführt; ist die Tafel
+/// des gewählten Schiffs offen, bleibt nur die Spalte neben ihr. `size` ist die Größe des
+/// Bilds in Pixeln, `layout` der Platz der Tafeln darin.
+pub fn frame_circle(
+    center: Vec3,
+    radius: f32,
+    yaw: f32,
+    pitch: f32,
+    size: Vec2,
+    layout: &HudLayout,
+) -> Transform {
+    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+    let (forward, right, up) = (
+        rotation * Vec3::NEG_Z,
+        rotation * Vec3::X,
+        rotation * Vec3::Y,
+    );
+    let size = size.max(Vec2::splat(64.0));
+    let tan_y = (FOV * 0.5).tan();
+    let tan_x = tan_y * size.x / size.y;
+    let full = Limits {
+        side: (1.0 - FIT_MARGIN) * tan_x,
+        above: (1.0 - FIT_MARGIN - 2.0 * layout.top / size.y).max(0.2) * tan_y,
+        below: (1.0 - FIT_MARGIN) * tan_y,
+    };
+    // Der Blick bleibt mittig: Die Spalte ist so schmal, wie die breiteste Tafel es
+    // verlangt, auf beiden Seiten.
+    let between = |width: f32| Limits {
+        side: (1.0 - FIT_MARGIN - 2.0 * width / size.x) * tan_x,
+        ..full
+    };
+    let under_panels = Limits {
+        above: (1.0 - FIT_MARGIN - 2.0 * layout.corner.y / size.y) * tan_y,
+        ..full
+    };
+    // Erste Wahl hält alle Tafeln frei. Fehlt dafür der Platz, zählt die Tafel des Schiffs
+    // nicht mehr, zuletzt gar keine.
+    let choices: [Vec<Limits>; 2] = match layout.column {
+        Some(column) => [
+            vec![between(layout.corner.x.max(column))],
+            vec![between(layout.corner.x), under_panels],
+        ],
+        None => [vec![between(layout.corner.x), under_panels], Vec::new()],
+    };
+    // Der Blickpunkt wandert längs der Blickrichtung über den Boden: Die nahe Hälfte des
+    // Kreises erscheint größer als die ferne, die Kreismitte gehört also nicht in die
+    // Bildmitte.
+    let along = Vec3::new(forward.x + up.x, 0.0, forward.z + up.z).normalize_or(Vec3::NEG_Z);
+    const SAMPLES: usize = 72;
+    // Der Kreis, bezogen auf seine Mitte und zerlegt nach den Achsen der Kamera.
+    let rim: Vec<Vec3> = (0..SAMPLES)
+        .map(|step| {
+            let angle = std::f32::consts::TAU * step as f32 / SAMPLES as f32;
+            let offset = Vec3::new(angle.cos(), 0.0, angle.sin()) * radius;
+            Vec3::new(offset.dot(right), offset.dot(up), offset.dot(forward))
+        })
+        .collect();
+    let slide = Vec3::new(along.dot(right), along.dot(up), along.dot(forward));
+    // Für einen Blickpunkt, der um `shift` vor der Kreismitte liegt: der Abstand, den die
+    // Kamera braucht, damit der ganze Kreis innerhalb der Grenzen liegt, und wie viel
+    // mehr Luft dann über dem Kreis bleibt als unter ihm.
+    let placed = |limits: Limits, shift: f32| {
+        let seen = |point: &Vec3| *point - slide * shift;
+        let distance = rim
+            .iter()
+            .map(seen)
+            .map(|point| {
+                (point.x.abs() / limits.side)
+                    .max(point.y / limits.above)
+                    .max(-point.y / limits.below)
+                    - point.z
+            })
+            .fold(NEAR * 2.0, f32::max);
+        let (top, bottom) =
+            rim.iter()
+                .map(seen)
+                .fold((f32::MIN, f32::MIN), |(top, bottom), point| {
+                    let depth = distance + point.z;
+                    (
+                        top.max(point.y / depth / limits.above),
+                        bottom.max(-point.y / depth / limits.below),
+                    )
+                });
+        (distance, bottom - top)
+    };
+    // Gesucht ist der Blickpunkt, bei dem der Kreis mittig zwischen oberer und unterer
+    // Grenze sitzt. Stößt er oben und unten zugleich an, ist das auch der nächste Blick;
+    // begrenzt die Breite, bleibt das Bild so ausgewogen. Je weiter vorn der Blickpunkt,
+    // desto tiefer sitzt der Kreis im Bild: Halbieren genügt.
+    let centered = |limits: Limits| {
+        let (mut low, mut high) = (-4.0 * radius, 4.0 * radius);
+        for _ in 0..48 {
+            let middle = (low + high) * 0.5;
+            if placed(limits, middle).1 > 0.0 {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        let shift = (low + high) * 0.5;
+        (shift, placed(limits, shift).0)
+    };
+    // In sehr kleinen Fenstern bleibt neben oder unter den Tafeln kein brauchbarer Platz.
+    // Unter den Tafeln genügt wenig Raum über der Bildmitte: Der Kreis sitzt dann eben in
+    // der unteren Bildhälfte, in voller Breite.
+    let usable = |limits: &Limits| limits.side > 0.25 * tan_x && limits.above > 0.05 * tan_y;
+    let (shift, distance) = choices
+        .into_iter()
+        .find_map(|choice| {
+            choice
+                .into_iter()
+                .filter(usable)
+                .map(centered)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+        })
+        .unwrap_or_else(|| centered(full));
+    Transform {
+        translation: center + along * shift - forward * distance,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// Blick schräg von oben auf einen Kreis mit Halbmesser `extent` um die Feldmitte, der
+/// ganz zu sehen ist. Die erste Partei steht dabei links, die zweite rechts.
+pub fn overview_transform(extent: f32, size: Vec2, layout: &HudLayout) -> Transform {
+    frame_circle(Vec3::ZERO, extent, 0.0, -OVERVIEW_PITCH, size, layout)
+}
+
+/// Blick der Kamera, bevor ein Gefecht bekannt ist: das ganze Feld im Standardfenster.
+fn resting_view() -> Transform {
+    overview_transform(2400.0, DEFAULT_SIZE, &HudLayout::default())
+}
+
+/// Schiffe auf dem Feld, die für die Blicke zählen (ohne die, die weit abgetrieben sind).
+fn ships_in_view(battle: &Battle) -> impl Iterator<Item = &sim::battle::BattleShip> {
+    battle
         .ships
         .iter()
-        .filter(|ship| ship.status.in_play())
+        .filter(|ship| ship.status.in_play() && ship.pos.length() <= OVERVIEW_MAX)
+}
+
+/// Halbmesser um die Feldmitte, in dem alle Schiffe auf dem Feld mit ganzem Rumpf liegen,
+/// mindestens das Mindestmaß der Übersicht. Auch jenseits des Feldrands: Fliehende sind
+/// bis dorthin noch im Gefecht, und große Linien stehen vor dem ersten Takt weit draußen.
+/// Nach dem Ende gehört auch das Trümmerfeld dazu, soweit es auf dem Feld (Halbmesser
+/// `field`) liegt.
+pub fn overview_extent(battle: &Battle, field: f32) -> f32 {
+    let ships = ships_in_view(battle)
         .map(|ship| ship.pos.length() + ship.radius)
-        .fold(0.0, f32::max);
-    (reach * 1.12 + 120.0).clamp(650.0_f32.min(field), field)
+        .fold(OVERVIEW_MIN, f32::max);
+    if !battle.finished {
+        return ships;
+    }
+    battle
+        .wrecks
+        .iter()
+        .map(|wreck| wreck.pos.length() + wreck.radius)
+        .filter(|reach| *reach <= field)
+        .fold(ships, f32::max)
+}
+
+/// Die Übersicht: schräg von Süden auf das Feld, so nah, dass gerade noch jedes Schiff auf
+/// dem Feld zu sehen ist.
+pub fn overview_view(battle: &Battle, field: f32, size: Vec2, layout: &HudLayout) -> Transform {
+    overview_transform(overview_extent(battle, field), size, layout)
+}
+
+/// Kleinster Kreis um die Mitte der Schiffe auf dem Feld, der sie alle enthält.
+pub fn fleet_circle(battle: &Battle) -> (Vec3, f32) {
+    let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for ship in ships_in_view(battle) {
+        let at = to_world(ship.pos);
+        min = min.min(at - ship.radius);
+        max = max.max(at + ship.radius);
+    }
+    if min.x > max.x {
+        return (Vec3::ZERO, OVERVIEW_MIN);
+    }
+    let center = Vec3::new((min.x + max.x) * 0.5, 0.0, (min.z + max.z) * 0.5);
+    let radius = ships_in_view(battle)
+        .map(|ship| to_world(ship.pos).distance(center) + ship.radius)
+        .fold(SIDE_VIEW_MIN, f32::max);
+    (center, radius)
+}
+
+/// Blick aus einer festen Richtung auf alle Schiffe auf dem Feld.
+pub fn side_view(battle: &Battle, side: ViewSide, size: Vec2, layout: &HudLayout) -> Transform {
+    let (center, radius) = fleet_circle(battle);
+    let (yaw, pitch) = side.angles();
+    frame_circle(center, radius, yaw, pitch, size, layout)
 }
 
 /// Kamera im Abstand `distance` vor `target`, mit Blickrichtung aus Gierwinkel und Neigung.
@@ -259,9 +545,14 @@ pub(super) fn plugin(app: &mut App) {
     app.add_plugins(FreeCameraPlugin)
         .init_resource::<SelectedShip>()
         .init_resource::<ViewOptions>()
+        .init_resource::<HudLayout>()
         .init_resource::<FollowAnchor>()
         .add_message::<CameraRequest>()
         .add_systems(Startup, spawn_camera)
+        // Vor der Freiflugsteuerung der Engine, die danach im selben Frame läuft.
+        .add_systems(PreUpdate, hold_mouse_look.after(track_pointer))
+        // Sobald die Engine die Bildgröße dieses Frames kennt und bevor sie zeichnet.
+        .add_systems(PostUpdate, fit_glow.after(CameraUpdateSystems))
         .add_systems(
             Update,
             (
@@ -269,7 +560,7 @@ pub(super) fn plugin(app: &mut App) {
                 hotkeys.run_if(not(egui_wants_any_keyboard_input)),
                 apply_requests,
                 follow_selected,
-                pick_on_click.run_if(not(egui_wants_any_pointer_input)),
+                pick_on_click,
                 update_projector,
             )
                 .chain()
@@ -300,6 +591,7 @@ fn spawn_camera(mut commands: Commands) {
         Tonemapping::TonyMcMapface,
         Bloom {
             intensity: 0.22,
+            max_mip_dimension: GLOW_HEIGHT,
             ..Bloom::NATURAL
         },
         AmbientLight {
@@ -307,16 +599,70 @@ fn spawn_camera(mut commands: Commands) {
             brightness: 260.0,
             ..default()
         },
-        FreeCamera {
-            walk_speed: 380.0,
-            run_speed: 1500.0,
-            friction: 14.0,
-            scroll_factor: 0.18,
-            ..default()
-        },
+        flight_controls(),
         flight,
-        overview_transform(2400.0),
+        resting_view(),
     ));
+}
+
+/// Höhe der Zwischenbilder des Leuchtscheins für ein Bild dieser Größe (in Pixeln der
+/// Grafikkarte), wenn eine Textur höchstens `limit` Pixel breit und hoch sein darf.
+///
+/// Die Engine legt das größte Zwischenbild so hoch an wie verlangt und so breit, wie es
+/// dem Seitenverhältnis des Bilds entspricht, gleich wie klein das Fenster ist. Bei einem
+/// sehr flachen Fenster (mit den üblichen Werten ab etwa 32:1) wäre es breiter, als die
+/// Grafikkarte erlaubt, und das Programm endete mit einem Fehler der Grafikkarte. Die Höhe
+/// schrumpft deshalb gerade so weit, dass die Breite passt.
+pub fn glow_height(image: UVec2, limit: u32) -> u32 {
+    let wanted = GLOW_HEIGHT.min(limit);
+    if image.y == 0 || image.x <= image.y {
+        return wanted.max(1);
+    }
+    // Breite = Höhe · Bildbreite / Bildhöhe, und die darf `limit` nicht überschreiten. Ein
+    // Pixel Abstand fängt das Runden der Engine auf.
+    let widest = limit.saturating_sub(1) as u64;
+    let fitting = (widest * image.y as u64 / image.x as u64) as u32;
+    wanted.min(fitting).max(1)
+}
+
+/// Hält den Leuchtschein der Schlachtkamera in dem Rahmen, den die Grafikkarte zulässt,
+/// wie auch immer das Fenster gezogen wird.
+fn fit_glow(
+    device: Option<Res<RenderDevice>>,
+    mut camera: Single<(&Camera, &mut Bloom), With<BattleCamera>>,
+) {
+    let (camera, glow) = &mut *camera;
+    let Some(image) = camera.physical_viewport_size() else {
+        return;
+    };
+    let limit = device.map_or(SAFE_TEXTURE_SIZE, |device| {
+        device.limits().max_texture_dimension_2d
+    });
+    let height = glow_height(image, limit);
+    if glow.max_mip_dimension != height {
+        glow.max_mip_dimension = height;
+    }
+}
+
+/// Tasten, auf denen das Drehen auf der Stelle der Engine geparkt ist.
+const ENGINE_UNUSED: [KeyCode; 4] = [KeyCode::F21, KeyCode::F22, KeyCode::F23, KeyCode::F24];
+
+/// Belegung und Tempo der Freiflugsteuerung der Engine.
+fn flight_controls() -> FreeCamera {
+    FreeCamera {
+        walk_speed: 380.0,
+        run_speed: 1500.0,
+        friction: 14.0,
+        scroll_factor: 0.18,
+        // Die Engine dreht die Kamera mit dem Ziffernblock nur auf der Stelle (7 lässt sie
+        // in den Himmel blicken). Die Ansicht hat eigene Blicke auf das Gefecht; die
+        // Tasten der Engine liegen deshalb auf Tasten, die keine Tastatur hat.
+        axis_top: ENGINE_UNUSED[0],
+        axis_front: ENGINE_UNUSED[1],
+        axis_right: ENGINE_UNUSED[2],
+        key_snap_reverse: ENGINE_UNUSED[3],
+        ..default()
+    }
 }
 
 /// Schaltet die Schlachtkamera samt Steuerung ein oder aus.
@@ -331,7 +677,7 @@ pub(super) fn set_active(
     flight.velocity = Vec3::ZERO;
     flight.speed_multiplier = 1.0;
     if active {
-        *transform = overview_transform(2400.0);
+        *transform = resting_view();
         sync_flight(flight, transform);
     }
 }
@@ -340,34 +686,70 @@ pub(super) fn set_active(
 /// müssen sie zur neuen Blickrichtung passen.
 fn sync_flight(flight: &mut FreeCameraState, transform: &Transform) {
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    set_flight_angles(flight, yaw, pitch);
+}
+
+/// Wie [`sync_flight`] mit bekannten Winkeln. Bei senkrechtem Blick lassen sie sich aus
+/// der Drehung nicht mehr eindeutig zurückrechnen.
+fn set_flight_angles(flight: &mut FreeCameraState, yaw: f32, pitch: f32) {
     flight.yaw = yaw;
     flight.pitch = pitch;
     flight.rotation_curve = None;
 }
 
-/// Hält die Freiflugkamera im Zaum: Tempo in Grenzen, kein Tempowechsel durch das Mausrad
-/// über einer Tafel, keine Bewegung beim Tippen in ein Textfeld, nicht zu weit weg.
+/// Umsehen beginnt nur über der Szene. Wird die Maustaste dafür über einer Tafel oder
+/// Leiste gedrückt, ruht die Freiflugsteuerung der Engine für dieses eine Frame: Sie
+/// sieht den Tastendruck dann nie und fängt den Zeiger nicht.
+fn hold_mouse_look(
+    buttons: Res<ButtonInput<MouseButton>>,
+    owner: Res<PointerOwner>,
+    mut camera: Single<(&FreeCamera, &mut FreeCameraState), With<BattleCamera>>,
+) {
+    let (controls, flight) = &mut *camera;
+    let look = controls.mouse_key_cursor_grab;
+    if flight.enabled && buttons.just_pressed(look) && owner.taken_by_ui(look) {
+        flight.enabled = false;
+    }
+}
+
+/// Hält die Freiflugkamera im Zaum: Tempo in Grenzen, keine Bewegung beim Tippen in ein
+/// Textfeld, nicht zu weit weg.
+///
+/// Das Tempo selbst steht an genau einer Stelle, im Zustand der Freiflugsteuerung: Die
+/// Engine ändert es mit dem Mausrad, und mit der Kamera wird es zurückgesetzt
+/// ([`set_active`]). Das Mausrad über einer Tafel oder Leiste bekommt die Engine gar nicht
+/// zu sehen (`pointer::keep_wheel_from_world`); hier wird deshalb nichts zurückgenommen
+/// und kein zweites Tempo mitgeführt, das ein neues Gefecht überdauern könnte.
 fn tame_free_camera(
     wants: Res<EguiWantsInput>,
+    feed: Res<BattleFeed>,
+    data: Res<sim::GameData>,
+    layout: Res<HudLayout>,
+    window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
-    mut kept_speed: Local<Option<f32>>,
 ) {
     let (transform, flight) = &mut *camera;
-    let speed = if wants.wants_any_pointer_input() {
-        kept_speed.unwrap_or(1.0)
-    } else {
-        flight.speed_multiplier.clamp(0.04, 12.0)
-    };
+    let speed = flight.speed_multiplier.clamp(FLY_SPEED_MIN, FLY_SPEED_MAX);
     if flight.speed_multiplier != speed {
         flight.speed_multiplier = speed;
     }
-    *kept_speed = Some(speed);
     let enabled = !wants.wants_any_keyboard_input();
     if flight.enabled != enabled {
         flight.enabled = enabled;
     }
+    // Nicht zu weit weg; nur wenn die Schiffe selbst weit draußen stehen, darf die Kamera
+    // so weit zurück, wie die Übersicht es braucht.
     if transform.translation.length() > MAX_DISTANCE {
-        transform.translation = transform.translation.clamp_length_max(MAX_DISTANCE);
+        let overview = feed.battle().map_or(0.0, |battle| {
+            let field = data.balance.battle.exit_radius;
+            overview_view(battle, field, window.size(), &layout)
+                .translation
+                .length()
+        });
+        let limit = MAX_DISTANCE.max(overview * 1.05);
+        if transform.translation.length() > limit {
+            transform.translation = transform.translation.clamp_length_max(limit);
+        }
     }
 }
 
@@ -379,6 +761,13 @@ const KEY_FIGHT: KeyCode = KeyCode::KeyG;
 const KEY_FOLLOW: KeyCode = KeyCode::KeyV;
 const KEY_OVERLAY: KeyCode = KeyCode::KeyT;
 const KEY_LABELS: KeyCode = KeyCode::KeyN;
+/// Feste Blicke auf das Gefecht; mit Strg jeweils von der Gegenseite.
+const VIEW_KEYS: [(KeyCode, ViewSide); 3] = [
+    (KeyCode::Numpad7, ViewSide::Top),
+    (KeyCode::Numpad1, ViewSide::Front),
+    (KeyCode::Numpad3, ViewSide::Right),
+];
+const VIEW_REVERSE: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight];
 
 fn hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -404,6 +793,16 @@ fn hotkeys(
     if keys.just_pressed(KEY_LABELS) {
         options.labels = !options.labels;
     }
+    let reverse = keys.any_pressed(VIEW_REVERSE);
+    for (key, side) in VIEW_KEYS {
+        if keys.just_pressed(key) {
+            requests.write(CameraRequest::View(if reverse {
+                side.opposite()
+            } else {
+                side
+            }));
+        }
+    }
 }
 
 fn apply_requests(
@@ -412,6 +811,8 @@ fn apply_requests(
     data: Res<sim::GameData>,
     frame: Res<ViewFrame>,
     selected: Res<SelectedShip>,
+    layout: Res<HudLayout>,
+    window: Single<&Window, With<PrimaryWindow>>,
     mut options: ResMut<ViewOptions>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
 ) {
@@ -419,9 +820,18 @@ fn apply_requests(
         requests.clear();
         return;
     };
+    let size = window.size();
+    // Die Tafel des Schiffs zählt nur, solange eines gewählt ist: Der gemeldete Platz ist
+    // ein Frame alt, und mit der Auswahl verschwindet sie.
+    let layout = HudLayout {
+        column: layout.column.filter(|_| selected.0.is_some()),
+        ..*layout
+    };
     let (transform, flight) = &mut *camera;
     for request in requests.read() {
         let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
+        // Winkel des neuen Blicks, wenn sie feststehen.
+        let mut angles = None;
         let ship_view = |ship: u32| {
             let position = frame.position(ship as usize)?;
             let radius = battle.ships.get(ship as usize)?.radius;
@@ -444,10 +854,12 @@ fn apply_requests(
         let target = match *request {
             CameraRequest::Overview => {
                 options.follow = false;
-                Some(overview_transform(overview_extent(
+                Some(overview_view(
                     battle,
                     data.balance.battle.exit_radius,
-                )))
+                    size,
+                    &layout,
+                ))
             }
             CameraRequest::Focus => match selected.0 {
                 Some(ship) => ship_view(ship),
@@ -458,6 +870,25 @@ fn apply_requests(
                 fight_view()
             }
             CameraRequest::FocusShip(ship) => ship_view(ship),
+            CameraRequest::View(side) => {
+                let (yaw, pitch) = side.angles();
+                angles = Some((yaw, pitch));
+                // Das gewählte Schiff, solange es auf dem Feld ist; sonst alle Schiffe.
+                let chosen = selected.0.and_then(|ship| {
+                    let state = battle.ships.get(ship as usize)?;
+                    let position = frame.position(ship as usize)?;
+                    state.status.in_play().then_some((position, state.radius))
+                });
+                Some(match chosen {
+                    Some((position, radius)) => {
+                        framing(position, yaw, pitch, (radius * 6.5).clamp(45.0, 600.0))
+                    }
+                    None => {
+                        options.follow = false;
+                        side_view(battle, side, size, &layout)
+                    }
+                })
+            }
             CameraRequest::Place { eye, target } => {
                 options.follow = false;
                 Some(Transform::from_translation(eye).looking_at(target, Vec3::Y))
@@ -466,7 +897,10 @@ fn apply_requests(
         if let Some(target) = target {
             **transform = target;
             flight.velocity = Vec3::ZERO;
-            sync_flight(flight, transform);
+            match angles {
+                Some((yaw, pitch)) => set_flight_angles(flight, yaw, pitch),
+                None => sync_flight(flight, transform),
+            }
         }
     }
 }
@@ -511,17 +945,17 @@ fn follow_selected(
     anchor.0 = Some((ship, position));
 }
 
-/// Linksklick wählt das Schiff unter dem Mauszeiger; ein Klick ins Leere hebt die Auswahl
-/// auf.
+/// Linksklick in die Szene wählt das Schiff unter dem Mauszeiger; ein Klick ins Leere hebt
+/// die Auswahl auf. Klicks auf Tafeln und Leisten gelten nur diesen.
 fn pick_on_click(
-    buttons: Res<ButtonInput<MouseButton>>,
+    mouse: WorldMouse,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<&Transform, With<BattleCamera>>,
     feed: Res<BattleFeed>,
     frame: Res<ViewFrame>,
     mut selected: ResMut<SelectedShip>,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) {
+    if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let (Some(cursor), Some(battle)) = (window.cursor_position(), feed.battle()) else {
@@ -560,6 +994,7 @@ fn update_projector(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_egui::egui;
     use sim::battle::V2;
 
     fn camera() -> Projector {
@@ -694,54 +1129,339 @@ mod tests {
         );
     }
 
+    /// Liegt ein Punkt der Gefechtsebene im Bild, unterhalb der Kopfleiste?
+    fn in_view(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
+        projector.project(to_world(point)).is_some_and(|(at, _)| {
+            at.x >= 0.0
+                && at.x <= projector.size.x
+                && at.y >= layout.top
+                && at.y <= projector.size.y
+        })
+    }
+
+    /// Halbmesser des Gefechtsfelds in den Spieldaten.
+    const FIELD: f32 = 2400.0;
+
+    /// Bildgrößen, mit denen die Blicke zurechtkommen müssen: breit, schmal, hochkant.
+    const SIZES: [Vec2; 4] = [
+        Vec2::new(1600.0, 900.0),
+        Vec2::new(1024.0, 600.0),
+        Vec2::new(900.0, 900.0),
+        Vec2::new(700.0, 1000.0),
+    ];
+
+    /// Der Platz der Tafeln in einem Gefecht mit vier Klassen je Partei, wie die Tafeln
+    /// ihn melden.
+    const FOUR_CLASSES: HudLayout = HudLayout {
+        top: 34.0,
+        corner: Vec2::new(319.0, 340.0),
+        column: None,
+    };
+    /// Dasselbe mit der offenen Tafel eines gewählten Schiffs.
+    const SHIP_PANEL_OPEN: HudLayout = HudLayout {
+        column: Some(374.0),
+        ..FOUR_CLASSES
+    };
+
+    /// Liegt ein Punkt der Gefechtsebene unter einer der Lagetafeln in den oberen Ecken?
+    fn under_a_side_panel(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
+        projector.project(to_world(point)).is_some_and(|(at, _)| {
+            at.y < layout.corner.y
+                && (at.x < layout.corner.x || at.x > projector.size.x - layout.corner.x)
+        })
+    }
+
+    /// Liegt ein Punkt der Gefechtsebene dort, wo die Tafel des gewählten Schiffs stehen
+    /// kann? Sie steht links oder rechts und reicht bis zum unteren Rand.
+    fn under_the_ship_panel(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
+        let Some(column) = layout.column else {
+            return false;
+        };
+        projector
+            .project(to_world(point))
+            .is_some_and(|(at, _)| at.x < column || at.x > projector.size.x - column)
+    }
+
     #[test]
-    fn overview_shows_the_whole_field() {
-        let extent = 2400.0;
-        let projector = Projector::new(&overview_transform(extent), FOV, Vec2::new(1600.0, 900.0));
-        // Beide Aufstellungsräume und die Feldmitte liegen im Bild.
-        for point in [
-            V2::new(-1300.0, 0.0),
-            V2::new(1300.0, 0.0),
-            V2::new(0.0, 0.0),
-            V2::new(0.0, 1300.0),
-            V2::new(0.0, -1300.0),
-        ] {
-            let (screen, _) = projector.project(to_world(point)).expect("im Bild");
-            assert!(
-                screen.x > 0.0 && screen.x < 1600.0,
-                "{point:?} bei {screen}"
-            );
-            assert!(screen.y > 0.0 && screen.y < 900.0, "{point:?} bei {screen}");
+    fn overview_shows_the_whole_circle() {
+        for layout in [HudLayout::default(), FOUR_CLASSES] {
+            for size in SIZES {
+                for extent in [650.0, 1300.0, 2400.0, 7400.0] {
+                    let view = overview_transform(extent, size, &layout);
+                    let projector = Projector::new(&view, FOV, size);
+                    // Jeder Punkt des Kreises ist zu sehen, auch der dem Betrachter nächste
+                    // im Süden, und keiner liegt unter einer Lagetafel; die Feldmitte
+                    // ohnehin.
+                    let rim: Vec<Vec2> = (0..360)
+                        .step_by(3)
+                        .map(|degrees| {
+                            let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                            assert!(
+                                in_view(&projector, &layout, point),
+                                "{point:?} fehlt (Halbmesser {extent}, Bild {size})"
+                            );
+                            assert!(
+                                !under_a_side_panel(&projector, &layout, point),
+                                "{point:?} liegt unter einer Tafel (Halbmesser {extent}, Bild {size})"
+                            );
+                            projector.project(to_world(point)).unwrap().0
+                        })
+                        .collect();
+                    assert!(in_view(&projector, &layout, V2::ZERO));
+                    // Und der Kreis füllt das Bild, soweit die Tafeln es zulassen.
+                    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                    for at in rim {
+                        min = min.min(at);
+                        max = max.max(at);
+                    }
+                    // Er reicht in der Breite an die Spalte zwischen den Tafeln heran oder
+                    // in der Höhe an den Raum unter der Kopfleiste oder unter den Tafeln.
+                    let share = (max - min) / size;
+                    let column = 1.0 - FIT_MARGIN - 2.0 * layout.corner.x / size.x;
+                    let below_bar = 1.0 - FIT_MARGIN - layout.top / size.y;
+                    let below_panels = 1.0 - FIT_MARGIN - layout.corner.y / size.y;
+                    assert!(
+                        share.x > 0.95 * column
+                            || share.y > 0.95 * below_bar
+                            || share.y > 0.95 * below_panels,
+                        "der Kreis ist klein im Bild ({share}) bei Halbmesser {extent}, Bild {size}"
+                    );
+                    // Die Übersicht blickt von Süden schräg nach unten; die erste Partei
+                    // steht links.
+                    assert!(view.translation.z > 0.0 && view.translation.y > 0.0);
+                    let left = projector
+                        .project(to_world(V2::new(-extent, 0.0)))
+                        .unwrap()
+                        .0;
+                    let right = projector.project(to_world(V2::new(extent, 0.0))).unwrap().0;
+                    assert!(left.x < right.x);
+                }
+            }
         }
+        // In einem winzigen Fenster, in dem die Tafeln alles belegen, zählt nur das Bild.
+        let size = Vec2::new(400.0, 300.0);
+        let layout = HudLayout::default();
+        let projector = Projector::new(&overview_transform(1300.0, size, &layout), FOV, size);
+        for degrees in (0..360).step_by(15) {
+            assert!(in_view(
+                &projector,
+                &layout,
+                V2::from_angle((degrees as f32).to_radians()) * 1300.0
+            ));
+        }
+    }
+
+    #[test]
+    fn a_squarish_window_uses_the_room_under_the_panels() {
+        // In einem Fenster, das kaum breiter ist als die beiden Lagetafeln zusammen, bleibt
+        // zwischen ihnen nur ein schmaler Streifen. Unter ihnen ist die ganze Breite frei:
+        // Dort steht der Kreis weit größer.
+        let size = Vec2::new(900.0, 900.0);
+        let layout = HudLayout::default();
+        let column = size.x - 2.0 * layout.corner.x;
+        assert!(column < 0.3 * size.x, "Streifen {column}");
+        for extent in [650.0, 1300.0, 2400.0] {
+            let projector = Projector::new(&overview_transform(extent, size, &layout), FOV, size);
+            let (mut left, mut right) = (f32::MAX, f32::MIN);
+            for degrees in (0..360).step_by(3) {
+                let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                assert!(in_view(&projector, &layout, point), "{point:?}");
+                assert!(!under_a_side_panel(&projector, &layout, point), "{point:?}");
+                let at = projector.project(to_world(point)).unwrap().0;
+                left = left.min(at.x);
+                right = right.max(at.x);
+            }
+            assert!(
+                right - left > 2.0 * column,
+                "Kreis {} breit, Streifen zwischen den Tafeln {column}",
+                right - left
+            );
+        }
+    }
+
+    #[test]
+    fn overview_keeps_clear_of_the_open_ship_panel() {
+        let rim = |extent: f32| {
+            (0..360)
+                .step_by(3)
+                .map(move |degrees| V2::from_angle((degrees as f32).to_radians()) * extent)
+        };
+        // Wo das Fenster breit genug ist, liegt der ganze Kreis neben der Tafel des Schiffs
+        // (auf welcher Seite sie auch steht) und unter keiner Lagetafel.
+        for size in [Vec2::new(1600.0, 900.0), Vec2::new(1280.0, 720.0)] {
+            for extent in [650.0, 1300.0, 2400.0] {
+                let open = overview_transform(extent, size, &SHIP_PANEL_OPEN);
+                let projector = Projector::new(&open, FOV, size);
+                for point in rim(extent) {
+                    assert!(in_view(&projector, &SHIP_PANEL_OPEN, point));
+                    assert!(
+                        !under_the_ship_panel(&projector, &SHIP_PANEL_OPEN, point),
+                        "{point:?} liegt unter der Tafel des Schiffs (Bild {size})"
+                    );
+                    assert!(!under_a_side_panel(&projector, &SHIP_PANEL_OPEN, point));
+                }
+                // Dafür steht die Kamera weiter zurück als ohne diese Tafel, und der Kreis
+                // nutzt die Spalte aus.
+                let closed = overview_transform(extent, size, &FOUR_CLASSES);
+                assert!(open.translation.length() > closed.translation.length());
+                let (mut left, mut right) = (f32::MAX, f32::MIN);
+                for point in rim(extent) {
+                    let at = projector.project(to_world(point)).unwrap().0;
+                    left = left.min(at.x);
+                    right = right.max(at.x);
+                }
+                let column = size.x * (1.0 - FIT_MARGIN) - 2.0 * 374.0;
+                assert!(
+                    right - left > 0.95 * column,
+                    "Kreis {} breit, Spalte {column}",
+                    right - left
+                );
+            }
+        }
+        // In einem schmalen Fenster bliebe neben ihr kein brauchbarer Platz. Dann gilt der
+        // Blick ohne sie: lieber ein Schiff unter der Tafel als das ganze Gefecht winzig.
+        let size = Vec2::new(1024.0, 600.0);
+        let open = overview_transform(1300.0, size, &SHIP_PANEL_OPEN);
+        let closed = overview_transform(1300.0, size, &FOUR_CLASSES);
+        assert!(open.translation.distance(closed.translation) < 1e-3);
+        let projector = Projector::new(&open, FOV, size);
+        for point in rim(1300.0) {
+            assert!(in_view(&projector, &SHIP_PANEL_OPEN, point));
+            assert!(!under_a_side_panel(&projector, &SHIP_PANEL_OPEN, point));
+        }
+    }
+
+    #[test]
+    fn overview_stays_below_a_top_bar_of_two_rows() {
+        // In schmalen Fenstern bricht die Kopfleiste um; der Kreis bleibt darunter.
+        let size = Vec2::new(900.0, 900.0);
+        let layout = HudLayout {
+            top: 60.0,
+            ..FOUR_CLASSES
+        };
+        for extent in [650.0, 2400.0] {
+            let projector = Projector::new(&overview_transform(extent, size, &layout), FOV, size);
+            for degrees in (0..360).step_by(3) {
+                let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                assert!(in_view(&projector, &layout, point), "{point:?}");
+                assert!(!under_a_side_panel(&projector, &layout, point));
+            }
+        }
+    }
+
+    #[test]
+    fn overview_shows_every_ship_of_every_preset() {
+        use super::super::practice::{PRESETS, PracticeSetup};
+        let data = super::super::feed::testing::data();
+        let mut farthest = 0.0f32;
+        for preset in &PRESETS {
+            let mut battle = PracticeSetup::from_preset(preset)
+                .resolve(&data)
+                .unwrap()
+                .build(&data);
+            for tick in 0..600 {
+                if tick % 40 == 0 || tick == 1 {
+                    let ships = || battle.ships.iter().filter(|ship| ship.status.in_play());
+                    farthest = ships()
+                        .map(|ship| ship.pos.length())
+                        .fold(farthest, f32::max);
+                    for size in SIZES {
+                        let layout = HudLayout::default();
+                        let view = overview_view(&battle, FIELD, size, &layout);
+                        let projector = Projector::new(&view, FOV, size);
+                        let outside = ships()
+                            .filter(|ship| !in_view(&projector, &layout, ship.pos))
+                            .count();
+                        assert_eq!(
+                            outside, 0,
+                            "{}: {outside} Schiffe außerhalb in Takt {tick}, Bild {size}",
+                            preset.name
+                        );
+                        // Auch unter den Lagetafeln steht keines.
+                        let hidden = ships()
+                            .filter(|ship| under_a_side_panel(&projector, &layout, ship.pos))
+                            .count();
+                        assert_eq!(
+                            hidden, 0,
+                            "{}: {hidden} Schiffe unter den Tafeln in Takt {tick}, Bild {size}",
+                            preset.name
+                        );
+                    }
+                }
+                battle.step(&data);
+            }
+        }
+        // Große Linien stehen vor dem ersten Takt weit jenseits des Feldrands; auch dann
+        // sind alle Schiffe im Bild.
+        assert!(
+            farthest > data.balance.battle.exit_radius * 1.5,
+            "{farthest}"
+        );
     }
 
     #[test]
     fn overview_follows_the_fleets() {
         use super::super::feed::testing::{MIXED, data, stepped};
         let data = data();
-        let field = data.balance.battle.exit_radius;
+        let size = Vec2::new(1600.0, 900.0);
         // Zu Beginn stehen die Flotten weit auseinander, im Gefecht eng beisammen: Die
-        // Übersicht rückt entsprechend näher, zeigt aber immer alle Schiffe.
+        // Übersicht rückt entsprechend näher.
         let (start, _) = stepped(&data, MIXED, 0);
         let (fight, _) = stepped(&data, MIXED, 400);
-        let wide = overview_extent(&start, field);
-        let tight = overview_extent(&fight, field);
-        assert!(wide > 1300.0 && wide <= field);
-        assert!(tight < wide, "{tight} gegen {wide}");
-        for (battle, extent) in [(&start, wide), (&fight, tight)] {
-            let projector =
-                Projector::new(&overview_transform(extent), FOV, Vec2::new(1600.0, 900.0));
-            for ship in battle.ships.iter().filter(|ship| ship.status.in_play()) {
-                let (screen, _) = projector
-                    .project(to_world(ship.pos))
-                    .expect("vor der Kamera");
-                assert!(screen.x > 0.0 && screen.x < 1600.0 && screen.y > 0.0 && screen.y < 900.0);
-            }
+        let layout = HudLayout::default();
+        let wide = overview_view(&start, FIELD, size, &layout);
+        let tight = overview_view(&fight, FIELD, size, &layout);
+        assert!(
+            tight.translation.length() < wide.translation.length() * 0.8,
+            "{} gegen {}",
+            tight.translation.length(),
+            wide.translation.length()
+        );
+        // Sie blickt von Süden schräg nach unten, die Feldmitte in der Bildmitte der Breite.
+        for view in [wide, tight] {
+            assert!(view.translation.z > 0.0 && view.translation.y > 0.0);
+            assert_eq!(view.translation.x, 0.0);
         }
-        // Ein leeres Feld zeigt die Übersicht nicht kleiner als ihr Mindestmaß.
+        // Ein leeres Feld zeigt die Übersicht nicht kleiner als ihr Mindestmaß, und ein weit
+        // abgetriebenes Schiff zieht sie nicht ins Unendliche.
         let mut empty = start.clone();
         empty.ships.clear();
-        assert_eq!(overview_extent(&empty, field), 650.0);
+        let least = overview_view(&empty, FIELD, size, &layout);
+        assert!(
+            least
+                .translation
+                .distance(overview_transform(OVERVIEW_MIN, size, &layout).translation)
+                < 1e-3
+        );
+        assert!(least.translation.length() < tight.translation.length());
+        let mut adrift = start.clone();
+        adrift.ships[0].pos = V2::new(90_000.0, 0.0);
+        assert!(
+            overview_view(&adrift, FIELD, size, &layout)
+                .translation
+                .length()
+                < wide.translation.length() * 1.01
+        );
+        // Nach dem Ende gehört das Trümmerfeld zur Übersicht, soweit es auf dem Feld liegt:
+        // Sie zeigt dann mehr als nur die Überlebenden.
+        let (mut ended, _) = stepped(&data, MIXED, 0);
+        while !ended.finished {
+            ended.step(&data);
+        }
+        let wrecks_reach = ended
+            .wrecks
+            .iter()
+            .map(|wreck| wreck.pos.length() + wreck.radius)
+            .filter(|reach| *reach <= FIELD)
+            .fold(0.0, f32::max);
+        assert!(wrecks_reach > OVERVIEW_MIN);
+        assert!(overview_extent(&ended, FIELD) >= wrecks_reach);
+        let mut running = ended.clone();
+        running.finished = false;
+        assert!(overview_extent(&running, FIELD) <= overview_extent(&ended, FIELD));
+        // Ein Wrack, das weit vom Feld getrieben ist, zählt nicht.
+        ended.wrecks[0].pos = V2::new(0.0, FIELD * 3.0);
+        assert!(overview_extent(&ended, FIELD) <= FIELD);
     }
 
     /// Welt ohne Fenster und Grafikkarte: ein Gefecht im Feed, die Schlachtkamera und ein
@@ -752,8 +1472,14 @@ mod tests {
 
         let data = data();
         let (battle, feed) = stepped(&data, MIXED, ticks);
-        let view = overview_transform(overview_extent(&battle, 2400.0));
+        let view = overview_view(
+            &battle,
+            FIELD,
+            Vec2::new(1600.0, 900.0),
+            &HudLayout::default(),
+        );
         let frame = ViewFrame {
+            epoch: Some(feed.epoch),
             alpha: 1.0,
             time: battle.time,
             tick_seconds: 0.1,
@@ -772,10 +1498,11 @@ mod tests {
         world.insert_resource(ViewTimings::default());
         world.init_resource::<SelectedShip>();
         world.init_resource::<ViewOptions>();
+        world.init_resource::<HudLayout>();
         world.init_resource::<FollowAnchor>();
         world.init_resource::<Messages<CameraRequest>>();
         world.init_resource::<ButtonInput<KeyCode>>();
-        world.init_resource::<ButtonInput<MouseButton>>();
+        crate::pointer::testing::free_mouse(&mut world);
         let camera = world
             .spawn((BattleCamera, view, FreeCameraState::default()))
             .id();
@@ -862,6 +1589,23 @@ mod tests {
             vec![CameraRequest::FocusFight]
         );
         assert_eq!(press(&mut world, KeyCode::KeyF), vec![CameraRequest::Focus]);
+        // Ziffernblock: von oben, von vorn, von der Seite; mit Strg von der Gegenseite.
+        for (key, side, other) in [
+            (KeyCode::Numpad7, ViewSide::Top, ViewSide::Bottom),
+            (KeyCode::Numpad1, ViewSide::Front, ViewSide::Back),
+            (KeyCode::Numpad3, ViewSide::Right, ViewSide::Left),
+        ] {
+            assert_eq!(press(&mut world, key), vec![CameraRequest::View(side)]);
+            for control in [KeyCode::ControlLeft, KeyCode::ControlRight] {
+                world.resource_mut::<ButtonInput<KeyCode>>().press(control);
+                assert_eq!(press(&mut world, key), vec![CameraRequest::View(other)]);
+                world
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .release(control);
+            }
+            assert_eq!(side.opposite(), other);
+            assert_eq!(other.opposite(), side);
+        }
         let before = *world.resource::<ViewOptions>();
         assert!(press(&mut world, KeyCode::KeyT).is_empty());
         assert!(press(&mut world, KeyCode::KeyN).is_empty());
@@ -962,9 +1706,460 @@ mod tests {
         }
     }
 
+    /// Eine Gefechtsübung ohne Fenster, pausiert vor dem ersten Takt.
+    fn practice() -> crate::testing::TestGame {
+        let mut game = crate::testing::TestGame::start("--practice --seed 3");
+        game.frames(4);
+        assert_eq!(game.state(), crate::state::AppState::Practice);
+        game
+    }
+
+    /// Ein Schiff, das frei in der Szene steht (nicht unter einer Tafel), und sein Ort im
+    /// Bild.
+    fn ship_in_the_open(game: &crate::testing::TestGame) -> (u32, Vec2) {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| ship.status.in_play())
+            .filter_map(|(index, _)| {
+                let (screen, _) = frame.projector.project(frame.position(index)?)?;
+                Some((index as u32, screen))
+            })
+            // Links oben und rechts stehen Tafeln (rechts unten erscheint die des gewählten
+            // Schiffs); dazwischen ist die Szene frei.
+            .filter(|(_, at)| at.x > 285.0 && at.x < 1215.0 && at.y > 60.0 && at.y < 880.0)
+            .min_by(|a, b| {
+                let center = Vec2::new(800.0, 500.0);
+                a.1.distance(center).total_cmp(&b.1.distance(center))
+            })
+            .expect("ein Schiff in der freien Szene")
+    }
+
+    fn camera_pose(game: &mut crate::testing::TestGame) -> Transform {
+        let world = game.world_mut();
+        *world
+            .query_filtered::<&Transform, With<BattleCamera>>()
+            .single(world)
+            .unwrap()
+    }
+
+    fn orientation(game: &mut crate::testing::TestGame) -> Quat {
+        camera_pose(game).rotation
+    }
+
+    /// Höhe, in der die Kopfleiste liegt, und eine Stelle auf der Lagetafel links.
+    const BAR_Y: f32 = 11.0;
+    const ON_SIDE_PANEL: Vec2 = Vec2::new(150.0, 70.0);
+    const OPEN_SCENE: Vec2 = Vec2::new(800.0, 620.0);
+
+    #[test]
+    fn clicks_on_the_top_bar_keep_the_selected_ship() {
+        use crate::state::AppState;
+        use crate::time_control::SimSpeed;
+
+        let mut game = practice();
+        let (ship, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(
+            selected.is_some(),
+            "Klick auf Schiff {ship} wählt ein Schiff"
+        );
+
+        // Einmal quer über die ganze Kopfleiste klicken, auf Knöpfe wie auf leere Stellen.
+        // Jeder Knopf tut dabei, was er soll; die Auswahl bleibt, bis „Verlassen“ die
+        // Übung beendet.
+        let (mut paused, mut options, mut clicks) = (false, false, 0);
+        let mut x = 5.0;
+        while x < crate::testing::WINDOW.x && game.state() == AppState::Practice {
+            let before = (
+                *game.resource::<SimSpeed>(),
+                *game.resource::<ViewOptions>(),
+            );
+            game.click(Vec2::new(x, BAR_Y));
+            if game.state() != AppState::Practice {
+                break;
+            }
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "Klick auf die Kopfleiste bei x = {x}"
+            );
+            paused |= before.0.paused != game.resource::<SimSpeed>().paused;
+            options |= before.1.labels != game.resource::<ViewOptions>().labels
+                || before.1.overlay != game.resource::<ViewOptions>().overlay;
+            clicks += 1;
+            x += 9.0;
+        }
+        assert!(paused, "die Zeitsteuerung der Leiste hat reagiert");
+        assert!(options, "die Schalter der Leiste haben reagiert");
+        assert!(clicks > 100, "nur {clicks} Klicks bis zum Verlassen");
+        game.frames(3);
+        assert_eq!(
+            game.state(),
+            AppState::MainMenu,
+            "„Verlassen“ am rechten Rand beendet die Übung"
+        );
+    }
+
+    #[test]
+    fn clicks_on_panels_keep_the_selection_and_clicks_into_space_clear_it() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(selected.is_some());
+        // Lagetafel, Tafel des gewählten Schiffs (unten rechts) und eine leere Stelle der
+        // Kopfleiste; auch dann, wenn Zeigerbewegung und Tastendruck im selben Frame
+        // eintreffen.
+        for point in [
+            ON_SIDE_PANEL,
+            Vec2::new(1400.0, 700.0),
+            Vec2::new(900.0, BAR_Y),
+        ] {
+            game.click(point);
+            assert_eq!(game.resource::<SelectedShip>().0, selected, "{point}");
+            game.move_pointer(OPEN_SCENE);
+            game.frames(2);
+            game.click_at_once(point);
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "schnell: {point}"
+            );
+        }
+        // Ein Klick in den leeren Raum hebt die Auswahl auf; die Tafel des Schiffs
+        // verschwindet, und die Stelle gehört wieder der Szene.
+        game.click(OPEN_SCENE);
+        assert_eq!(game.resource::<SelectedShip>().0, None);
+        game.click_at_once(at);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+    }
+
+    #[test]
+    fn wheel_and_mouse_look_over_panels_leave_the_camera_alone() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let rest = orientation(&mut game);
+        for point in [
+            ON_SIDE_PANEL,
+            Vec2::new(1400.0, 700.0),
+            Vec2::new(900.0, BAR_Y),
+        ] {
+            game.scroll(point, 4.0);
+            assert_eq!(
+                game.resource::<ViewFrame>().fly_speed,
+                1.0,
+                "Mausrad bei {point}"
+            );
+            game.drag(MouseButton::Right, point, Vec2::new(160.0, 40.0));
+            assert_eq!(orientation(&mut game), rest, "Umsehen ab {point}");
+        }
+        // In der freien Szene ändert das Mausrad das Flugtempo, und die rechte Maustaste
+        // dreht den Blick.
+        game.scroll(OPEN_SCENE, 4.0);
+        assert!(game.resource::<ViewFrame>().fly_speed > 1.5);
+        game.drag(MouseButton::Right, OPEN_SCENE, Vec2::new(160.0, 40.0));
+        assert!(orientation(&mut game).angle_between(rest) > 0.1);
+    }
+
+    /// Drückt die linke Maustaste, wo der Zeiger gerade steht, und lässt sie wieder los.
+    fn click_in_place(game: &mut crate::testing::TestGame) {
+        game.press(MouseButton::Left);
+        game.frames(1);
+        game.release(MouseButton::Left);
+        game.frames(2);
+    }
+
+    #[test]
+    fn a_grabbed_pointer_clicks_neither_panels_nor_ships() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(selected.is_some());
+        let overlay = game.resource::<ViewOptions>().overlay;
+        let untouched = |game: &crate::testing::TestGame, when: &str| {
+            assert_eq!(
+                game.resource::<ViewOptions>().overlay,
+                overlay,
+                "{when}: der Knopf unter dem unsichtbaren Zeiger wurde gedrückt"
+            );
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "{when}: der Klick hat die Auswahl geändert"
+            );
+        };
+
+        // Umsehen mit M eingeschaltet, während der Zeiger auf einem Knopf der Kopfleiste
+        // ruht. Der Zeiger ist dann unsichtbar und zeigt auf nichts: Ein Klick gilt weder
+        // dem Knopf unter ihm noch der Szene.
+        let button = game.button("Taktik").expect("Knopf „Taktik“");
+        game.move_pointer(button);
+        game.frames(2);
+        game.key(KeyCode::KeyM);
+        assert!(game.pointer_grabbed(), "M fängt den Zeiger");
+        click_in_place(&mut game);
+        untouched(&game, "Umsehen mit M, Zeiger auf der Kopfleiste");
+        // Ebenso über einer Tafel und über der freien Szene, wohin der unsichtbare Zeiger
+        // beim Umsehen wandert.
+        for point in [ON_SIDE_PANEL, Vec2::new(1400.0, 700.0), OPEN_SCENE] {
+            game.move_pointer(point);
+            game.frames(1);
+            click_in_place(&mut game);
+            untouched(&game, &format!("Umsehen mit M, Zeiger bei {point}"));
+        }
+        // M noch einmal: Der Zeiger ist wieder da, und der Klick gilt dem Knopf, auf dem er
+        // steht, und nur ihm.
+        game.key(KeyCode::KeyM);
+        assert!(!game.pointer_grabbed());
+        let button = game.button("Taktik").expect("Knopf „Taktik“");
+        game.click(button);
+        assert_eq!(game.resource::<ViewOptions>().overlay, !overlay);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+        game.click(button);
+        untouched(&game, "ohne Umsehen");
+
+        // Umsehen mit gehaltener rechter Maustaste: dasselbe, solange sie gehalten wird.
+        game.move_pointer(OPEN_SCENE);
+        game.frames(2);
+        game.press(MouseButton::Right);
+        game.frames(2);
+        assert!(
+            game.pointer_grabbed(),
+            "die rechte Maustaste fängt den Zeiger"
+        );
+        for point in [button, ON_SIDE_PANEL, OPEN_SCENE] {
+            game.move_pointer(point);
+            game.frames(1);
+            click_in_place(&mut game);
+            untouched(
+                &game,
+                &format!("rechte Maustaste gehalten, Zeiger bei {point}"),
+            );
+        }
+        game.release(MouseButton::Right);
+        game.frames(2);
+        assert!(!game.pointer_grabbed());
+        // Danach reagieren Knöpfe und Szene wieder auf Klicks.
+        game.click(button);
+        assert_eq!(game.resource::<ViewOptions>().overlay, !overlay);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+        game.click_on("×");
+        assert_eq!(game.resource::<SelectedShip>().0, None);
+        game.key(KeyCode::KeyU);
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        assert!(game.resource::<SelectedShip>().0.is_some());
+    }
+
+    /// Ein Schlachtschiff der eigenen Partei, das frei in der Szene steht, und sein Ort im
+    /// Bild.
+    fn battleship_in_the_open(game: &crate::testing::TestGame) -> (u32, Vec2) {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| {
+                ship.status.in_play()
+                    && ship.side == 0
+                    && ship.class == sim::data::ShipClass::Battleship
+            })
+            .filter_map(|(index, _)| {
+                let (screen, _) = frame.projector.project(frame.position(index)?)?;
+                Some((index as u32, screen))
+            })
+            .find(|(_, at)| at.x > 285.0 && at.x < 1215.0 && at.y > 60.0 && at.y < 880.0)
+            .expect("ein eigenes Schlachtschiff in der freien Szene")
+    }
+
+    #[test]
+    fn the_wheel_of_a_grabbed_pointer_changes_the_fly_speed_and_scrolls_no_list() {
+        let mut game = practice();
+        let (ship, at) = battleship_in_the_open(&game);
+        game.click(at);
+        assert_eq!(game.resource::<SelectedShip>().0, Some(ship));
+        // Die Modulliste des Schlachtschiffs ist länger als die Tafel hoch; ihre erste Zeile
+        // steht oben. An ihrem Ort ist abzulesen, ob die Liste gerollt wurde.
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        let data = game.resource::<sim::GameData>();
+        let design = &data.designs[battle.ships[ship as usize].design as usize];
+        let first = data.modules[design.modules[0].module_id as usize]
+            .name
+            .clone();
+        let top = game.text(&first).expect("erste Zeile der Modulliste");
+        let on_list = top + Vec2::new(40.0, 60.0);
+
+        // Zeiger über der Liste, Umsehen mit M: Das Mausrad gehört jetzt der Kamera.
+        game.move_pointer(on_list);
+        game.frames(2);
+        game.key(KeyCode::KeyM);
+        assert!(game.pointer_grabbed());
+        game.wheel(-3.0);
+        // Listen rollen weich aus; das dauert einige Frames.
+        game.frames(15);
+        assert!(
+            game.resource::<ViewFrame>().fly_speed < 0.7,
+            "Flug {}",
+            game.resource::<ViewFrame>().fly_speed
+        );
+        assert_eq!(
+            game.text(&first),
+            Some(top),
+            "die Liste unter dem unsichtbaren Zeiger ist mitgerollt"
+        );
+
+        // Ohne Umsehen rollt dasselbe Mausrad an derselben Stelle die Liste, und das
+        // Flugtempo bleibt, wie es ist.
+        game.key(KeyCode::KeyM);
+        assert!(!game.pointer_grabbed());
+        let speed = game.resource::<ViewFrame>().fly_speed;
+        game.scroll(on_list, -3.0);
+        game.frames(15);
+        assert_eq!(game.resource::<ViewFrame>().fly_speed, speed);
+        let rolled = game.text(&first).expect("erste Zeile der Modulliste");
+        assert!(
+            rolled.y < top.y - 20.0,
+            "die Liste rollt: {rolled} statt {top}"
+        );
+    }
+
+    #[test]
+    fn a_new_battle_starts_with_the_normal_fly_speed() {
+        use crate::state::AppState;
+
+        let mut game = practice();
+        game.scroll(OPEN_SCENE, 6.0);
+        let fast = game.resource::<ViewFrame>().fly_speed;
+        assert!(fast > 1.5, "Flug {fast}");
+        // „Neu starten“ ist dasselbe Gefecht mit derselben Kamera: Das Tempo bleibt.
+        game.send(super::super::BattleViewRequest::Restart);
+        game.frames(4);
+        assert_eq!(game.resource::<ViewFrame>().fly_speed, fast);
+
+        // Verlassen und über den Dialog ein neues Gefecht beginnen: Der Zeiger steht dabei
+        // auf dem Knopf des Dialogs, also über der Oberfläche.
+        game.click_on("Verlassen");
+        game.frames(4);
+        assert_eq!(game.state(), AppState::MainMenu);
+        game.click_on("Gefechtsübung");
+        game.click_on("Gefecht beginnen");
+        game.frames(8);
+        assert_eq!(game.state(), AppState::Practice);
+        assert_eq!(
+            game.resource::<ViewFrame>().fly_speed,
+            1.0,
+            "das neue Gefecht hat das Flugtempo des alten übernommen"
+        );
+        // Dort ändert das Mausrad es wie gewohnt.
+        game.scroll(OPEN_SCENE, -2.0);
+        assert!(game.resource::<ViewFrame>().fly_speed < 0.9);
+    }
+
+    /// Größe des größten Zwischenbilds, wie die Engine sie aus der Bildgröße und der
+    /// verlangten Höhe berechnet (`prepare_bloom_textures`).
+    fn glow_texture(image: UVec2, height: u32) -> UVec2 {
+        let ratio = if image.y != 0 {
+            height as f32 / image.y as f32
+        } else {
+            0.0
+        };
+        (image.as_vec2() * ratio).round().as_uvec2().max(UVec2::ONE)
+    }
+
+    #[test]
+    fn the_glow_fits_the_graphics_card_at_every_window_size() {
+        // Gewöhnliche Fenster behalten den vollen Leuchtschein.
+        for image in [
+            UVec2::new(1600, 900),
+            UVec2::new(1024, 600),
+            UVec2::new(3840, 2160),
+            UVec2::new(900, 1600),
+            UVec2::new(3440, 1440),
+        ] {
+            assert_eq!(glow_height(image, 16_384), GLOW_HEIGHT, "{image}");
+            assert_eq!(glow_height(image, 8192), GLOW_HEIGHT, "{image}");
+        }
+        // Die Fenster, bei denen das Programm endete: Mit der vollen Höhe verlangte die
+        // Engine 20480 und 34133 Pixel Breite, erlaubt sind 16384.
+        for image in [UVec2::new(1600, 40), UVec2::new(2000, 30)] {
+            assert!(glow_texture(image, GLOW_HEIGHT).x > 16_384, "{image}");
+            let height = glow_height(image, 16_384);
+            assert!(height < GLOW_HEIGHT && height > 200, "{image}: {height}");
+        }
+        // Jede Fenstergröße, auf jeder Grafikkarte: Das Zwischenbild bleibt im Rahmen, und
+        // die Höhe ist nie null (die Engine zieht daraus den Logarithmus).
+        let sizes = [
+            1, 2, 3, 7, 10, 30, 40, 59, 60, 100, 360, 900, 1600, 2000, 4096, 16_384,
+        ];
+        for limit in [2048, 4096, 8192, 16_384, 32_768] {
+            for width in sizes {
+                for height in sizes.into_iter().chain([0]) {
+                    let image = UVec2::new(width, height);
+                    if image.max_element() > limit {
+                        // Ein solches Fenster kann die Grafikkarte gar nicht füllen.
+                        continue;
+                    }
+                    let glow = glow_height(image, limit);
+                    assert!((1..=GLOW_HEIGHT).contains(&glow), "{image}, {limit}");
+                    let texture = glow_texture(image, glow);
+                    assert!(
+                        texture.max_element() <= limit,
+                        "Fenster {image}: Zwischenbild {texture} bei erlaubten {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_drawn_into_a_thin_strip_keeps_the_glow_within_bounds() {
+        let mut game = practice();
+        let glow = |game: &mut crate::testing::TestGame| {
+            let world = game.world_mut();
+            let (camera, glow) = world
+                .query_filtered::<(&Camera, &Bloom), With<BattleCamera>>()
+                .single(world)
+                .unwrap();
+            (
+                camera.physical_viewport_size().expect("Bildgröße"),
+                glow.max_mip_dimension,
+            )
+        };
+        assert_eq!(glow(&mut game), (UVec2::new(1600, 900), GLOW_HEIGHT));
+        // Das Fenster wird zu einem flachen Streifen gezogen, während das Gefecht gezeigt
+        // wird. Schon im selben Frame, bevor die Engine zeichnet, passt der Leuchtschein.
+        for size in [
+            Vec2::new(1600.0, 40.0),
+            Vec2::new(2000.0, 30.0),
+            Vec2::new(1600.0, 1.0),
+        ] {
+            game.resize(size);
+            game.frames(1);
+            let (image, height) = glow(&mut game);
+            assert_eq!(image, size.as_uvec2());
+            let texture = glow_texture(image, height);
+            assert!(
+                texture.max_element() <= SAFE_TEXTURE_SIZE,
+                "Fenster {size}: Zwischenbild {texture}"
+            );
+            game.frames(3);
+        }
+        // Zurück in der üblichen Größe ist der volle Leuchtschein wieder da.
+        game.resize(Vec2::new(1600.0, 900.0));
+        game.frames(2);
+        assert_eq!(glow(&mut game), (UVec2::new(1600, 900), GLOW_HEIGHT));
+    }
+
     #[test]
     fn keys_do_not_collide() {
-        use bevy::camera_controller::free_camera::FreeCamera;
         use std::collections::BTreeSet;
 
         let own = [
@@ -975,8 +2170,8 @@ mod tests {
             KEY_OVERLAY,
             KEY_LABELS,
         ];
-        // Was die Freiflugkamera der Engine belegt.
-        let flight = FreeCamera::default();
+        // Was die Freiflugkamera der Engine belegt, so wie die Ansicht sie einstellt.
+        let flight = flight_controls();
         let engine = [
             flight.key_forward,
             flight.key_back,
@@ -1011,8 +2206,14 @@ mod tests {
             KeyCode::F9,
             KeyCode::Escape,
         ];
+        let views: Vec<KeyCode> = VIEW_KEYS
+            .iter()
+            .map(|(key, _)| *key)
+            .chain(VIEW_REVERSE)
+            .collect();
         let all: Vec<String> = own
             .iter()
+            .chain(&views)
             .chain(&engine)
             .chain(&global)
             .map(|key| format!("{key:?}"))
@@ -1040,6 +2241,274 @@ mod tests {
             "Esc",
         ] {
             assert!(help.contains(word), "{word} fehlt in der Hilfe");
+        }
+        // Die Zeile zum Ziffernblock nennt die Tasten und Blickrichtungen in der
+        // Reihenfolge, in der sie belegt sind.
+        let (keys, what) = crate::ui::panels::BATTLE_KEYS
+            .iter()
+            .find(|(keys, _)| keys.contains("Ziffernblock"))
+            .expect("Zeile zum Ziffernblock");
+        let digits: Vec<String> = VIEW_KEYS
+            .iter()
+            .map(|(key, _)| format!("{key:?}").replace("Numpad", ""))
+            .collect();
+        assert_eq!(*keys, format!("Ziffernblock {}", digits.join(" / ")));
+        let sides: Vec<&str> = VIEW_KEYS
+            .iter()
+            .map(|(_, side)| match side {
+                ViewSide::Top => "von oben",
+                ViewSide::Front => "von vorn",
+                ViewSide::Right => "von der Seite",
+                other => panic!("{other:?} hat keine eigene Taste"),
+            })
+            .collect();
+        assert!(
+            what.starts_with(&format!("Blick {}", sides.join(" / "))),
+            "{what}"
+        );
+        assert!(what.contains("Strg") && what.contains("Gegenseite"));
+    }
+
+    #[test]
+    fn fixed_views_show_the_whole_battle_from_the_named_side() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut world, camera) = world(150);
+        let battle = world.resource::<BattleFeed>().battle().unwrap().clone();
+        let (center, _) = fleet_circle(&battle);
+        let size = Vec2::new(1600.0, 900.0);
+        for side in [
+            ViewSide::Top,
+            ViewSide::Bottom,
+            ViewSide::Front,
+            ViewSide::Back,
+            ViewSide::Right,
+            ViewSide::Left,
+        ] {
+            world
+                .resource_mut::<Messages<CameraRequest>>()
+                .write(CameraRequest::View(side));
+            world.run_system_once(apply_requests).unwrap();
+            let view = *world.get::<Transform>(camera).unwrap();
+            let projector = Projector::new(&view, FOV, size);
+            // Jedes Schiff auf dem Feld ist im Bild.
+            for ship in battle.ships.iter().filter(|ship| ship.status.in_play()) {
+                assert!(
+                    in_view(&projector, &HudLayout::default(), ship.pos),
+                    "{side:?}: Schiff fehlt"
+                );
+            }
+            // Die Kamera steht dort, wo der Name des Blicks es sagt, und blickt zum Gefecht.
+            let offset = view.translation - center;
+            let forward = view.rotation * Vec3::NEG_Z;
+            match side {
+                ViewSide::Top => assert!(offset.y > 100.0 && forward.y < -0.999),
+                ViewSide::Bottom => assert!(offset.y < -100.0 && forward.y > 0.999),
+                ViewSide::Front => assert!(offset.z > 100.0 && offset.y > 0.0 && forward.z < -0.9),
+                ViewSide::Back => assert!(offset.z < -100.0 && offset.y > 0.0 && forward.z > 0.9),
+                ViewSide::Right => assert!(offset.x > 100.0 && offset.y > 0.0 && forward.x < -0.9),
+                ViewSide::Left => assert!(offset.x < -100.0 && offset.y > 0.0 && forward.x > 0.9),
+            }
+            // Von oben gesehen ist Norden oben und die erste Partei links.
+            if side == ViewSide::Top {
+                let at = |point: V2| projector.project(to_world(point)).unwrap().0;
+                assert!(at(V2::new(0.0, 300.0)).y < at(V2::new(0.0, -300.0)).y);
+                assert!(at(V2::new(-300.0, 0.0)).x < at(V2::new(300.0, 0.0)).x);
+            }
+            // Die Steuerung der Engine kennt genau diese Blickrichtung: Die erste
+            // Mausbewegung danach lässt das Bild nicht springen.
+            let flight = world.get::<FreeCameraState>(camera).unwrap();
+            let engine = Quat::from_euler(EulerRot::ZYX, 0.0, flight.yaw, flight.pitch);
+            assert!(
+                engine.dot(view.rotation).abs() > 1.0 - 1e-6,
+                "{side:?}: {engine} gegen {}",
+                view.rotation
+            );
+        }
+
+        // Mit einem gewählten Schiff zeigt der Blick dieses Schiff, aus derselben Richtung.
+        let ship = battle
+            .ships
+            .iter()
+            .position(|ship| ship.status.in_play())
+            .unwrap();
+        world.resource_mut::<SelectedShip>().0 = Some(ship as u32);
+        let position = world.resource::<ViewFrame>().poses[ship].0;
+        for side in [ViewSide::Top, ViewSide::Left] {
+            world
+                .resource_mut::<Messages<CameraRequest>>()
+                .write(CameraRequest::View(side));
+            world.run_system_once(apply_requests).unwrap();
+            let view = *world.get::<Transform>(camera).unwrap();
+            let (screen, depth) = Projector::new(&view, FOV, size).project(position).unwrap();
+            assert!(
+                (screen - Vec2::new(800.0, 450.0)).length() < 0.5,
+                "{side:?}"
+            );
+            assert!(depth > 40.0 && depth < 650.0);
+        }
+    }
+
+    #[test]
+    fn numpad_keys_turn_the_view_to_the_battle() {
+        let mut game = practice();
+        let forward = |game: &mut crate::testing::TestGame| orientation(game) * Vec3::NEG_Z;
+        let all_in_view = |game: &crate::testing::TestGame| {
+            let frame = game.resource::<ViewFrame>();
+            let layout = game.resource::<HudLayout>();
+            let battle = game.resource::<BattleFeed>().battle().unwrap();
+            battle
+                .ships
+                .iter()
+                .filter(|ship| ship.status.in_play())
+                .all(|ship| in_view(&frame.projector, layout, ship.pos))
+        };
+        game.key(KeyCode::Numpad7);
+        assert!(forward(&mut game).y < -0.999, "Ziffernblock 7: von oben");
+        assert!(all_in_view(&game));
+        game.key_with(&[KeyCode::ControlLeft], KeyCode::Numpad7);
+        assert!(forward(&mut game).y > 0.999, "mit Strg: von unten");
+        assert!(all_in_view(&game));
+        game.key(KeyCode::Numpad1);
+        assert!(forward(&mut game).z < -0.9, "Ziffernblock 1: von vorn");
+        assert!(all_in_view(&game));
+        game.key(KeyCode::Numpad3);
+        assert!(forward(&mut game).x < -0.9, "Ziffernblock 3: von der Seite");
+        assert!(all_in_view(&game));
+        game.key_with(&[KeyCode::ControlLeft], KeyCode::Numpad3);
+        assert!(
+            forward(&mut game).x > 0.9,
+            "mit Strg: von der anderen Seite"
+        );
+        // Nach dem senkrechten Blick dreht die Maus weich weiter, ohne Sprung.
+        game.key(KeyCode::Numpad7);
+        let before = orientation(&mut game);
+        game.drag(MouseButton::Right, OPEN_SCENE, Vec2::new(30.0, 0.0));
+        let turned = orientation(&mut game).angle_between(before);
+        assert!(turned > 0.01 && turned < 0.2, "gedreht um {turned}");
+        // Die Übersicht bringt den gewohnten Blick zurück.
+        game.key(KeyCode::KeyU);
+        assert!(forward(&mut game).z < -0.5 && all_in_view(&game));
+    }
+
+    /// Wo die Schiffe auf dem Feld gerade im Bild stehen.
+    fn ships_on_screen(game: &crate::testing::TestGame) -> Vec<Vec2> {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| ship.status.in_play())
+            .map(|(index, _)| {
+                let position = frame.position(index).expect("Lage des Schiffs");
+                frame.projector.project(position).expect("vor der Kamera").0
+            })
+            .collect()
+    }
+
+    /// Die Tafeln, die gerade über der Schlacht stehen, mit ihren Rechtecken.
+    fn panels(game: &mut crate::testing::TestGame) -> Vec<(&'static str, egui::Rect)> {
+        ["partei_0", "partei_1", "schiff"]
+            .into_iter()
+            .filter_map(|title| Some((title, game.window_rect(title)?)))
+            .collect()
+    }
+
+    /// Schiffe, deren Mitte unter einer Tafel oder außerhalb des Bilds liegt.
+    fn hidden_ships(game: &mut crate::testing::TestGame) -> Vec<String> {
+        let panels = panels(game);
+        let top = game.resource::<HudLayout>().top;
+        let screen = egui::Rect::from_min_max(
+            egui::pos2(0.0, top),
+            egui::pos2(crate::testing::WINDOW.x, crate::testing::WINDOW.y),
+        );
+        ships_on_screen(game)
+            .into_iter()
+            .filter_map(|at| {
+                let at = egui::pos2(at.x, at.y);
+                if !screen.contains(at) {
+                    return Some(format!("{at:?} außerhalb"));
+                }
+                panels
+                    .iter()
+                    .find(|(_, rect)| rect.contains(at))
+                    .map(|(title, _)| format!("{at:?} unter {title}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_overview_shows_every_ship_beside_the_panels_that_are_open() {
+        use crate::testing::TestGame;
+        // Zwei Linien, die anfangs die ganze Breite zwischen den Tafeln füllen, und eine
+        // Flotte mit allen sechs Klassen und Jägern im Hangar: Mit ihr ist die Lagetafel
+        // des Spielers am höchsten.
+        let wide = "--fleet-a bastion:2,speer:6 --fleet-b bastion:2,speer:6";
+        let tall = "--fleet-a horst:3,waechter:6,dolch:4,wespe:2,speer:1,bastion:1 --fleet-b bastion:3,speer:4";
+        for fleets in [wide, tall] {
+            let mut game = TestGame::start(&format!("--practice {fleets} --seed 3"));
+            game.frames(6);
+            // Schon der erste Blick des Gefechts zeigt jedes Schiff neben den Tafeln. Er
+            // ist die Übersicht, wie die Taste sie liefert, bis auf die wenigen Pixel, um
+            // die neue Tafeln in ihrem ersten Durchlauf noch schmaler sind.
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            let first = camera_pose(&mut game);
+            game.key(KeyCode::KeyU);
+            let again = camera_pose(&mut game);
+            assert!(
+                first.translation.distance(again.translation) < 0.01 * again.translation.length(),
+                "{fleets}: erster Blick {first:?}, Übersicht {again:?}"
+            );
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            assert_eq!(panels(&mut game).len(), 2);
+
+            // Der gemeldete Platz der Tafeln stimmt mit dem überein, was gezeichnet wurde.
+            let layout = *game.resource::<HudLayout>();
+            let left = game.window_rect("partei_0").unwrap();
+            let right = game.window_rect("partei_1").unwrap();
+            assert_eq!(layout.column, None);
+            assert!((layout.corner.x - (left.right() + LAYOUT_GAP)).abs() < 0.5);
+            assert!(
+                (layout.corner.x - (crate::testing::WINDOW.x - right.left() + LAYOUT_GAP)).abs()
+                    < 0.5
+            );
+            assert!(
+                (layout.corner.y - (left.bottom().max(right.bottom()) + LAYOUT_GAP)).abs() < 0.5
+            );
+
+            // Ein Schiff wählen: Seine Tafel öffnet sich rechts und reicht bis zum unteren
+            // Rand. Sie ist breiter als die Lagetafel über ihr: Der bisherige Blick hält
+            // den Streifen, um den sie weiter ins Bild ragt, nicht frei.
+            let (_, at) = ship_in_the_open(&game);
+            game.click(at);
+            assert!(game.resource::<SelectedShip>().0.is_some());
+            let ship_panel = game.window_rect("schiff").expect("Tafel des Schiffs");
+            let layout = *game.resource::<HudLayout>();
+            assert_eq!(
+                layout.column.map(f32::round),
+                Some((crate::testing::WINDOW.x - ship_panel.left() + LAYOUT_GAP).round())
+            );
+            assert!(
+                layout
+                    .column
+                    .is_some_and(|column| column > layout.corner.x + 20.0)
+            );
+
+            // Die Übersicht rückt so weit ab, dass wieder jedes Schiff frei steht.
+            game.key(KeyCode::KeyU);
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            let with_panel = camera_pose(&mut game);
+            assert!(with_panel.translation.length() > again.translation.length());
+
+            // Ohne Auswahl gilt wieder der nähere Blick.
+            game.click(OPEN_SCENE);
+            assert_eq!(game.resource::<SelectedShip>().0, None);
+            game.key(KeyCode::KeyU);
+            let closed = camera_pose(&mut game);
+            assert!(closed.translation.distance(again.translation) < 0.5);
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
         }
     }
 

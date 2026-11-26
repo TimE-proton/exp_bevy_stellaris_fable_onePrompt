@@ -7,6 +7,7 @@
 mod defs;
 mod ship_loader;
 mod ships;
+mod tech_loader;
 
 pub use defs::*;
 pub use ship_loader::arc_covers;
@@ -140,6 +141,7 @@ impl GameData {
         };
         data.resolve_and_validate()?;
         ship_loader::resolve_ships(&mut data)?;
+        tech_loader::resolve_research(&mut data)?;
         Ok(data)
     }
 
@@ -360,6 +362,14 @@ impl GameData {
             return Err(invalid(
                 "balance.ron",
                 "Preisschranken oder cover_days unplausibel".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&economy.civil_share)
+            || !(0.0..=1.0).contains(&economy.handout_share)
+        {
+            return Err(invalid(
+                "balance.ron",
+                "economy.civil_share und economy.handout_share müssen in 0..1 liegen".into(),
             ));
         }
 

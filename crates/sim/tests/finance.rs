@@ -1,6 +1,7 @@
 //! Börse, Besitz und Zusammenhalt als Ganzes.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::Sector;
@@ -159,68 +160,100 @@ fn the_starting_position_stays_loyal_for_years_without_intervention() {
 #[test]
 fn a_colony_owned_by_the_center_drifts_into_autonomy_while_a_shared_one_stays() {
     let me = PolityId(0);
-    let mut hoarded = with_player(4);
-    let mut shared = with_player(4);
-    settle(&mut hoarded, me, 12);
-    settle(&mut shared, me, 12);
-    let colony = largest_colony(&hoarded, me);
-    assert_eq!(colony, largest_colony(&shared, me));
-    let capital = hoarded.polities().get(me).capital.unwrap();
+    // Eine Partie: dieselbe Kolonie einmal im Besitz des Zentrums, einmal breit gestreut.
+    // Gibt den mittleren Zusammenhalt beider Kolonien über die letzten zehn Jahre zurück.
+    let play = |seed: u64| -> (f64, f64) {
+        let mut hoarded = with_player(seed);
+        let mut shared = with_player(seed);
+        settle(&mut hoarded, me, 12);
+        settle(&mut shared, me, 12);
+        let colony = largest_colony(&hoarded, me);
+        assert_eq!(colony, largest_colony(&shared, me));
+        let capital = hoarded.polities().get(me).capital.unwrap();
 
-    for year in 0..25 {
-        // Im einen Reich zieht der Staat jedes Jahr allen Besitz an sich …
-        give_everything_to(&mut hoarded, colony, HolderId::State(me));
-        // … im anderen halten die Einheimischen ihre Betriebe und dazu ein Stück der Hauptwelt.
-        let firms = firms_on(&shared, colony);
-        let home_firm = IssuerId::Firm {
-            planet: capital,
-            sector: Sector::Industry,
-        };
-        {
-            let mut finance = shared.world_mut().resource_mut::<Finance>();
-            for id in firms {
-                let issuer = finance.issuers.get_mut(&id).unwrap();
-                let total = issuer.shares;
-                issuer.holdings.clear();
-                issuer.holdings.insert(HolderId::Public(colony), total / 2);
-                issuer.holdings.insert(HolderId::Elite(colony), total / 4);
-                issuer
-                    .holdings
-                    .insert(HolderId::State(me), total - total / 2 - total / 4);
+        // Zusammenhalt beider Kolonien am Ende jedes Jahres.
+        let (mut lows, mut highs) = (Vec::new(), Vec::new());
+        let stage = |sim: &Headless| sim.world().resource::<Finance>().region(colony).stage;
+        let (mut restless, mut loyal) = (0u32, 0u32);
+        for year in 0..25 {
+            // Im einen Reich zieht der Staat jedes Jahr allen Besitz an sich …
+            give_everything_to(&mut hoarded, colony, HolderId::State(me));
+            // … im anderen halten die Einheimischen ihre Betriebe und dazu ein Stück der Hauptwelt.
+            let firms = firms_on(&shared, colony);
+            let home_firm = IssuerId::Firm {
+                planet: capital,
+                sector: Sector::Industry,
+            };
+            {
+                let mut finance = shared.world_mut().resource_mut::<Finance>();
+                for id in firms {
+                    let issuer = finance.issuers.get_mut(&id).unwrap();
+                    let total = issuer.shares;
+                    issuer.holdings.clear();
+                    issuer.holdings.insert(HolderId::Public(colony), total / 2);
+                    issuer.holdings.insert(HolderId::Elite(colony), total / 4);
+                    issuer
+                        .holdings
+                        .insert(HolderId::State(me), total - total / 2 - total / 4);
+                }
+                if year == 0 {
+                    let issuer = finance
+                        .issuers
+                        .get_mut(&home_firm)
+                        .expect("Heimatindustrie");
+                    let stake = issuer.shares / 5;
+                    issuer.shares += stake;
+                    issuer.holdings.insert(HolderId::Public(colony), stake);
+                }
             }
-            if year == 0 {
-                let issuer = finance
-                    .issuers
-                    .get_mut(&home_firm)
-                    .expect("Heimatindustrie");
-                let stake = issuer.shares / 5;
-                issuer.shares += stake;
-                issuer.holdings.insert(HolderId::Public(colony), stake);
+            hoarded.run_days(DAYS_PER_YEAR);
+            shared.run_days(DAYS_PER_YEAR);
+            lows.push(cohesion_of(&hoarded, colony));
+            highs.push(cohesion_of(&shared, colony));
+            if year >= 15 {
+                restless += u32::from(stage(&hoarded) != Stage::Loyal);
+                loyal += u32::from(stage(&shared) == Stage::Loyal);
             }
         }
-        hoarded.run_days(DAYS_PER_YEAR);
-        shared.run_days(DAYS_PER_YEAR);
-    }
-    let (low, high) = (cohesion_of(&hoarded, colony), cohesion_of(&shared, colony));
-    assert!(high > low + 20.0, "geteilt {high:.1}, gehortet {low:.1}");
-    let stage = |sim: &Headless| sim.world().resource::<Finance>().region(colony).stage;
-    assert_ne!(
-        stage(&hoarded),
-        Stage::Loyal,
-        "Konzentration muss Unruhe erzeugen"
-    );
-    assert_eq!(stage(&shared), Stage::Loyal);
-    // Autonome Regionen zahlen keine Steuern mehr.
-    if stage(&hoarded) == Stage::Autonomous {
+        // Gezählt wird über die letzten zehn Jahresenden, nicht am letzten Tag: Eine Kolonie
+        // an der Schwelle wechselt ihre Stufe von Jahr zu Jahr.
         assert!(
-            hoarded
-                .world()
-                .resource::<Economy>()
-                .planet(colony)
-                .tax_exempt
+            restless >= 8,
+            "Seed {seed}: Konzentration muss Unruhe erzeugen; unruhig oder autonom nur an \
+             {restless} von zehn Jahresenden"
+        );
+        assert!(
+            loyal >= 8,
+            "Seed {seed}: Die Kolonie in breitem Besitz war nur an {loyal} von zehn \
+             Jahresenden loyal"
+        );
+        // Autonome Regionen zahlen keine Steuern mehr.
+        if stage(&hoarded) == Stage::Autonomous {
+            assert!(
+                hoarded
+                    .world()
+                    .resource::<Economy>()
+                    .planet(colony)
+                    .tax_exempt
+            );
+        }
+        assert!(check_invariants(hoarded.world()).is_ok());
+        let late = |values: &[f64]| values[15..].iter().sum::<f64>() / 10.0;
+        (late(&lows), late(&highs))
+    };
+    // Gemessen wird das Mittel der letzten zehn Jahre über drei Partien, nicht ein einzelner
+    // Monat einer einzigen: Der Abfluss der Gewinne schwankt mit den Ausschüttungen von Jahr
+    // zu Jahr um mehrere Punkte, und ein Stichtag träfe mal ein Tal, mal einen Gipfel.
+    let games: Vec<(f64, f64)> = [4, 14, 24].into_iter().map(play).collect();
+    for (low, high) in &games {
+        assert!(
+            *high > *low + 10.0,
+            "in jeder Partie klar getrennt: geteilt {high:.1}, gehortet {low:.1}"
         );
     }
-    assert!(check_invariants(hoarded.world()).is_ok());
+    let low = games.iter().map(|(low, _)| low).sum::<f64>() / games.len() as f64;
+    let high = games.iter().map(|(_, high)| high).sum::<f64>() / games.len() as f64;
+    assert!(high > low + 20.0, "geteilt {high:.1}, gehortet {low:.1}");
 }
 
 #[test]
@@ -527,6 +560,11 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
     let victim = PolityId(1);
     let mut blockaded = observer(7);
     let mut control = observer(7);
+    // Die Blockade stellt die Prüfung selbst; die militärische Führung der KI ruht in
+    // beiden Partien.
+    for sim in [&mut blockaded, &mut control] {
+        sim.set_military_mode(None, MilitaryMode::Resting);
+    }
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let colony = largest_colony(&blockaded, victim);
@@ -554,8 +592,24 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
         }
     }
     assert!(blockaded.world().resource::<Fleets>().is_blockaded(system));
-    blockaded.run_days(DAYS_PER_YEAR);
-    control.run_days(DAYS_PER_YEAR);
+    // Die Sperre steht, solange der Treibstoff reicht: Fern der Heimat fasst die Flotte
+    // nichts nach. Gemessen wird, solange sie steht, kurz bevor die Tanks leer sind.
+    let burn = data().balance.military.fuel_per_day;
+    let mut held = 0;
+    loop {
+        let fleets = blockaded.world().resource::<Fleets>();
+        if !fleets.is_blockaded(system) || fleets.list[0].min_fuel() < 3.0 * burn {
+            break;
+        }
+        blockaded.run_days(1);
+        control.run_days(1);
+        held += 1;
+    }
+    assert!(blockaded.world().resource::<Fleets>().is_blockaded(system));
+    assert!(
+        held >= 100,
+        "die Sperre hielt nur {held} Tage; für die Messung braucht es Monate"
+    );
 
     let local = |sim: &Headless, id: &IssuerId| match id {
         IssuerId::Firm { planet, .. } => sim.galaxy().planet(*planet).system == system,
@@ -585,17 +639,49 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
         closed < open * 0.7,
         "Kontor gesperrt {closed:.0}, offen {open:.0}"
     );
-    // Kriegsmüdigkeit baut sich auf beiden Seiten auf.
-    assert!(
-        blockaded
+    // Kriegsmüdigkeit baut sich auf beiden Seiten auf, Monat für Monat, auch nachdem die
+    // Sperre geendet hat: Der Krieg geht weiter.
+    blockaded.run_days(DAYS_PER_YEAR - held);
+    for side in [attacker, victim] {
+        let weariness = blockaded
             .world()
             .resource::<Finance>()
-            .polity(victim)
-            .war_weariness
-            > 5.0
-    );
-    let _ = (
-        blockaded.world().resource::<Galaxy>(),
-        blockaded.world().resource::<Polities>(),
-    );
+            .polity(side)
+            .war_weariness;
+        assert!(weariness > 5.0, "{side:?}: Kriegsmüdigkeit {weariness:.1}");
+    }
+    assert!(check_invariants(blockaded.world()).is_ok());
+}
+
+/// Die Einnahmen, an denen der Markt die Schuldenlast eines Staates misst, sind die
+/// laufenden Einnahmen des Haushalts, nicht der Zuwachs der Kasse: Der Haushalt gibt die
+/// Einnahmen Monat für Monat wieder aus, die Kasse wächst dabei kaum.
+#[test]
+fn the_revenue_behind_the_bond_yield_is_the_revenue_of_the_budget() {
+    let mut sim = observer(3);
+    sim.run_days(4 * DAYS_PER_YEAR);
+    let world = sim.world();
+    let economy = world.resource::<Economy>();
+    let finance = world.resource::<Finance>();
+    let mut seen = 0;
+    for polity in world.resource::<Polities>().alive() {
+        let budget = economy.budget(polity.id).expect("der Haushalt");
+        let months = budget.history.len().max(1) as f64;
+        let mean = to_credits(budget.year().revenue) / months;
+        let shown = finance.polity(polity.id).revenue;
+        assert!(mean > 0.0, "{}: Haushalt ohne Einnahmen", polity.name);
+        assert!(
+            shown > 0.7 * mean && shown < 1.3 * mean,
+            "{}: Einnahmen {shown:.0} gegen {mean:.0} im Haushalt",
+            polity.name
+        );
+        // Der Zuwachs der Kasse über das Jahr liegt weit darunter: Daran gemessen wäre
+        // jede Schuld erdrückend.
+        let last = to_credits(economy.state_income_of(polity.id));
+        assert!(last > 0.0 && (shown - last).abs() < 0.5 * last);
+        seen += 1;
+    }
+    assert!(seen >= 2);
+    assert_eq!(economy_stats(world).money_drift, 0);
+    assert!(check_invariants(world).is_ok());
 }

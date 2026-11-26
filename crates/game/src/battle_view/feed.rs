@@ -7,8 +7,8 @@
 
 use bevy::prelude::*;
 use sim::battle::math::wrap_angle;
-use sim::battle::{Battle, BattleShip, Beam, Doctrine, Formation, Impact, V2};
-use sim::data::Rgb;
+use sim::battle::{Battle, BattleShip, Beam, Doctrine, Formation, Impact, ShipStatus, V2};
+use sim::data::{Rgb, ShipClass};
 
 /// Wie lange ein Schildtreffer nachleuchtet (Sekunden Gefechtszeit).
 pub const SHIELD_FLASH_SECONDS: f32 = 0.45;
@@ -85,6 +85,59 @@ pub struct FeedInfo {
     pub can_restart: bool,
     /// Standbild: Das Gefecht wird nur gezeigt, nicht gerechnet.
     pub still: bool,
+    /// Weitere Parteien, die der Spieler führt (in der Partie ist jede Flotte eine Partei).
+    pub own_sides: Vec<usize>,
+    /// Parteien, deren Rückzug befohlen ist, aber erst mit dem nächsten Takt gilt (die Zeit
+    /// steht). Die Ansicht bietet ihn dort nicht noch einmal an.
+    pub retreat_waiting: Vec<usize>,
+    /// Wie die Gefechtszeit zur Zeit des Besitzers steht, etwa das Datum der Partie und
+    /// wie viel Gefechtszeit auf einen Kalendertag kommt. Leer in der Übung.
+    pub calendar: String,
+    /// Ergebnis, wie der Besitzer es festgestellt hat. Fehlt es, zieht die Ansicht am
+    /// Ende selbst Bilanz aus dem Stand des Gefechts.
+    pub result: Option<BattleResult>,
+}
+
+impl FeedInfo {
+    /// Führt der Spieler diese Partei?
+    pub fn commands(&self, side: usize) -> bool {
+        self.player_side == Some(side) || self.own_sides.contains(&side)
+    }
+}
+
+/// Ergebnis eines Gefechts der Partie, vom Besitzer in Worte gefasst.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BattleResult {
+    /// Ausgang in einem Satz, mit dem Sieger, wenn es einen gibt.
+    pub headline: String,
+    /// Dauer in Kalendertagen.
+    pub days: u64,
+    pub sides: Vec<ResultSide>,
+}
+
+/// Bilanz einer Partei: Schiffe je Klasse (Stelle = `ShipClass::index`) und ihr Verbleib.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResultSide {
+    pub name: String,
+    pub color: Rgb,
+    pub initial: [u32; 6],
+    pub lost: [u32; 6],
+    pub escaped: [u32; 6],
+    /// Verlorener Anteil am Bauwert.
+    pub loss_share: f32,
+    pub holds_field: bool,
+    /// Was die Partei getan hat: Rückzug, im Patt gelöst, vorzeitig ausgeschieden.
+    pub note: String,
+    /// Wo die Flotte jetzt ist und wohin sie ausweicht.
+    pub whereabouts: String,
+}
+
+/// Endstand einer Partei, wie ihr Besitzer ihn in seiner Bilanz führt: verlorene und
+/// entkommene Schiffe je Klasse (Stelle = `ShipClass::index`), Bordjäger eingeschlossen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SideFate {
+    pub lost: [u32; 6],
+    pub escaped: [u32; 6],
 }
 
 /// Nachleuchten eines Schildtreffers an einem Schiff.
@@ -133,7 +186,9 @@ impl BattleFeed {
         self.battle.is_some()
     }
 
-    /// Zeigt ab jetzt ein anderes Gefecht.
+    /// Zeigt ab jetzt ein anderes Gefecht. Das geht jederzeit, auch während die Ansicht
+    /// ein anderes zeigt und mitten in einem Frame: Die Szene baut sich neu auf, Auswahl
+    /// und Kamera beginnen von vorn.
     pub fn begin(&mut self, battle: &Battle, info: FeedInfo) {
         self.epoch = self.epoch.wrapping_add(1);
         self.info = info;
@@ -146,10 +201,21 @@ impl BattleFeed {
 
     /// Übernimmt den Zustand des Gefechts. Aufzurufen nach jedem Takt und nach jedem
     /// Befehl, der es verändert. Ohne vorheriges [`BattleFeed::begin`] geschieht nichts.
+    ///
+    /// Parteien und Schiffe dürfen dabei hinzukommen (Verstärkung); die Ansicht legt für
+    /// sie an, was fehlt. Namen und Farben neuer Parteien gehören nach `info.sides`.
     pub fn refresh(&mut self, battle: &Battle) {
         let Some(held) = self.battle.as_mut() else {
             return;
         };
+        if battle.id != held.id || battle.tick < held.tick {
+            // Ein anderes Gefecht oder dasselbe von vorn, ohne dass es angesagt wurde: Die
+            // Ansicht würde sonst Altes und Neues mischen. Es gilt wie angesagt, mit den
+            // bisherigen Angaben zu den Parteien.
+            let info = std::mem::take(&mut self.info);
+            self.begin(battle, info);
+            return;
+        }
         if battle.tick != held.tick {
             // Ein Takt ist vergangen: Der bisherige Zustand wird zur Ausgangslage der
             // Interpolation, und was sich nur aus dem Vergleich zweier Takte ergibt
@@ -182,6 +248,21 @@ impl BattleFeed {
             );
         }
         copy_state(held, battle);
+    }
+
+    /// Das Gefecht ist bei seinem Besitzer zu Ende und dort schon abgeräumt; die Bilanz
+    /// kommt vom Besitzer. Der zuletzt gezeigte Stand gilt als beendet. Ihm fehlt, was im
+    /// letzten Takt geschah: `fates` nennt je Partei den Endstand der Bilanz, und der
+    /// gezeigte Stand wird ihm angeglichen, damit Szene und Lagetafeln dasselbe sagen wie
+    /// das Ergebnis.
+    pub fn conclude(&mut self, result: BattleResult, fates: &[SideFate]) {
+        if let Some(held) = self.battle.as_mut() {
+            held.finished = true;
+            for (side, fate) in fates.iter().enumerate().take(held.combatants.len()) {
+                settle(held, side, fate);
+            }
+            self.info.result = Some(result);
+        }
     }
 
     /// Es gibt kein Gefecht mehr zu zeigen.
@@ -251,6 +332,52 @@ impl BattleFeed {
             .sides
             .get(side)
             .map_or((0.7, 0.7, 0.7), |info| info.color)
+    }
+}
+
+/// Gleicht den gezeigten Stand einer Partei ihrem Endstand an. Die Bilanz zählt je
+/// Klasse, nicht je Schiff: Als entkommen gilt zuerst, wer schon auf dem Rückzug war, als
+/// verloren zuerst, wer ohne Energie trieb. Gerechnet wird hier nichts.
+fn settle(held: &mut Battle, side: usize, fate: &SideFate) {
+    let fighters = ShipClass::Fighter.index();
+    let mut escaped = fate.escaped;
+    let mut lost = fate.lost;
+    for class in 0..lost.len() {
+        lost[class] = lost[class].saturating_sub(held.combatants[side].lost[class]);
+    }
+    held.combatants[side].lost = fate.lost;
+    held.combatants[side].escaped = fate.escaped;
+    let own = |ship: &BattleShip| ship.side as usize == side;
+    for ship in held.ships.iter().filter(|ship| own(ship)) {
+        if ship.status == ShipStatus::Escaped {
+            let class = ship.class.index();
+            escaped[class] = escaped[class].saturating_sub(1);
+            escaped[fighters] = escaped[fighters].saturating_sub(ship.hangar);
+        }
+    }
+    let mut mark = |open: &mut [u32; 6], from: ShipStatus, to: ShipStatus| {
+        for ship in held.ships.iter_mut().filter(|ship| own(ship)) {
+            let class = ship.class.index();
+            if ship.status == from && open[class] > 0 {
+                ship.status = to;
+                open[class] -= 1;
+                open[fighters] = open[fighters].saturating_sub(ship.hangar);
+            }
+        }
+    };
+    for from in [
+        ShipStatus::Routing,
+        ShipStatus::Active,
+        ShipStatus::Disabled,
+    ] {
+        mark(&mut escaped, from, ShipStatus::Escaped);
+    }
+    for from in [
+        ShipStatus::Disabled,
+        ShipStatus::Routing,
+        ShipStatus::Active,
+    ] {
+        mark(&mut lost, from, ShipStatus::Destroyed);
     }
 }
 
@@ -331,6 +458,7 @@ fn copy_state(held: &mut Battle, source: &Battle) {
     held.tick = source.tick;
     held.time = source.time;
     held.finished = source.finished;
+    held.contact_time = source.contact_time;
     held.timed_out = source.timed_out;
     held.combatants.clone_from(&source.combatants);
     held.hostile.clone_from(&source.hostile);
@@ -376,6 +504,7 @@ pub mod testing {
             player_side: Some(0),
             can_restart: true,
             still: false,
+            ..Default::default()
         }
     }
 
@@ -526,6 +655,38 @@ mod tests {
         assert_eq!(feed.epoch, epoch + 1);
         feed.clear();
         assert!(!feed.is_active());
+    }
+
+    #[test]
+    fn an_unannounced_battle_starts_a_new_epoch() {
+        use sim::battle::matchup::{self, Side};
+        let data = data();
+        let (mut battle, mut feed) = stepped(&data, MIXED, 50);
+        let epoch = feed.epoch;
+        // Dasselbe Gefecht von vorn, ohne `begin`.
+        let sides: Vec<Side> = MIXED
+            .iter()
+            .map(|fleet| Side::parse(&data, fleet).unwrap())
+            .collect();
+        let fresh = matchup::build(&data, 11, &sides);
+        feed.refresh(&fresh);
+        assert_eq!(feed.epoch, epoch + 1);
+        assert_eq!(feed.battle().unwrap().tick, 0);
+        assert_eq!(
+            feed.info.sides.len(),
+            2,
+            "die Angaben zu den Parteien bleiben"
+        );
+        assert_eq!(feed.pose(0, 0.0), Pose::of(&fresh.ships[0]));
+        // Ein Gefecht mit anderer Kennung ebenso.
+        battle.id = sim::ids::BattleId(7);
+        feed.refresh(&battle);
+        assert_eq!(feed.epoch, epoch + 2);
+        assert_eq!(feed.battle().unwrap().tick, 50);
+        // Danach gilt es als das gezeigte: Weitere Takte bleiben in seiner Epoche.
+        battle.step(&data);
+        feed.refresh(&battle);
+        assert_eq!(feed.epoch, epoch + 2);
     }
 
     #[test]

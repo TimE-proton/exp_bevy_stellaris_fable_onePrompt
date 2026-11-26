@@ -139,6 +139,23 @@ impl Mul<f32> for V2 {
     }
 }
 
+/// Einheitsvektor in Richtung `angle`, bei Vielfachen von 90 Grad exakt. So stehen
+/// gegenüberliegende Parteien bitgenau punktsymmetrisch.
+pub fn exact_direction(angle: f32) -> V2 {
+    let quarter = angle / std::f32::consts::FRAC_PI_2;
+    let rounded = quarter.round();
+    if (quarter - rounded).abs() < 1e-6 {
+        match (rounded as i32).rem_euclid(4) {
+            0 => V2::new(1.0, 0.0),
+            1 => V2::new(0.0, 1.0),
+            2 => V2::new(-1.0, 0.0),
+            _ => V2::new(0.0, -1.0),
+        }
+    } else {
+        V2::from_angle(angle)
+    }
+}
+
 /// Winkel auf (-π, π] gebracht.
 #[inline]
 pub fn wrap_angle(angle: f32) -> f32 {

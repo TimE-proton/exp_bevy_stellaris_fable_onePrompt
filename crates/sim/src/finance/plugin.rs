@@ -8,13 +8,16 @@ use crate::clock::{SimClock, month_start};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{
-    Economy, Money, invest_and_depreciate, settle_public_accounts, steer_money_supply, to_credits,
+    Claim, Economy, Money, Wants, invest_and_depreciate, settle_budget, settle_public_accounts,
+    steer_money_supply, to_credits,
 };
-use crate::fleet::Fleets;
+use crate::fleet::{Fleets, fleet_claim, procurement_estimate};
 use crate::galaxy::Galaxy;
-use crate::ids::PlanetId;
+use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::Logistics;
 use crate::polity::Polities;
+use crate::state::SimConfig;
+use crate::tech::{Research, research_claim};
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -41,14 +44,18 @@ impl Plugin for FinancePlugin {
 }
 
 /// Monatsabschluss in fester Reihenfolge: Kapital wandert, öffentliche Kassen gleichen
-/// aus, Einlagen werden zu Anteilen, Dividenden fließen an die Halter, der Staat bedient
-/// seine Schulden, Halter legen an, Kurse bilden sich.
+/// aus, Einlagen werden zu Anteilen, Dividenden fließen an die Halter. Dann der
+/// Staatshaushalt: Schuldendienst, Grundleistungen, die Bewilligungen für Flotte,
+/// Beschaffung und Forschung, Rücklage und Ausschüttung. Zuletzt legen die Halter an, und
+/// die Kurse bilden sich.
 fn monthly_books(
     data: Res<GameData>,
+    config: Res<SimConfig>,
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
     fleets: Res<Fleets>,
+    research: Res<Research>,
     diplomacy: Res<Diplomacy>,
     logistics: Res<Logistics>,
     mut economy: ResMut<Economy>,
@@ -102,11 +109,24 @@ fn monthly_books(
     for (issuer, investor, amount) in injections {
         record_injection(&mut finance, issuer, investor, amount);
     }
+    let before_dividends = economy.treasuries.clone();
     for (issuer, amount) in dividends {
         let seat = seat_of_issuer(&galaxy, &logistics, &capitals, issuer);
         pay_dividend(&mut finance, &mut economy, seat, issuer, amount);
     }
+    // Dividenden auf staatliche Anteile zählen wie Lohnsteuer und Zölle zu den laufenden
+    // Einnahmen. Damit ist der Monat der Einnahmenrechnung vollständig.
+    for (index, before) in before_dividends.into_iter().enumerate() {
+        let received = economy.treasuries[index] - before;
+        economy.book_state_income(PolityId::from_index(index), received);
+    }
+    economy.close_income_month();
 
+    // Der Haushalt des neuen Monats: Was der abgeschlossene eingebracht hat, steht fest.
+    // Der Schuldendienst ist der erste Anspruch, dann folgen die übrigen in ihrer
+    // Rangfolge. Flotte und Forschung geben ihre Bewilligung später in diesem Takt aus
+    // (`SimSet::Fleets`, `SimSet::Research`), die Beschaffung den Monat über.
+    economy.open_budget_month(clock.day(), data.balance.economy.income_tax);
     service_bonds(
         &mut finance,
         &mut economy,
@@ -117,14 +137,45 @@ fn monthly_books(
         &data,
         clock.tick,
     );
+    for polity in polities.alive() {
+        let mut wants = Wants::new();
+        wants.insert(
+            Claim::Fleet,
+            fleet_claim(&data, &galaxy, &economy, &fleets, polity),
+        );
+        wants.insert(
+            Claim::Procurement,
+            procurement_estimate(
+                &data, &galaxy, &economy, &polities, &fleets, &diplomacy, polity.id,
+            ),
+        );
+        wants.insert(
+            Claim::Research,
+            research_claim(
+                &research, &economy, &galaxy, &polities, &diplomacy, &data, &config, polity.id,
+            ),
+        );
+        // Für Einlagen in Kontore gibt die Börse dem Staat neue Anteile aus.
+        for (system, amount) in settle_budget(&galaxy, &mut economy, &data, polity.id, &wants) {
+            record_injection(
+                &mut finance,
+                IssuerId::Kontor(system),
+                HolderId::State(polity.id),
+                amount,
+            );
+        }
+    }
 
-    // Staatseinnahmen schätzen und Kriegsmüdigkeit fortschreiben.
+    // Staatseinnahmen glätten und Kriegsmüdigkeit fortschreiben. Maß sind die laufenden
+    // Einnahmen des abgeschlossenen Monats, dieselben, mit denen der Haushalt rechnet
+    // (`BudgetMonth::revenue`): Der Kassenstand taugt dafür nicht, denn der Haushalt gibt
+    // die Einnahmen Monat für Monat wieder aus.
     for polity in &polities.list {
         let index = polity.id.index();
         let treasury = economy.treasuries[index];
+        let income = to_credits(economy.state_income_of(polity.id)).max(0.0);
         let state = &mut finance.polities[index];
-        let change = to_credits(treasury - state.last_treasury).max(0.0);
-        state.revenue += 0.2 * (change - state.revenue);
+        state.revenue += 0.2 * (income - state.revenue);
         state.last_treasury = treasury;
         if diplomacy.is_at_war(polity.id) {
             state.war_weariness = (state.war_weariness + balance.weariness_per_month).min(100.0);
@@ -163,11 +214,12 @@ fn cohesion(
     data: Res<GameData>,
     clock: Res<SimClock>,
     fleets: Res<Fleets>,
-    logistics: Res<Logistics>,
+    mut logistics: ResMut<Logistics>,
     mut galaxy: ResMut<Galaxy>,
     mut polities: ResMut<Polities>,
     mut economy: ResMut<Economy>,
     mut finance: ResMut<Finance>,
+    mut research: ResMut<Research>,
     mut chronicle: ResMut<Chronicle>,
 ) {
     let secessions = update_cohesion(
@@ -181,7 +233,7 @@ fn cohesion(
         clock.day(),
     );
     for secession in secessions {
-        apply_secession(
+        let founded = apply_secession(
             &secession,
             &mut finance,
             &mut galaxy,
@@ -192,5 +244,13 @@ fn cohesion(
             &data,
             clock.tick,
         );
+        // Ein neuer Freistaat nimmt das Wissen des Reichs mit, das er verlässt. Noch im
+        // selben Takt hat er in jeder Liste je Gemeinschaft seinen Eintrag, und seine
+        // Werke und Frachter rechnen mit der geerbten Technik.
+        if let (None, Some(child)) = (secession.joins, founded) {
+            research.inherit(&data, secession.from, child);
+            economy.sync_polities();
+            research.publish_effects(&mut economy, &mut logistics);
+        }
     }
 }

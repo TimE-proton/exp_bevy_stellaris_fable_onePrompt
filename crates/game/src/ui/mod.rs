@@ -1,36 +1,43 @@
 //! Oberfläche (egui). Die Fenster sind reine Funktionen über dem Simulationszustand:
 //! Sie lesen, zeichnen und geben Aktionen zurück. Erst das System unten wendet sie an.
 
+pub(crate) mod budget;
 mod economy;
 mod finance;
-mod fleets;
+pub(crate) mod fleets;
 pub(crate) mod format;
 pub(crate) mod panels;
+pub(crate) mod tech;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use panels::{SimRefs, UiAction};
 
 use crate::battle_view::BattleViewShown;
+use crate::battle_view::campaign::{BattleMarkers, WatchBattle};
 use crate::battle_view::practice::{PracticeSetup, StartPractice};
 use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
+use crate::pointer::UiCover;
 use crate::session::{Notice, SessionRequest, quicksave_path};
 use crate::state::AppState;
 use crate::time_control::SimSpeed;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::input::egui_wants_any_keyboard_input;
-use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use sim::chronicle::Chronicle;
 use sim::clock::SimClock;
 use sim::command::{CommandQueue, CommandSource};
 use sim::diplomacy::Diplomacy;
 use sim::economy::Economy;
 use sim::finance::Finance;
-use sim::fleet::Fleets;
+use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
 use sim::logistics::Logistics;
 use sim::polity::Polities;
 use sim::state::SimConfig;
+use sim::tech::Research;
 
 /// Reiter der linken Tafel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,6 +47,26 @@ pub enum LeftTab {
     Market,
     Production,
     Ownership,
+}
+
+/// Reiter des Forschungsfensters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TechTab {
+    /// Der eigene Baum mit Ziel und Etat.
+    #[default]
+    Own,
+    /// Was über die Forschung der anderen Gemeinschaften bekannt ist.
+    Others,
+}
+
+/// Reiter des Flottenfensters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FleetsTab {
+    /// Die eigenen Flotten und die Schiffe der gewählten.
+    #[default]
+    Fleets,
+    /// Werften, Bauaufträge, Entwürfe und was die Flotte kostet.
+    Yards,
 }
 
 /// Zustand der Oberfläche selbst (kein Spielzustand).
@@ -54,6 +81,20 @@ pub struct UiState {
     pub flows_open: bool,
     pub chains_open: bool,
     pub fleets_open: bool,
+    pub fleets_tab: FleetsTab,
+    /// Flotte, deren Schiffe das Flottenfenster zeigt.
+    pub fleet_chosen: Option<sim::ids::FleetId>,
+    /// Schiffe der gewählten Flotte, die abgeteilt werden sollen.
+    pub split_ships: Vec<sim::ids::ShipId>,
+    /// Werft, bei der bestellt wird.
+    pub yard_chosen: Option<sim::ids::PlanetId>,
+    /// Entwurf, dessen Kosten das Fenster ausweist.
+    pub design_chosen: Option<u16>,
+    pub tech_open: bool,
+    pub tech_tab: TechTab,
+    /// Forschungsetat in Prozent, solange der Spieler am Regler dreht und noch nicht
+    /// festgesetzt hat; sonst zeigt der Regler den geltenden Etat.
+    pub research_percent: Option<f32>,
     /// Güter, deren Preisverlauf im Diagramm gezeigt wird (Index = Gut).
     pub chart_goods: Vec<bool>,
     pub exchange_open: bool,
@@ -68,6 +109,26 @@ pub struct UiState {
     pub bond_amount: f32,
 }
 
+impl UiState {
+    /// Vergisst, was nur für die Partie galt, die gerade endet oder ersetzt wird: den
+    /// gewählten Emittenten, die Eingaben zu Staatshaushalt und Forschungsetat und die Wahl
+    /// im Flottenfenster. Unter
+    /// gleicher Nummer stünde in der nächsten Partie ein anderer Betrieb, und Steuersatz
+    /// und Etat gälten einem anderen Staat. Welche Fenster offen sind, bleibt, wie der
+    /// Spieler es eingerichtet hat.
+    fn forget_game(&mut self) {
+        let fresh = Self::default();
+        self.issuer = fresh.issuer;
+        self.tax_percent = fresh.tax_percent;
+        self.reserve_target = fresh.reserve_target;
+        self.research_percent = fresh.research_percent;
+        self.fleet_chosen = fresh.fleet_chosen;
+        self.split_ships = fresh.split_ships;
+        self.yard_chosen = fresh.yard_chosen;
+        self.design_chosen = fresh.design_chosen;
+    }
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -79,6 +140,14 @@ impl Default for UiState {
             flows_open: false,
             chains_open: false,
             fleets_open: false,
+            fleets_tab: FleetsTab::default(),
+            fleet_chosen: None,
+            split_ships: Vec::new(),
+            yard_chosen: None,
+            design_chosen: None,
+            tech_open: false,
+            tech_tab: TechTab::default(),
+            research_percent: None,
             chart_goods: Vec::new(),
             exchange_open: false,
             treasury_open: false,
@@ -93,6 +162,10 @@ impl Default for UiState {
     }
 }
 
+/// Was der Spieler erfährt, wenn er bei stehender Zeit einen Befehl gibt.
+pub const COMMAND_WAITS: &str =
+    "Vorgemerkt: Der Befehl gilt, sobald die Zeit weiterläuft (Leertaste).";
+
 /// Lesender Zugriff auf die laufende Partie; fehlt im Hauptmenü.
 #[derive(SystemParam)]
 pub struct SimParams<'w> {
@@ -105,6 +178,8 @@ pub struct SimParams<'w> {
     finance: Res<'w, Finance>,
     logistics: Res<'w, Logistics>,
     fleets: Res<'w, Fleets>,
+    battles: Res<'w, Battles>,
+    research: Res<'w, Research>,
     diplomacy: Res<'w, Diplomacy>,
 }
 
@@ -114,6 +189,8 @@ pub struct PracticeParams<'w> {
     setup: ResMut<'w, PracticeSetup>,
     start: MessageWriter<'w, StartPractice>,
     battle_view: Res<'w, BattleViewShown>,
+    markers: Res<'w, BattleMarkers>,
+    watch: MessageWriter<'w, WatchBattle>,
 }
 
 pub struct UiPlugin;
@@ -121,6 +198,9 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiState>()
+            // Am selben Punkt, an dem die Karte der Partie abgeräumt wird: beim Verlassen
+            // der Partie, auch wenn gleich die nächste folgt (Laden mitten im Spiel).
+            .add_systems(OnExit(AppState::InGame), forget_game)
             .add_systems(
                 Update,
                 hotkeys
@@ -129,6 +209,10 @@ impl Plugin for UiPlugin {
             )
             .add_systems(EguiPrimaryContextPass, draw_ui);
     }
+}
+
+fn forget_game(mut ui_state: ResMut<UiState>) {
+    ui_state.forget_game();
 }
 
 fn hotkeys(
@@ -155,7 +239,7 @@ fn draw_ui(
     app_state: Res<State<AppState>>,
     data: Res<sim::GameData>,
     sim: Option<SimParams>,
-    notice: Res<Notice>,
+    mut notice: ResMut<Notice>,
     history: Res<PriceHistory>,
     mut ui_state: ResMut<UiState>,
     mut speed: ResMut<SimSpeed>,
@@ -165,6 +249,7 @@ fn draw_ui(
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
     mut practice: PracticeParams,
+    mut cover: ResMut<UiCover>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -173,13 +258,7 @@ fn draw_ui(
         panels::apply_style(ctx);
         *styled = true;
     }
-    let mut root = egui::Ui::new(
-        ctx.clone(),
-        "wurzel".into(),
-        egui::UiBuilder::new()
-            .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
-    );
+    let mut root = UiCover::root(ctx, "wurzel");
     let mut actions = Vec::new();
     match (app_state.get(), &sim) {
         (AppState::InGame, _) if practice.battle_view.0 => {
@@ -199,8 +278,11 @@ fn draw_ui(
                 finance: &sim.finance,
                 logistics: &sim.logistics,
                 fleets: &sim.fleets,
+                battles: &sim.battles,
+                research: &sim.research,
                 diplomacy: &sim.diplomacy,
                 history: &history,
+                pending: queue.as_deref().map_or(&[], |queue| &queue.pending),
             };
             panels::in_game(
                 &mut root,
@@ -208,6 +290,7 @@ fn draw_ui(
                 &mut ui_state,
                 &speed,
                 &selection,
+                &practice.markers.0,
                 &mut actions,
             );
         }
@@ -233,6 +316,8 @@ fn draw_ui(
         _ => {}
     }
     panels::notice(&mut root, &notice);
+    // Was die Leisten und Tafeln belegen, gehört nicht der Karte.
+    cover.record(&root);
 
     for action in actions {
         match action {
@@ -259,7 +344,15 @@ fn draw_ui(
                     && let Some(player) = sim.config.player
                 {
                     queue.push(player, CommandSource::Player, command);
+                    if speed.paused {
+                        // Ein Befehl gilt erst mit dem nächsten Takt. Steht die Zeit, sähe
+                        // es sonst aus, als hätte der Klick nichts bewirkt.
+                        notice.info(COMMAND_WAITS);
+                    }
                 }
+            }
+            UiAction::WatchBattle(battle) => {
+                practice.watch.write(WatchBattle(battle));
             }
             UiAction::Quit => {
                 exit.write(AppExit::Success);

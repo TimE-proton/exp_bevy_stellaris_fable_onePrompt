@@ -73,6 +73,11 @@ pub const PRESETS: [Preset; 4] = [
 /// Aufstellung, mit der die Übung ohne weitere Angaben beginnt.
 const DEFAULT_PRESET: usize = 1;
 
+/// So viele Schiffe darf ein Verband höchstens aufbieten, Bordjäger mitgezählt. Bis zu
+/// dieser Größe ist der Gefechtsrechner erprobt; weit darüber braucht ein einzelner Takt
+/// Sekunden bis Minuten, und das Spiel stünde so lange still.
+pub const MAX_SHIPS_PER_SIDE: u64 = 1000;
+
 /// Eingaben des Aufstellungsdialogs.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct PracticeSetup {
@@ -101,7 +106,7 @@ impl PracticeSetup {
 
     /// Prüft eine Flottenliste und setzt Formation und Doktrin der Partei ein.
     fn side(&self, data: &GameData, index: usize) -> Result<Side, String> {
-        Side::parse(data, &self.fleets[index]).map(|side| {
+        parse_fleet(data, &self.fleets[index]).map(|side| {
             side.with_formation(self.formations[index])
                 .with_doctrine(self.doctrines[index])
         })
@@ -126,6 +131,47 @@ impl PracticeSetup {
             lineup: false,
         })
     }
+}
+
+/// Zahl der Schiffe einer Flottenliste und der Jäger an Bord ihrer Träger. Gerechnet wird
+/// so, dass auch unsinnig große Eingaben nichts überlaufen lassen.
+fn head_count(data: &GameData, side: &Side) -> (u64, u64) {
+    side.ships
+        .iter()
+        .fold((0u64, 0u64), |(ships, fighters), (design, count)| {
+            let count = u64::from(*count);
+            let aboard = u64::from(data.designs[*design as usize].stats.fighters);
+            (
+                ships.saturating_add(count),
+                fighters.saturating_add(aboard.saturating_mul(count)),
+            )
+        })
+}
+
+/// Liest eine Flottenliste und prüft ihre Größe: jeder Eintrag mit mindestens einem Schiff,
+/// der Verband insgesamt nicht größer als [`MAX_SHIPS_PER_SIDE`]. Dialog und Kommandozeile
+/// gehen beide hier durch.
+fn parse_fleet(data: &GameData, text: &str) -> Result<Side, String> {
+    let side = Side::parse(data, text)?;
+    if let Some((design, _)) = side.ships.iter().find(|(_, count)| *count == 0) {
+        return Err(format!(
+            "von „{}“ muss mindestens ein Schiff dabei sein",
+            data.designs[*design as usize].key
+        ));
+    }
+    let (ships, fighters) = head_count(data, &side);
+    if ships.saturating_add(fighters) > MAX_SHIPS_PER_SIDE {
+        let aboard = if fighters > 0 {
+            format!(" und {fighters} Bordjäger")
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "{ships} Schiffe{aboard} sind zu viele: höchstens {MAX_SHIPS_PER_SIDE} je \
+             Verband, Bordjäger mitgezählt"
+        ));
+    }
+    Ok(side)
 }
 
 /// Geprüfte Aufstellung einer Übung.
@@ -248,6 +294,7 @@ fn feed_info(config: &PracticeConfig) -> FeedInfo {
         player_side: (!config.lineup).then_some(0),
         can_restart: !config.lineup,
         still: config.lineup,
+        ..default()
     }
 }
 
@@ -382,7 +429,11 @@ fn handle_view_requests(
                 let config = practice.config.clone();
                 *practice = PracticeBattle::new(config.build(&data), config);
                 feed.begin(&practice.battle, feed_info(&practice.config));
+                // Auch hier hält die Zeit sofort an. Die Zeitsteuerung überträgt die neue
+                // Stufe erst, wenn sie das nächste Mal läuft; bis dahin rechnete das
+                // frische Gefecht mit der alten Stufe schon etliche Takte weiter.
                 *speed = SimSpeed::default();
+                time.pause();
             }
         }
     }
@@ -450,19 +501,12 @@ fn leave(
     ui_state.help_open = false;
 }
 
-/// Kurzbeschreibung einer Flottenliste oder der Grund, warum sie nicht gilt.
+/// Kurzbeschreibung einer Flottenliste oder der Grund, warum sie nicht gilt. Läuft im
+/// Dialog bei jedem Tastendruck über den gerade getippten Text.
 fn fleet_summary(data: &GameData, text: &str) -> Result<String, String> {
-    let side = Side::parse(data, text)?;
-    let fighters: u32 = side
-        .ships
-        .iter()
-        .map(|(design, count)| data.designs[*design as usize].stats.fighters * count)
-        .sum();
-    let mut summary = format!(
-        "{} Schiffe, Bauwert {}",
-        side.ship_count(),
-        decimal(side.value(data), 0)
-    );
+    let side = parse_fleet(data, text)?;
+    let (ships, fighters) = head_count(data, &side);
+    let mut summary = format!("{ships} Schiffe, Bauwert {}", decimal(side.value(data), 0));
     if fighters > 0 {
         summary.push_str(&format!(", dazu {fighters} Bordjäger"));
     }
@@ -776,6 +820,264 @@ mod tests {
             world.run_system_once(step).unwrap();
         }
         assert_eq!(world.resource::<PracticeBattle>().battle.tick, 0);
+    }
+
+    #[test]
+    fn fleet_sizes_are_bounded() {
+        let data = data();
+        // Was beim Tippen einer großen Zahl durchlaufen wird, was sich aufsummiert, und
+        // Einträge ohne Schiffe: nichts davon stürzt ab, alles wird abgelehnt.
+        for text in [
+            "horst:200000000",
+            "horst:4294967295",
+            "dolch:4000000000,dolch:4000000000",
+            "dolch:20000",
+            "dolch:1001",
+            "dolch:600,waechter:401",
+            // 41 Träger bringen 984 Jäger mit: zusammen über der Grenze.
+            "horst:41",
+            "dolch:0",
+            "speer:2,dolch:0",
+        ] {
+            assert!(fleet_summary(&data, text).is_err(), "{text}");
+            for side in 0..2 {
+                let mut setup = PracticeSetup::default();
+                setup.fleets[side] = text.into();
+                let error = setup.resolve(&data).unwrap_err();
+                assert!(error.contains(SIDE_NAMES[side]), "{text}: {error}");
+            }
+        }
+        // An der Grenze geht es noch, Bordjäger mitgezählt.
+        for text in [
+            "dolch:1000",
+            "horst:40",
+            "dolch:1",
+            "dolch:500,waechter:500",
+        ] {
+            assert!(fleet_summary(&data, text).is_ok(), "{text}");
+            let mut setup = PracticeSetup::default();
+            setup.fleets[1] = text.into();
+            assert!(setup.resolve(&data).is_ok(), "{text}");
+        }
+        assert!(
+            fleet_summary(&data, "horst:40")
+                .unwrap()
+                .contains("960 Bordjäger")
+        );
+        // Die Hinweise sagen, was nicht geht und was ginge.
+        let too_many = fleet_summary(&data, "horst:20000000").unwrap_err();
+        assert!(
+            too_many.contains("20000000 Schiffe")
+                && too_many.contains("480000000 Bordjäger")
+                && too_many.contains(&format!("höchstens {MAX_SHIPS_PER_SIDE}")),
+            "{too_many}"
+        );
+        let none = fleet_summary(&data, "speer:2,dolch:0").unwrap_err();
+        assert!(
+            none.contains("dolch") && none.contains("mindestens ein Schiff"),
+            "{none}"
+        );
+    }
+
+    #[test]
+    fn the_dialog_rejects_oversized_fleets_and_starts_valid_ones() {
+        use crate::ui::testing::Screen;
+
+        /// Zeichnet den Dialog und hält fest, ob er ein Gefecht beginnt.
+        fn draw<'a>(
+            data: &'a GameData,
+            setup: &'a mut PracticeSetup,
+            started: &'a mut Option<PracticeConfig>,
+        ) -> impl FnMut(&mut egui::Ui) + 'a {
+            move |ui| {
+                let mut open = true;
+                if let Some(config) = setup_dialog(ui.ctx(), data, setup, &mut open) {
+                    *started = Some(config);
+                }
+            }
+        }
+
+        let data = data();
+        let mut screen = Screen::new(1600.0, 900.0);
+        let mut setup = PracticeSetup::default();
+        let mut started = None;
+
+        // Jede Stufe einer getippten Riesenzahl wird gezeichnet, ohne abzustürzen; ab der
+        // Grenze steht der Hinweis da, und „Gefecht beginnen“ tut nichts.
+        let mut button = None;
+        for digits in 1..=10 {
+            setup.fleets[0] = format!("horst:2{}", "0".repeat(digits - 1));
+            let painted = screen.settle(draw(&data, &mut setup, &mut started));
+            let hint = painted.text("höchstens");
+            assert_eq!(
+                hint.is_some(),
+                digits >= 3,
+                "Hinweis bei {}",
+                setup.fleets[0]
+            );
+            button = painted.text("Gefecht beginnen");
+            let at = button.expect("Knopf").center();
+            screen.click(at, draw(&data, &mut setup, &mut started));
+            assert_eq!(started.is_some(), digits < 3, "{}", setup.fleets[0]);
+            started = None;
+        }
+        // Eine Flotte ohne Schiffe ebenso.
+        setup.fleets[0] = "dolch:0".into();
+        let painted = screen.settle(draw(&data, &mut setup, &mut started));
+        assert!(painted.text("mindestens").is_some());
+        screen.click(
+            button.unwrap().center(),
+            draw(&data, &mut setup, &mut started),
+        );
+        assert!(started.is_none());
+        // Mit gültigen Flotten beginnt derselbe Klick das Gefecht.
+        setup.fleets[0] = "dolch:3".into();
+        screen.settle(draw(&data, &mut setup, &mut started));
+        screen.click(
+            button.unwrap().center(),
+            draw(&data, &mut setup, &mut started),
+        );
+        let config = started.expect("das Gefecht beginnt");
+        assert_eq!(config.sides[0].ship_count(), 3);
+    }
+
+    #[test]
+    fn restart_stops_the_clock_at_once() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let data = data();
+        let config = PracticeSetup::default().resolve(&data).unwrap();
+        let mut battle = config.build(&data);
+        let mut feed = BattleFeed::default();
+        feed.begin(&battle, feed_info(&config));
+        for _ in 0..40 {
+            battle.step(&data);
+            feed.refresh(&battle);
+        }
+        let epoch = feed.epoch;
+        let mut world = World::new();
+        world.insert_resource(data);
+        world.insert_resource(feed);
+        world.insert_resource(PracticeBattle::new(battle, config));
+        // Die Zeit läuft auf der schnellsten Stufe, wie meist am Ende eines Gefechts.
+        world.insert_resource(SimSpeed {
+            paused: false,
+            level: 5,
+        });
+        world.insert_resource(Time::<Virtual>::default());
+        world.init_resource::<NextState<AppState>>();
+        world.init_resource::<Messages<BattleViewRequest>>();
+        assert!(!world.resource::<Time<Virtual>>().is_paused());
+
+        world
+            .resource_mut::<Messages<BattleViewRequest>>()
+            .write(BattleViewRequest::Restart);
+        world.run_system_once(handle_view_requests).unwrap();
+        // Sofort, nicht erst wenn die Zeitsteuerung die neue Stufe überträgt: Bis dahin
+        // liefe das frische Gefecht schon einige Takte weiter.
+        assert!(world.resource::<Time<Virtual>>().is_paused());
+        assert!(world.resource::<SimSpeed>().paused);
+        assert_eq!(world.resource::<PracticeBattle>().battle.tick, 0);
+        let feed = world.resource::<BattleFeed>();
+        assert_eq!(feed.battle().unwrap().tick, 0);
+        assert_eq!(feed.epoch, epoch + 1, "die Ansicht baut sich neu auf");
+    }
+
+    #[test]
+    fn a_restarted_practice_waits_at_the_first_tick() {
+        use crate::testing::TestGame;
+
+        let mut game = TestGame::start("--practice --seed 3");
+        game.frames(4);
+        assert_eq!(game.state(), AppState::Practice);
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 5,
+        };
+        game.frames(12);
+        assert!(game.resource::<PracticeBattle>().battle.tick > 20);
+        game.send(BattleViewRequest::Restart);
+        game.frames(8);
+        assert_eq!(game.resource::<PracticeBattle>().battle.tick, 0);
+        assert_eq!(game.resource::<BattleFeed>().battle().unwrap().tick, 0);
+        assert!(game.resource::<SimSpeed>().paused);
+        // Die Leertaste beginnt das Gefecht dann wie beim ersten Mal.
+        game.key(KeyCode::Space);
+        game.frames(4);
+        assert!(game.resource::<PracticeBattle>().battle.tick > 0);
+    }
+
+    #[test]
+    fn orders_clicked_on_the_side_panel_reach_the_battle() {
+        use crate::testing::TestGame;
+
+        let mut game = TestGame::start("--practice --seed 3");
+        game.frames(4);
+        let orders = |game: &TestGame| {
+            let combatant = &game.resource::<PracticeBattle>().battle.combatants[0];
+            (
+                combatant.formation,
+                combatant.doctrine,
+                combatant.retreating,
+            )
+        };
+        let start = orders(&game);
+        assert_eq!(start, (Formation::Line, Doctrine::Balanced, false));
+        // Die Befehle stehen unten auf der Lagetafel der eigenen Partei. Einmal über alle
+        // Knöpfe dort klicken: Formation, Doktrin und zuletzt der Rückzug kommen im
+        // Gefecht an, auch in der Pause.
+        let panel = game.window_rect("partei_0").expect("Lagetafel");
+        let (mut formations, mut doctrines) = (Vec::new(), Vec::new());
+        let mut y = panel.bottom() - 6.0;
+        while y > panel.top() + 190.0 && !orders(&game).2 {
+            let mut x = panel.left() + 12.0;
+            while x < panel.right() - 6.0 && !orders(&game).2 {
+                game.click(Vec2::new(x, y));
+                let now = orders(&game);
+                if !formations.contains(&now.0) {
+                    formations.push(now.0);
+                }
+                if !doctrines.contains(&now.1) {
+                    doctrines.push(now.1);
+                }
+                x += 14.0;
+            }
+            y -= 9.0;
+        }
+        assert!(orders(&game).2, "der Rückzug wurde befohlen");
+        assert_eq!(
+            game.resource::<PracticeBattle>().battle.tick,
+            0,
+            "ohne einen Takt"
+        );
+        // Der Rückzugsknopf liegt zuunterst; die übrigen Befehle sind danach gesperrt.
+        // Ein zweiter Durchgang von oben nach unten erreicht deshalb erst sie.
+        let mut game = TestGame::start("--practice --seed 3");
+        game.frames(4);
+        let panel = game.window_rect("partei_0").expect("Lagetafel");
+        let mut y = panel.top() + 200.0;
+        while y < panel.bottom() - 26.0 {
+            let mut x = panel.left() + 12.0;
+            while x < panel.right() - 6.0 {
+                game.click(Vec2::new(x, y));
+                let now = orders(&game);
+                if !formations.contains(&now.0) {
+                    formations.push(now.0);
+                }
+                if !doctrines.contains(&now.1) {
+                    doctrines.push(now.1);
+                }
+                x += 14.0;
+            }
+            y += 9.0;
+        }
+        assert!(!orders(&game).2);
+        assert_eq!(formations.len(), Formation::ALL.len(), "{formations:?}");
+        assert_eq!(doctrines.len(), Doctrine::ALL.len(), "{doctrines:?}");
+        // Die Ansicht zeigt, was befohlen wurde.
+        let shown = game.resource::<BattleFeed>().battle().unwrap().combatants[0].formation;
+        assert_eq!(shown, orders(&game).0);
     }
 
     #[test]

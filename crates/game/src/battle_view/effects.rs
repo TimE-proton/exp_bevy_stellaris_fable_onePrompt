@@ -6,10 +6,14 @@
 //! bis zu seiner Obergrenze und schrumpft nie; angelegt oder entfernt wird im Dauerbetrieb
 //! nichts. Alle Plätze eines Vorrats teilen Mesh und Material, die Engine zeichnet sie
 //! gebündelt.
+//!
+//! Die Vorräte gehören zum Stand der Szene: Wird sie abgeräumt (anderes Gefecht, Ansicht
+//! verlassen), sind ihre Plätze mit verschwunden, und die Vorräte beginnen leer. Stößt
+//! eine Partei erst im Gefecht dazu, kommen ihre Vorräte hinzu.
 
 use super::feed::{BattleFeed, SHIELD_FLASH_SECONDS};
 use super::scene::{
-    BattleAssets, BattleVisual, FLASH_LEVELS, SHIELD_LEVELS, SideAssets, rebuild_on_epoch,
+    BattleAssets, BattleVisual, FLASH_LEVELS, SHIELD_LEVELS, SideAssets, SideKit, prepare_scene,
 };
 use super::{BattleViewSet, Part, ViewFrame, ViewTimings, heading_rotation, to_world};
 use bevy::prelude::*;
@@ -23,6 +27,9 @@ const BEAM_LIGHT: usize = 2;
 const BEAM_HEAVY: usize = 3;
 const BEAM_PD: usize = 4;
 const PER_SIDE: usize = 5;
+/// Vorräte, die allen Parteien gemeinsam sind (Einschläge und Schildschimmer). Sie stehen
+/// vorn; so behalten alle Plätze ihre Nummer, wenn eine Partei dazukommt.
+const SHARED: usize = FLASH_LEVELS + SHIELD_LEVELS;
 
 /// Obergrenzen. Was darüber hinausgeht, wird in diesem Frame nicht gezeigt.
 const CAP_TRACERS: usize = 6000;
@@ -73,7 +80,8 @@ impl Pool {
 
 #[derive(Resource, Default)]
 pub struct EffectPools {
-    epoch: Option<u32>,
+    /// Stand der Szene (siehe [`SideAssets::generation`]), für den die Vorräte angelegt sind.
+    generation: Option<u32>,
     sides: usize,
     pools: Vec<Pool>,
 }
@@ -92,12 +100,27 @@ pub struct EffectStats {
 }
 
 impl EffectPools {
-    /// Vorräte für ein neues Gefecht: je Partei fünf, dazu Einschläge und Schildschimmer.
+    /// Leere Vorräte für eine neu aufgebaute Szene: Einschläge und Schildschimmer, dazu
+    /// je Partei fünf.
     pub fn rebuild(&mut self, assets: &BattleAssets, sides: &SideAssets) {
-        self.epoch = sides.epoch;
-        self.sides = sides.sides.len();
+        self.generation = Some(sides.generation);
+        self.sides = 0;
         self.pools.clear();
-        for side in &sides.sides {
+        for material in &assets.flash_materials {
+            self.pools
+                .push(Pool::new(&assets.flash, material, CAP_FLASHES));
+        }
+        for material in &assets.shield_materials {
+            self.pools
+                .push(Pool::new(&assets.shield, material, CAP_SHIELDS));
+        }
+        self.grow(assets, &sides.sides);
+    }
+
+    /// Legt die Vorräte der Parteien an, die noch keine haben (Verstärkung mitten im
+    /// Gefecht). Bestehende Vorräte und ihre Plätze bleiben, wie sie sind.
+    pub fn grow(&mut self, assets: &BattleAssets, sides: &[SideKit]) {
+        for side in sides.iter().skip(self.sides) {
             self.pools
                 .push(Pool::new(&assets.tracer, &side.tracer, CAP_TRACERS));
             self.pools
@@ -108,29 +131,20 @@ impl EffectPools {
                 .push(Pool::new(&assets.beam, &side.beam_heavy, CAP_BEAMS));
             self.pools
                 .push(Pool::new(&assets.beam, &side.beam_pd, CAP_BEAMS));
-        }
-        for material in &assets.flash_materials {
-            self.pools
-                .push(Pool::new(&assets.flash, material, CAP_FLASHES));
-        }
-        for material in &assets.shield_materials {
-            self.pools
-                .push(Pool::new(&assets.shield, material, CAP_SHIELDS));
+            self.sides += 1;
         }
     }
 
     fn side_pool(&mut self, side: usize, kind: usize) -> Option<&mut Pool> {
-        (side < self.sides).then(|| &mut self.pools[side * PER_SIDE + kind])
+        (side < self.sides).then(|| &mut self.pools[SHARED + side * PER_SIDE + kind])
     }
 
     fn flash_pool(&mut self, level: usize) -> &mut Pool {
-        let index = self.sides * PER_SIDE + level.min(FLASH_LEVELS - 1);
-        &mut self.pools[index]
+        &mut self.pools[level.min(FLASH_LEVELS - 1)]
     }
 
     fn shield_pool(&mut self, level: usize) -> &mut Pool {
-        let index = self.sides * PER_SIDE + FLASH_LEVELS + level.min(SHIELD_LEVELS - 1);
-        &mut self.pools[index]
+        &mut self.pools[FLASH_LEVELS + level.min(SHIELD_LEVELS - 1)]
     }
 
     /// Angelegte Plätze aller Vorräte.
@@ -289,7 +303,7 @@ pub(super) fn plugin(app: &mut App) {
             Update,
             show_effects
                 .in_set(BattleViewSet::Scene)
-                .after(rebuild_on_epoch),
+                .after(prepare_scene),
         );
 }
 
@@ -305,11 +319,13 @@ fn show_effects(
     mut slots: Query<(&PoolSlot, &mut Transform, &mut Visibility)>,
 ) {
     let _span = timings.span(Part::Effects);
-    if pools.epoch != sides.epoch {
-        // Neues Gefecht: Die alten Plätze sind mit der Szene verschwunden.
+    if pools.generation != Some(sides.generation) {
+        // Die Szene wurde neu aufgebaut (anderes Gefecht, oder dasselbe nach dem Verlassen
+        // der Ansicht): Die alten Plätze sind mit ihr verschwunden.
         pools.rebuild(&assets, &sides);
         *stats = EffectStats::default();
     }
+    pools.grow(&assets, &sides.sides);
     let shown = pools.collect(&feed, &frame);
     assign(&mut commands, &mut pools, &mut slots);
     *stats = EffectStats {
@@ -374,6 +390,7 @@ mod tests {
     fn frame_for(feed: &BattleFeed, alpha: f32) -> ViewFrame {
         let battle = feed.battle().unwrap();
         ViewFrame {
+            epoch: Some(feed.epoch),
             alpha,
             time: battle.time - (1.0 - alpha) * 0.1,
             tick_seconds: 0.1,
@@ -396,10 +413,10 @@ mod tests {
         materials: Assets<StandardMaterial>,
     }
 
-    fn stores(epoch: u32) -> Stores {
+    fn stores(generation: u32) -> Stores {
         let (assets, mut meshes, mut materials) = assets();
         let sides = SideAssets {
-            epoch: Some(epoch),
+            generation,
             sides: [(0.3, 0.6, 1.0), (1.0, 0.4, 0.3)]
                 .into_iter()
                 .map(|color| SideKit::build(color, &assets, &mut meshes, &mut materials))
@@ -457,7 +474,7 @@ mod tests {
             assert_eq!(stats.beams, battle.beams.len());
             let count = |pools: &EffectPools, kind: usize| -> usize {
                 (0..2)
-                    .map(|side| pools.pools[side * PER_SIDE + kind].items.len())
+                    .map(|side| pools.pools[SHARED + side * PER_SIDE + kind].items.len())
                     .sum()
             };
             assert_eq!(
@@ -516,7 +533,7 @@ mod tests {
                     .shots
                     .iter()
                     .filter(|shot| shot.side as usize == side && shot.kind != WeaponKind::Missile);
-                for item in &pools.pools[side * PER_SIDE + TRACER].items {
+                for item in &pools.pools[SHARED + side * PER_SIDE + TRACER].items {
                     let shot = expected.next().expect("Geschoss zum Platz");
                     assert!(item.translation.distance(to_world(shot.pos)) < 1e-3);
                     let nose = item.rotation * Vec3::X;
@@ -534,7 +551,7 @@ mod tests {
                     .beams
                     .iter()
                     .filter(|beam| beam.side as usize == side && beam.kind == BeamKind::Light);
-                for item in &pools.pools[side * PER_SIDE + BEAM_LIGHT].items {
+                for item in &pools.pools[SHARED + side * PER_SIDE + BEAM_LIGHT].items {
                     let beam = beams.next().expect("Strahl zum Platz");
                     assert!(item.translation.distance(to_world(beam.from)) < 1e-3);
                     let end = item.translation + item.rotation * Vec3::X * item.scale.x;
@@ -553,7 +570,7 @@ mod tests {
     /// Welt ohne Fenster: nur das, was die Effekte brauchen.
     fn world_with(feed: BattleFeed) -> World {
         let mut world = World::new();
-        let stores = stores(feed.epoch);
+        let stores = stores(1);
         world.insert_resource(stores.assets);
         world.insert_resource(stores.sides);
         world.insert_resource(stores.meshes);
@@ -655,7 +672,7 @@ mod tests {
 
         let (assets, mut meshes, mut materials) = assets();
         let kits = SideAssets {
-            epoch: Some(feed.epoch),
+            generation: 1,
             sides: (0..3)
                 .map(|side| {
                     SideKit::build(feed.side_color(side), &assets, &mut meshes, &mut materials)
@@ -678,14 +695,27 @@ mod tests {
                 break;
             }
             assert_eq!(stats.shots, battle.shots.len());
-            third_side_shots += pools.pools[2 * PER_SIDE + TRACER].items.len();
+            // Was die dritte Partei im Flug hat, liegt in ihren Vorräten, nach Art getrennt.
+            // (Als Schwächste von dreien feuert sie hier ihre Lenkwaffen ab und zieht sich
+            // zurück, bevor ihre Geschütze in Reichweite kommen.)
+            let in_flight = |missile: bool| {
+                battle
+                    .shots
+                    .iter()
+                    .filter(|shot| shot.side == 2 && (shot.kind == WeaponKind::Missile) == missile)
+                    .count()
+            };
+            let pooled = |kind: usize| pools.pools[SHARED + 2 * PER_SIDE + kind].items.len();
+            assert_eq!(pooled(TRACER), in_flight(false));
+            assert_eq!(pooled(MISSILE), in_flight(true));
+            third_side_shots += pooled(TRACER) + pooled(MISSILE);
         }
         assert!(third_side_shots > 0, "die dritte Partei hat geschossen");
 
         // Kennt die Ansicht eine Partei nicht (weniger Materialien als Parteien), bleiben
         // deren Effekte weg, statt etwas Falsches zu zeigen oder abzustürzen.
         let two = SideAssets {
-            epoch: Some(feed.epoch),
+            generation: 2,
             sides: kits.sides.into_iter().take(2).collect(),
         };
         pools.rebuild(&assets, &two);
@@ -712,7 +742,7 @@ mod tests {
         let mut pools = EffectPools::default();
         pools.rebuild(&stores.assets, &stores.sides);
         assert_eq!(pools.spawned(), 0);
-        assert_eq!(pools.epoch, Some(3));
+        assert_eq!(pools.generation, Some(3));
         assert_eq!(
             pools.capacity(),
             2 * (CAP_TRACERS + CAP_MISSILES + 3 * CAP_BEAMS)

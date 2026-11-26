@@ -11,8 +11,10 @@ use super::{
     BattleViewSet, BattleViewShown, CameraRequest, Part, ViewFrame, ViewTimings, heading_rotation,
     to_world,
 };
-use crate::map::MapCamera;
+use crate::map::{MapCamera, camera_shows};
+use bevy::camera::visibility::VisibleEntities;
 use bevy::camera_controller::free_camera::FreeCameraState;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use sim::battle::{ShipStatus, Wreck};
 use sim::data::{Rgb, ShipClass};
@@ -27,8 +29,8 @@ pub const SHIELD_LEVELS: usize = 3;
 /// Bauteile einer Schiffsklasse, noch ohne Parteifarbe.
 pub struct ClassAssets {
     pub hull: MeshData,
-    /// Vorder- und Achterteil eines Großkampfschiffs.
-    pub halves: Option<(MeshData, MeshData)>,
+    /// Vorder- und Achterteil: Ein zerstörtes Schiff liegt in zwei Teilen da.
+    pub halves: (MeshData, MeshData),
     pub glow: Handle<Mesh>,
 }
 
@@ -83,7 +85,7 @@ impl BattleAssets {
             .map(|class| {
                 let model = ClassModel::of(*class);
                 ClassAssets {
-                    halves: class.is_capital().then(|| model.halves()),
+                    halves: model.halves(),
                     glow: meshes.add(model.glow().to_mesh()),
                     hull: model.hull,
                 }
@@ -98,8 +100,9 @@ impl BattleAssets {
             metallic: 0.25,
             ..default()
         };
+        // Verrußt, aber noch so hell, dass ein Wrack aus der Übersicht zu erkennen ist.
         let wreck = |glow: LinearRgba| StandardMaterial {
-            base_color: Color::linear_rgb(0.2, 0.185, 0.18),
+            base_color: Color::linear_rgb(0.46, 0.4, 0.36),
             emissive: glow,
             perceptual_roughness: 0.85,
             ..default()
@@ -129,12 +132,13 @@ impl BattleAssets {
             wreck: [
                 materials.add(wreck(LinearRgba::rgb(0.95, 0.24, 0.04))),
                 materials.add(wreck(LinearRgba::rgb(0.22, 0.05, 0.008))),
-                // Auch ausgekühlt glimmt ein Wrack schwach nach, sonst verschwände es vor dem
-                // schwarzen Himmel.
-                materials.add(wreck(LinearRgba::rgb(0.012, 0.004, 0.002))),
+                // Auch ausgekühlt glimmt ein Wrack nach: Seine Schattenseite verschwände
+                // sonst vor dem schwarzen Himmel.
+                materials.add(wreck(LinearRgba::rgb(0.05, 0.026, 0.014))),
             ],
             debris_material: materials.add(StandardMaterial {
-                base_color: Color::linear_rgb(0.16, 0.155, 0.155),
+                base_color: Color::linear_rgb(0.52, 0.48, 0.45),
+                emissive: LinearRgba::rgb(0.03, 0.018, 0.012),
                 perceptual_roughness: 0.8,
                 ..default()
             }),
@@ -157,11 +161,13 @@ impl BattleAssets {
 /// Rumpf-Meshes einer Klasse im Anstrich einer Partei.
 pub struct SideClass {
     pub hull: Handle<Mesh>,
-    pub halves: Option<(Handle<Mesh>, Handle<Mesh>)>,
+    pub halves: (Handle<Mesh>, Handle<Mesh>),
 }
 
 /// Was eine Partei an eigenen Meshes und Materialien braucht.
 pub struct SideKit {
+    /// Farbe der Partei, in der die Bauteile gestrichen sind.
+    pub color: Rgb,
     /// Index wie `ShipClass::index()`.
     pub classes: Vec<SideClass>,
     pub glow: Handle<StandardMaterial>,
@@ -172,12 +178,23 @@ pub struct SideKit {
     pub beam_pd: Handle<StandardMaterial>,
 }
 
-/// Meshes und Materialien aller Parteien des gezeigten Gefechts; entstehen mit jedem
-/// neuen Gefecht.
+/// Meshes und Materialien aller Parteien des gezeigten Gefechts. Sie entstehen mit jedem
+/// Neuaufbau der Szene; stößt eine Partei erst im Gefecht dazu, kommt ihre Ausstattung
+/// hinzu.
 #[derive(Resource, Default)]
 pub struct SideAssets {
-    pub epoch: Option<u32>,
+    /// Zählt jeden Neuaufbau und jedes Abräumen der Szene. Wer Entities für die Szene
+    /// führt (die Vorräte der Effekte), erkennt daran, dass seine verschwunden sind.
+    pub generation: u32,
     pub sides: Vec<SideKit>,
+}
+
+impl SideAssets {
+    /// Die Szene wurde abgeräumt: Alle Ausstattungen entfallen.
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.sides.clear();
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
@@ -204,6 +221,22 @@ pub fn side_tint(color: Rgb) -> [f32; 3] {
     [linear.red / peak, linear.green / peak, linear.blue / peak]
 }
 
+/// Leuchtfarben einer Partei: Triebwerk, Geschoss, Lenkwaffe, leichter und schwerer Strahl,
+/// Punktverteidigung.
+fn side_glows(color: Rgb) -> [StandardMaterial; 6] {
+    let tint = side_tint(color);
+    let side = LinearRgba::rgb(tint[0], tint[1], tint[2]);
+    let white = LinearRgba::WHITE;
+    [
+        additive(scaled(mix(side, white, 0.3), 2.6)),
+        glowing(scaled(mix(side, white, 0.4), 9.0)),
+        glowing(scaled(mix(side, white, 0.55), 7.0)),
+        glowing(scaled(mix(side, white, 0.15), 11.0)),
+        glowing(scaled(mix(side, white, 0.45), 20.0)),
+        glowing(scaled(mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6), 6.0)),
+    ]
+}
+
 impl SideKit {
     pub fn build(
         color: Rgb,
@@ -212,32 +245,57 @@ impl SideKit {
         materials: &mut Assets<StandardMaterial>,
     ) -> Self {
         let tint = side_tint(color);
-        let side = LinearRgba::rgb(tint[0], tint[1], tint[2]);
-        let white = LinearRgba::WHITE;
         let classes = assets
             .classes
             .iter()
             .map(|class| SideClass {
                 hull: meshes.add(class.hull.tinted(tint).to_mesh()),
-                halves: class.halves.as_ref().map(|(fore, aft)| {
-                    (
-                        meshes.add(fore.tinted(tint).to_mesh()),
-                        meshes.add(aft.tinted(tint).to_mesh()),
-                    )
-                }),
+                halves: (
+                    meshes.add(class.halves.0.tinted(tint).to_mesh()),
+                    meshes.add(class.halves.1.tinted(tint).to_mesh()),
+                ),
             })
             .collect();
+        let [glow, tracer, missile, beam_light, beam_heavy, beam_pd] =
+            side_glows(color).map(|material| materials.add(material));
         Self {
+            color,
             classes,
-            glow: materials.add(additive(scaled(mix(side, white, 0.3), 2.6))),
-            tracer: materials.add(glowing(scaled(mix(side, white, 0.4), 9.0))),
-            missile: materials.add(glowing(scaled(mix(side, white, 0.55), 7.0))),
-            beam_light: materials.add(glowing(scaled(mix(side, white, 0.15), 11.0))),
-            beam_heavy: materials.add(glowing(scaled(mix(side, white, 0.45), 20.0))),
-            beam_pd: materials.add(glowing(scaled(
-                mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6),
-                6.0,
-            ))),
+            glow,
+            tracer,
+            missile,
+            beam_light,
+            beam_heavy,
+            beam_pd,
+        }
+    }
+
+    /// Streicht die Ausstattung in einer anderen Farbe. Meshes und Materialien behalten
+    /// ihre Handles: Was schon in der Szene steht, wechselt die Farbe mit.
+    pub fn repaint(
+        &mut self,
+        color: Rgb,
+        assets: &BattleAssets,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) {
+        self.color = color;
+        let tint = side_tint(color);
+        for (own, class) in self.classes.iter().zip(&assets.classes) {
+            let _ = meshes.insert(&own.hull, class.hull.tinted(tint).to_mesh());
+            let _ = meshes.insert(&own.halves.0, class.halves.0.tinted(tint).to_mesh());
+            let _ = meshes.insert(&own.halves.1, class.halves.1.tinted(tint).to_mesh());
+        }
+        let handles = [
+            &self.glow,
+            &self.tracer,
+            &self.missile,
+            &self.beam_light,
+            &self.beam_heavy,
+            &self.beam_pd,
+        ];
+        for (handle, material) in handles.into_iter().zip(side_glows(color)) {
+            let _ = materials.insert(handle, material);
         }
     }
 }
@@ -354,9 +412,65 @@ struct WreckPart {
 
 #[derive(Resource, Default)]
 pub struct SceneState {
+    /// Epoche des Feeds, für die die Szene steht.
     epoch: Option<u32>,
-    ships_seen: usize,
+    /// Je Schiff des Gefechts: Steht dafür gerade ein Entity in der Szene? Jedes Frame
+    /// bekommt jedes Schiff auf dem Feld, das noch keines hat, seines; so fehlt keines, ob
+    /// es von Anfang an da war, als Bordjäger startet oder mit einer Verstärkung eintrifft.
+    shown: Vec<bool>,
     wrecks_seen: usize,
+}
+
+/// Zählt, was die Schlachtkamera von der Szene wirklich zeichnet: was die Engine im letzten
+/// Frame für genau diese Kamera als sichtbar eingestuft hat (in ihrem Sichtfeld und nicht
+/// ausgeblendet). Der Selbsttest prüft damit, dass die Fotos nicht bloß den leeren Raum
+/// zeigen. Dass irgendeine Kamera die Rümpfe im Sichtfeld hat, genügt nicht: Die
+/// Kartenkamera erfasst sie auch (sie liegen in der Ebene vor ihr), zeichnet aber keine.
+#[derive(SystemParam)]
+pub struct SceneCensus<'w, 's> {
+    camera: Query<'w, 's, (Entity, &'static VisibleEntities), With<BattleCamera>>,
+    cameras: Query<'w, 's, (Entity, &'static Camera)>,
+    hulls: Query<'w, 's, (), With<ShipVisual>>,
+    wreck_parts: Query<'w, 's, (), With<WreckPart>>,
+}
+
+impl SceneCensus<'_, '_> {
+    /// Bringt die Schlachtkamera ihr Bild ins Fenster?
+    pub fn camera_shows(&self) -> bool {
+        self.camera
+            .single()
+            .is_ok_and(|(camera, _)| camera_shows(camera, &self.cameras))
+    }
+
+    /// Was die Schlachtkamera zeichnet. Eine ausgeschaltete Kamera behält die Liste aus
+    /// ihrem letzten Bild; sie zählt nicht.
+    fn drawn(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.camera
+            .single()
+            .ok()
+            .filter(|_| self.camera_shows())
+            .into_iter()
+            .flat_map(|(_, visible)| visible.entities.values().flatten().copied())
+    }
+
+    /// Rümpfe in der Szene, ob die Kamera sie erfasst oder nicht.
+    pub fn hulls(&self) -> usize {
+        self.hulls.iter().count()
+    }
+
+    /// Rümpfe, die die Schlachtkamera zeichnet.
+    pub fn visible_hulls(&self) -> usize {
+        self.drawn()
+            .filter(|entity| self.hulls.contains(*entity))
+            .count()
+    }
+
+    /// Rumpfhälften und Trümmerstücke von Wracks, die die Schlachtkamera zeichnet.
+    pub fn visible_wreck_parts(&self) -> usize {
+        self.drawn()
+            .filter(|entity| self.wreck_parts.contains(*entity))
+            .count()
+    }
 }
 
 pub(super) fn plugin(app: &mut App) {
@@ -366,7 +480,7 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                rebuild_on_epoch,
+                prepare_scene,
                 sync_ships,
                 sync_wrecks,
                 animate_wrecks,
@@ -374,7 +488,8 @@ pub(super) fn plugin(app: &mut App) {
             )
                 .chain()
                 .in_set(BattleViewSet::Scene),
-        );
+        )
+        .add_systems(Update, clear_idle_scene.run_if(shown_without_battle));
 }
 
 fn setup_assets(
@@ -432,7 +547,8 @@ pub(super) fn show_view(
     ));
 }
 
-/// Schlachtansicht ausschalten: alles zurück, Szene abräumen.
+/// Schlachtansicht ausschalten: alles zurück, Szene abräumen. Wird sie danach wieder
+/// gezeigt, baut sich alles neu auf, auch für dasselbe Gefecht.
 pub(super) fn hide_view(
     mut commands: Commands,
     mut shown: ResMut<BattleViewShown>,
@@ -453,17 +569,45 @@ pub(super) fn hide_view(
     commands.despawn_all::<With<SceneProp>>();
     commands.despawn_all::<With<BattleVisual>>();
     *state = SceneState::default();
-    *sides = SideAssets::default();
+    sides.reset();
     selected.0 = None;
     options.follow = false;
 }
 
-/// Ein anderes Gefecht im Feed: alte Szene abräumen, Materialien der neuen Parteien
-/// anlegen, Auswahl und Kamera zurücksetzen.
-pub(super) fn rebuild_on_epoch(
+/// Die Ansicht wird gezeigt, aber der Feed hält kein Gefecht (mehr).
+fn shown_without_battle(shown: Res<BattleViewShown>, feed: Res<BattleFeed>) -> bool {
+    shown.0 && !feed.is_active()
+}
+
+/// Ohne Gefecht bleibt nichts von ihm stehen.
+fn clear_idle_scene(
+    mut commands: Commands,
+    mut state: ResMut<SceneState>,
+    mut sides: ResMut<SideAssets>,
+    mut selected: ResMut<SelectedShip>,
+) {
+    if state.epoch.is_none() {
+        return;
+    }
+    commands.despawn_all::<With<BattleVisual>>();
+    *state = SceneState::default();
+    sides.reset();
+    selected.0 = None;
+}
+
+/// Bringt die Szene auf den Stand des Feeds, bevor Schiffe, Wracks und Effekte übertragen
+/// werden:
+/// - Ein anderes Gefecht: alte Szene abräumen, Auswahl und Kamera zurücksetzen.
+/// - Lage der Schiffe: Kam das Gefecht erst in diesem Frame in den Feed, gelten die
+///   schon berechneten Lagen noch für das alte; sie werden neu berechnet.
+/// - Parteien: Jede Partei des Gefechts bekommt ihre Ausstattung, auch eine, die erst
+///   mittendrin dazustößt; ändert sich ihre Farbe, wird nachgestrichen.
+pub(super) fn prepare_scene(
     mut timings: ResMut<ViewTimings>,
     mut commands: Commands,
     feed: Res<BattleFeed>,
+    data: Res<sim::GameData>,
+    mut frame: ResMut<ViewFrame>,
     mut state: ResMut<SceneState>,
     mut sides: ResMut<SideAssets>,
     assets: Res<BattleAssets>,
@@ -474,28 +618,39 @@ pub(super) fn rebuild_on_epoch(
     mut requests: MessageWriter<CameraRequest>,
 ) {
     let _span = timings.span(Part::Scene);
-    if state.epoch == Some(feed.epoch) {
+    let Some(battle) = feed.battle() else {
         return;
+    };
+    if state.epoch != Some(feed.epoch) {
+        commands.despawn_all::<With<BattleVisual>>();
+        *state = SceneState {
+            epoch: Some(feed.epoch),
+            ..default()
+        };
+        sides.reset();
+        selected.0 = None;
+        options.follow = false;
+        options.summary = true;
+        requests.write(CameraRequest::Overview);
     }
-    commands.despawn_all::<With<BattleVisual>>();
-    *state = SceneState {
-        epoch: Some(feed.epoch),
-        ..default()
-    };
-    let count = feed
-        .battle()
-        .map_or(0, |battle| battle.combatants.len())
-        .max(feed.info.sides.len());
-    *sides = SideAssets {
-        epoch: Some(feed.epoch),
-        sides: (0..count)
-            .map(|side| SideKit::build(feed.side_color(side), &assets, &mut meshes, &mut materials))
-            .collect(),
-    };
-    selected.0 = None;
-    options.follow = false;
-    options.summary = true;
-    requests.write(CameraRequest::Overview);
+    if !frame.matches(&feed) {
+        frame.refresh(&feed, 1.0, data.balance.battle.dt);
+    }
+    let count = battle.combatants.len().max(feed.info.sides.len());
+    for side in 0..count {
+        let color = feed.side_color(side);
+        match sides.sides.get_mut(side) {
+            Some(kit) if kit.color != color => {
+                kit.repaint(color, &assets, &mut meshes, &mut materials);
+            }
+            Some(_) => {}
+            None => {
+                sides
+                    .sides
+                    .push(SideKit::build(color, &assets, &mut meshes, &mut materials));
+            }
+        }
+    }
 }
 
 /// Wie stark sich eine Klasse in die Kurve legt (rad Schräglage je rad/s Drehung) und wie
@@ -536,20 +691,23 @@ fn sync_ships(
     };
     let smoothing = 1.0 - (-7.0 * time.delta_secs()).exp();
     let tick_seconds = frame.tick_seconds.max(1e-3);
+    state.shown.resize(battle.ships.len(), false);
 
     for (entity, mut visual, mut transform, mut material) in &mut hulls {
         let index = visual.index as usize;
-        let (Some(ship), Some((position, heading))) =
-            (battle.ships.get(index), frame.poses.get(index))
-        else {
-            commands.entity(entity).despawn();
-            continue;
-        };
-        if !ship.status.in_play() {
+        let in_play = battle
+            .ships
+            .get(index)
+            .filter(|ship| ship.status.in_play())
+            .zip(frame.poses.get(index));
+        let Some((ship, (position, heading))) = in_play else {
             // Zerstört oder entkommen: Das Schiff verlässt die Szene; ein Wrack übernimmt.
             commands.entity(entity).despawn();
+            if let Some(shown) = state.shown.get_mut(index) {
+                *shown = false;
+            }
             continue;
-        }
+        };
         let (lean, limit) = banking(ship.class);
         let wanted = if ship.status.can_act() {
             (-feed.turn(index) / tick_seconds * lean).clamp(-limit, limit)
@@ -595,17 +753,19 @@ fn sync_ships(
         }
     }
 
-    // Neue Schiffe (anfangs alle, später gestartete Bordjäger) bekommen ihr Entity.
-    for index in state.ships_seen..battle.ships.len() {
-        let ship = &battle.ships[index];
+    // Jedes Schiff auf dem Feld, das noch kein Entity hat, bekommt seines: anfangs alle,
+    // später gestartete Bordjäger und die Schiffe einer Verstärkung. Fehlt dafür noch
+    // etwas (Lage oder Ausstattung der Partei), ist das Schiff im nächsten Frame wieder
+    // an der Reihe.
+    for (index, ship) in battle.ships.iter().enumerate() {
+        if state.shown[index] || !ship.status.in_play() {
+            continue;
+        }
         let (Some(side), Some((position, heading))) =
             (sides.sides.get(ship.side as usize), frame.poses.get(index))
         else {
             continue;
         };
-        if !ship.status.in_play() {
-            continue;
-        }
         let class = ship.class.index();
         let look = Look::of(ship.status);
         commands.spawn((
@@ -631,18 +791,18 @@ fn sync_ships(
                 Visibility::Inherited,
             )],
         ));
+        state.shown[index] = true;
     }
-    state.ships_seen = battle.ships.len();
 }
 
 /// Zahl der Trümmerstücke je Klasse.
 fn debris_count(class: ShipClass) -> usize {
     match class {
-        ShipClass::Fighter => 2,
-        ShipClass::Corvette => 4,
-        ShipClass::Frigate => 6,
-        ShipClass::Cruiser => 9,
-        ShipClass::Battleship | ShipClass::Carrier => 14,
+        ShipClass::Fighter => 5,
+        ShipClass::Corvette => 7,
+        ShipClass::Frigate => 10,
+        ShipClass::Cruiser => 15,
+        ShipClass::Battleship | ShipClass::Carrier => 22,
     }
 }
 
@@ -653,22 +813,39 @@ fn sync_wrecks(
     assets: Res<BattleAssets>,
     sides: Res<SideAssets>,
     mut state: ResMut<SceneState>,
+    roots: Query<Entity, With<WreckRoot>>,
 ) {
     let _span = timings.span(Part::Scene);
     let Some(battle) = feed.battle() else {
         return;
     };
-    for index in state.wrecks_seen..battle.wrecks.len() {
-        let wreck = &battle.wrecks[index];
-        if let Some(side) = sides.sides.get(wreck.side as usize) {
-            spawn_wreck(&mut commands, &assets, side, feed.epoch, index, wreck);
+    if battle.wrecks.len() < state.wrecks_seen {
+        // Der Kern hängt Wracks nur an. Ist die Liste doch kürzer geworden, stimmen die
+        // Nummern der vorhandenen nicht mehr: von vorn.
+        for entity in &roots {
+            commands.entity(entity).despawn();
         }
+        state.wrecks_seen = 0;
     }
-    state.wrecks_seen = battle.wrecks.len();
+    while let Some(wreck) = battle.wrecks.get(state.wrecks_seen) {
+        // Die Ausstattung jeder Partei des Gefechts liegt vor (`prepare_scene`); ein Wrack
+        // ohne gültige Partei kann nie gezeigt werden und wird übergangen.
+        if let Some(side) = sides.sides.get(wreck.side as usize) {
+            spawn_wreck(
+                &mut commands,
+                &assets,
+                side,
+                feed.epoch,
+                state.wrecks_seen,
+                wreck,
+            );
+        }
+        state.wrecks_seen += 1;
+    }
 }
 
-/// Legt ein Wrack an: den dunklen Rumpf (bei Großkampfschiffen zwei auseinandertreibende
-/// Hälften) und einen Schwarm Trümmerstücke, der sich ausbreitet und liegen bleibt.
+/// Legt ein Wrack an: den verrußten Rumpf in zwei auseinandertreibenden Hälften und einen
+/// Schwarm Trümmerstücke, der sich über mehrere Rumpflängen ausbreitet und liegen bleibt.
 fn spawn_wreck(
     commands: &mut Commands,
     assets: &BattleAssets,
@@ -706,26 +883,23 @@ fn spawn_wreck(
         Transform::from_translation(to_world(wreck.pos)),
         Visibility::default(),
     ));
-    match &class.halves {
-        Some((fore, aft)) => {
-            // Die Hälften treiben längs auseinander, leicht versetzt.
-            let apart = radius * (0.38 + 0.2 * random.unit());
-            let skew = Vec3::new(0.0, random.signed() * 0.12, random.signed() * 0.1) * radius;
-            let fore_part = hull_part(fore.clone(), forward * apart + base * skew, &mut random);
-            let aft_part = hull_part(aft.clone(), -forward * apart - base * skew, &mut random);
-            root.with_child(fore_part);
-            root.with_child(aft_part);
-        }
-        None => {
-            let part = hull_part(class.hull.clone(), Vec3::ZERO, &mut random);
-            root.with_child(part);
-        }
-    }
-    for piece in 0..debris_count(wreck.class) {
+    // Die Hälften treiben längs auseinander, leicht versetzt.
+    let (fore, aft) = &class.halves;
+    let apart = radius * (0.38 + 0.2 * random.unit());
+    let skew = Vec3::new(0.0, random.signed() * 0.12, random.signed() * 0.1) * radius;
+    let fore_part = hull_part(fore.clone(), forward * apart + base * skew, &mut random);
+    let aft_part = hull_part(aft.clone(), -forward * apart - base * skew, &mut random);
+    root.with_child(fore_part);
+    root.with_child(aft_part);
+    let count = debris_count(wreck.class);
+    for piece in 0..count {
         let mut direction = random.direction();
         direction.y *= 0.55;
-        let reach = radius * (0.7 + 2.4 * random.unit().powi(2));
-        let size = radius * (0.07 + 0.16 * random.unit());
+        // Die Stücke verteilen sich von dicht am Wrack bis einige Rumpflängen weit; die
+        // ersten sind die großen Brocken.
+        let spread = (piece as f32 + random.unit()) / count as f32;
+        let reach = radius * (1.1 + 5.2 * spread * spread);
+        let size = radius * (0.1 + 0.26 * (1.0 - spread) * random.unit().max(0.35));
         let stretch = Vec3::new(1.0, 0.5 + 0.5 * random.unit(), 0.6 + 0.4 * random.unit());
         root.with_child((
             WreckPart {
@@ -851,18 +1025,19 @@ mod tests {
         for class in ShipClass::ALL {
             let entry = &assets.classes[class.index()];
             assert!(meshes.get(&entry.glow).is_some());
-            assert_eq!(entry.halves.is_some(), class.is_capital());
+            assert!(entry.halves.0.triangle_count() > 0 && entry.halves.1.triangle_count() > 0);
         }
         let (mesh_count, material_count) = (meshes.len(), materials.len());
         let side = SideKit::build((0.2, 0.6, 1.0), &assets, &mut meshes, &mut materials);
-        // Je Partei ein Rumpf je Klasse, dazu zwei Hälften je Großkampfschiff, und sechs
-        // Leuchtfarben. Mehr entsteht nicht, egal wie viele Schiffe kämpfen.
-        assert_eq!(meshes.len(), mesh_count + 6 + 2 * 3);
+        // Je Partei ein Rumpf und zwei Hälften je Klasse, dazu sechs Leuchtfarben. Mehr
+        // entsteht nicht, egal wie viele Schiffe kämpfen.
+        assert_eq!(meshes.len(), mesh_count + 6 + 2 * 6);
         assert_eq!(materials.len(), material_count + 6);
         for class in ShipClass::ALL {
             let entry = &side.classes[class.index()];
             assert!(meshes.get(&entry.hull).is_some());
-            assert_eq!(entry.halves.is_some(), class.is_capital());
+            assert!(meshes.get(&entry.halves.0).is_some());
+            assert!(meshes.get(&entry.halves.1).is_some());
         }
         // Fliehende und treibende Schiffe sind dunkler als kämpfende.
         let brightness = |handle: &Handle<StandardMaterial>| {
@@ -915,6 +1090,110 @@ mod tests {
         assert_eq!(side_tint((0.5, 0.5, 0.5)), [1.0, 1.0, 1.0]);
         let tint = side_tint((1.0, 0.4, 0.3));
         assert!(tint[0] == 1.0 && tint[1] < 0.2 && tint[2] < tint[1]);
+    }
+
+    fn luminance(color: LinearRgba) -> f32 {
+        0.2126 * color.red + 0.7152 * color.green + 0.0722 * color.blue
+    }
+
+    #[test]
+    fn wrecks_and_debris_are_bright_enough_to_be_seen() {
+        use bevy::mesh::VertexAttributeValues;
+        let (assets, meshes, materials) = testing::assets();
+        let material = |handle: &Handle<StandardMaterial>| materials.get(handle).unwrap();
+        let [hot, cooling, cold] = [0, 1, 2].map(|stage| material(&assets.wreck[stage]));
+        // Ein ausgekühltes Wrack wirft noch einen guten Teil des Lichts zurück und glimmt
+        // aus eigener Kraft: Auch seine Schattenseite hebt sich vom schwarzen Himmel ab.
+        assert!(luminance(cold.base_color.into()) >= 0.35);
+        assert!(luminance(cold.emissive) >= 0.02);
+        // Es bleibt dunkler als ein Schiff, das noch kämpft, und kühlt sichtbar ab.
+        let alive = material(&assets.hull_materials[0]);
+        assert!(luminance(cold.base_color.into()) < 0.6 * luminance(alive.base_color.into()));
+        assert!(luminance(hot.emissive) > 3.0 * luminance(cooling.emissive));
+        assert!(luminance(cooling.emissive) > 1.5 * luminance(cold.emissive));
+        // Trümmer ebenso: helles Material, kein Stück fast schwarz gestrichen.
+        let debris = material(&assets.debris_material);
+        assert!(luminance(debris.base_color.into()) >= 0.4);
+        assert!(luminance(debris.emissive) >= 0.01);
+        for handle in &assets.debris {
+            let Some(VertexAttributeValues::Float32x4(colors)) =
+                meshes.get(handle).unwrap().attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("Farben fehlen");
+            };
+            let darkest = colors
+                .iter()
+                .map(|c| luminance(LinearRgba::rgb(c[0], c[1], c[2])))
+                .fold(f32::MAX, f32::min);
+            assert!(darkest >= 0.25, "Trümmerstück mit Anstrich {darkest}");
+        }
+    }
+
+    #[test]
+    fn every_wreck_breaks_apart_and_scatters_debris() {
+        let (assets, mut meshes, mut materials) = testing::assets();
+        let side = SideKit::build((0.3, 0.6, 1.0), &assets, &mut meshes, &mut materials);
+        for class in ShipClass::ALL {
+            let radius = 20.0;
+            let mut world = World::new();
+            // Mehrere Wracks derselben Klasse: Die Trümmer fallen jedes Mal anders.
+            for index in 0..6 {
+                let wreck = Wreck {
+                    pos: sim::battle::V2::new(100.0 * index as f32, 0.0),
+                    vel: sim::battle::V2::ZERO,
+                    heading: 0.4,
+                    class,
+                    side: 0,
+                    radius,
+                    age: 0.0,
+                };
+                let mut commands = world.commands();
+                spawn_wreck(&mut commands, &assets, &side, 1, index, &wreck);
+                world.flush();
+            }
+            let mut parts = world.query::<(&WreckPart, &Transform)>();
+            let hulls: Vec<_> = parts.iter(&world).filter(|(part, _)| part.hull).collect();
+            let debris: Vec<_> = parts.iter(&world).filter(|(part, _)| !part.hull).collect();
+            // Jedes Wrack, auch das kleinste, liegt in zwei Teilen da: So ist es auch aus
+            // der Nähe nicht mit einem Schiff zu verwechseln, das noch fährt.
+            assert_eq!(hulls.len(), 6 * 2, "{}", class.label());
+            for (part, _) in &hulls {
+                assert!(
+                    part.drift.length() > 0.2 * radius,
+                    "die Hälften treiben auseinander"
+                );
+            }
+            // Dazu ein Trümmerfeld: etliche Stücke, die größten gut zu sehen, verteilt
+            // über mehrere Rumpflängen (eine Rumpflänge sind zwei Halbmesser).
+            assert!(debris.len() >= 6 * 5, "{}: {}", class.label(), debris.len());
+            let reach = debris
+                .iter()
+                .map(|(part, _)| part.drift.length())
+                .fold(0.0, f32::max);
+            assert!(
+                reach >= 4.0 * radius,
+                "{}: Trümmer bis {reach}",
+                class.label()
+            );
+            let largest = debris
+                .iter()
+                .map(|(_, transform)| transform.scale.max_element())
+                .fold(0.0, f32::max);
+            assert!(
+                largest >= 0.25 * radius,
+                "{}: größtes Stück {largest}",
+                class.label()
+            );
+            let smallest = debris
+                .iter()
+                .map(|(_, transform)| transform.scale.max_element())
+                .fold(f32::MAX, f32::min);
+            assert!(
+                smallest >= 0.09 * radius,
+                "{}: kleinstes Stück {smallest}",
+                class.label()
+            );
+        }
     }
 
     #[test]

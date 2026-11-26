@@ -3,6 +3,7 @@
 //! Jedes Teilsystem hält seinen Zustand als eigene Resource. Die Liste hier ist die eine
 //! Stelle, die festlegt, was zum Spielstand gehört; neue Teilsysteme tragen sich ein.
 
+use crate::ai::AiState;
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::command::{CommandLog, CommandQueue};
@@ -10,12 +11,13 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, setup_economy};
 use crate::finance::{Finance, setup_finance};
-use crate::fleet::{Fleets, setup_fleets};
+use crate::fleet::{Battles, Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
 use crate::hash::Fnv64;
 use crate::ids::PolityId;
 use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
+use crate::tech::{Research, setup_research};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -46,6 +48,8 @@ macro_rules! sim_state {
             /// Setzt den Zustand in die Welt ein und ersetzt eine laufende Partie.
             pub fn install(mut self, world: &mut World) {
                 self.galaxy.rebuild_index();
+                // Ältere Spielstände kennen neuere Listen je Gemeinschaft noch nicht.
+                self.economy.sync_polities();
                 $( world.insert_resource(self.$field); )*
             }
 
@@ -72,12 +76,15 @@ sim_state! {
     polities: Polities,
     economy: Economy,
     finance: Finance,
+    research: Research,
     logistics: Logistics,
     fleets: Fleets,
+    battles: Battles,
     diplomacy: Diplomacy,
     queue: CommandQueue,
     log: CommandLog,
     chronicle: Chronicle,
+    ai: AiState,
 }
 
 /// Abweichung der Geldmenge vom Soll (Anfangsbestand plus ausgewiesene Schöpfung).
@@ -120,10 +127,13 @@ impl SimState {
             ),
         );
         let mut economy = setup_economy(data, &galaxy, &polities);
-        let logistics = setup_logistics(data, &galaxy, &polities);
+        let mut logistics = setup_logistics(data, &galaxy, &polities);
         economy.initial_money += logistics.money();
         // Die Eliten erhalten ihr Geld aus dem der Haushalte: Die Summe bleibt gleich.
         let finance = setup_finance(data, &galaxy, &polities, &mut economy, &logistics);
+        let research = setup_research(data, &polities);
+        // Das Startwissen wirkt vom ersten Takt an, auch für Befehle vor dem ersten Tag.
+        research.publish_effects(&mut economy, &mut logistics);
         let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,
@@ -132,12 +142,15 @@ impl SimState {
             polities,
             economy,
             finance,
+            research,
             logistics,
             fleets,
+            battles: Battles::default(),
             diplomacy: Diplomacy::default(),
             queue: CommandQueue::default(),
             log: CommandLog::default(),
             chronicle,
+            ai: AiState::default(),
         }
     }
 
@@ -154,7 +167,13 @@ pub fn new_game(world: &mut World, config: SimConfig) {
     state.install(world);
 }
 
-pub const SAVE_FORMAT: u32 = 1;
+/// Format 2: Flotten bestehen aus Schiffen und führen Bauaufträge.
+/// Format 3: Gefechte laufen im taktischen Rechner und gehören zum Spielstand.
+/// Format 4: Forschung gehört zum Spielstand; Gefechte kennen das Patt und keine
+/// Gefechtspause mehr.
+/// Format 5: Staatshaushalt, Führung der Flotten durch die Gemeinschaften, Waffenruhe
+/// und der letzte Stand beendeter Gefechte gehören zum Spielstand.
+pub const SAVE_FORMAT: u32 = 5;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,12 +229,20 @@ impl SaveGame {
     }
 
     pub fn from_ron(text: &str) -> Result<Self, SaveError> {
-        let save: Self =
-            ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))?;
-        if save.format != SAVE_FORMAT {
-            return Err(SaveError::Format { found: save.format });
+        // Erst nur die Formatnummer: Der Zustand eines älteren Formats lässt sich oft gar
+        // nicht entschlüsseln, und gemeldet werden soll das Format, nicht der Folgefehler.
+        #[derive(Deserialize)]
+        struct Header {
+            format: u32,
         }
-        Ok(save)
+        let header: Header =
+            ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))?;
+        if header.format != SAVE_FORMAT {
+            return Err(SaveError::Format {
+                found: header.format,
+            });
+        }
+        ron::from_str(text).map_err(|error| SaveError::Decode(error.to_string()))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), SaveError> {

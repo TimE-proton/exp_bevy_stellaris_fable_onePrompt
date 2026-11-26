@@ -1,13 +1,14 @@
 //! Tagesschritt: Produktion, Konsum, Bevölkerung, Preise, Löhne.
 
-use super::{Economy, Money, energy_factor, lift_cost, local_yield, pay, to_money};
+use super::{
+    BUYER_SHARE, Economy, Money, book_income, energy_factor, factor_of, lift_cost, local_yield,
+    pay, to_money,
+};
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
 use crate::galaxy::Galaxy;
+use crate::ids::PlanetId;
 
-/// Anteil des Marktbestands, den ein einzelner Käufer an einem Tag höchstens abnimmt.
-/// Verhindert, dass der erste Planet eines Systems den Markt leerkauft.
-const BUYER_SHARE: f64 = 0.5;
 /// Glättung der Tageswerte (Anteil des heutigen Werts).
 const SMOOTHING: f64 = 0.1;
 
@@ -16,11 +17,16 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
     let balance = &data.balance.economy;
     let spread = balance.spread;
     let fuel = balance.fuel_id;
+    economy.sync_polities();
     let Economy {
         markets,
         planets,
         treasuries,
         tax_rates,
+        tech_yield,
+        state_income_running,
+        wage_bill_running,
+        wage_tax_running,
         ..
     } = economy;
 
@@ -61,6 +67,8 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
             local.employment = employment;
             let efactor = energy_factor(planet);
             let fuel_lift = lift_cost(data, planet, fuel);
+            // Technik hebt den Ausstoß aller Werke der Gemeinschaft bei gleichem Einsatz.
+            let tech = factor_of(tech_yield, owner);
 
             for (index, recipe) in data.recipes.iter().enumerate() {
                 // Trend der Auslastung aus dem Vortag fortschreiben.
@@ -72,7 +80,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 if capital <= 0.0 {
                     continue;
                 }
-                let yield_factor = local_yield(recipe, planet);
+                let yield_factor = local_yield(recipe, planet) * tech;
                 if yield_factor <= 0.0 {
                     continue;
                 }
@@ -165,6 +173,14 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 let tax = (wages as f64 * tax_rate).round() as Money;
                 firm.cash -= wages;
                 *treasury += tax;
+                book_income(state_income_running, owner, tax);
+                // Die besteuerbare Lohnsumme zählt auch bei einem Satz von null mit: An ihr
+                // bemisst der Haushalt, was der übliche Satz eingebracht hätte. Autonome
+                // Regionen zahlen dem Zentrum keine Steuer und zählen nicht.
+                if !local.tax_exempt {
+                    book_income(wage_bill_running, owner, wages);
+                    book_income(wage_tax_running, owner, tax);
+                }
                 local.households += wages - tax;
                 local.income_today += super::to_credits(wages - tax);
 
@@ -230,6 +246,56 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 local.needs_met[index] += SMOOTHING * (met - local.needs_met[index]);
             }
         }
+    }
+}
+
+/// Wer im Dienst des Staates steht (Besatzungen der Flotte, Forschende), lebt am Sitz
+/// seiner Gemeinschaft und kauft dort ein, was Haushalte kaufen: die Bedarfe aus
+/// `balance.ron` in ihrem Verhältnis, je Tag für höchstens den Anteil `spend_rate` seines
+/// Geldes ([`Economy::staff`]). Was der Markt nicht hergibt, bleibt in seiner Kasse und
+/// wird später ausgegeben. Dieser Verbrauch zählt bei keiner Welt zur Deckung des
+/// Bedarfs: Er ist, was Flotte und Forschung die übrigen Haushalte kosten.
+///
+/// `seats` nennt je Gemeinschaft ihren Sitz ([`crate::polity::Polity::seat`]).
+pub fn staff_consume(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    data: &GameData,
+    seats: &[Option<PlanetId>],
+) {
+    let balance = &data.balance.economy;
+    let spread = balance.spread;
+    for (index, seat) in seats.iter().enumerate() {
+        let Some(seat) = seat else {
+            continue;
+        };
+        let cash = economy.staff.get(index).copied().unwrap_or(0);
+        if cash <= 0 {
+            continue;
+        }
+        let market = &mut economy.markets[galaxy.planet(*seat).system.index()];
+        // Ein Korb wie der der Haushalte: Mengen im Verhältnis des Grundbedarfs.
+        let basket: f64 = balance
+            .needs
+            .iter()
+            .map(|need| need.per_million * market.ask(need.good_id, spread))
+            .sum();
+        if basket <= 0.0 {
+            continue;
+        }
+        let budget = to_money(super::to_credits(cash) * balance.spend_rate).min(cash);
+        let units = super::to_credits(budget) / basket;
+        let mut purse = budget;
+        for need in &balance.needs {
+            super::procure(
+                market,
+                need.good_id,
+                units * need.per_million,
+                &mut purse,
+                spread,
+            );
+        }
+        economy.staff[index] -= budget - purse;
     }
 }
 

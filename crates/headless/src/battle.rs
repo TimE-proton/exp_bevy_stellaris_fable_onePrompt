@@ -70,9 +70,23 @@ pub struct BattleArgs {
     /// Seed-Bereich.
     #[arg(long, default_value = "0..8", value_parser = crate::parse_range)]
     seeds: (u64, u64),
-    /// Kontermatrix: jede Klasse gegen jede, bei gleichem Bauwert.
+    /// Kontermatrix: jede Klasse gegen jede, bei gleichem Bauwert und in beiden
+    /// Aufstellungen (Zeile als Partei A und als Partei B).
     #[arg(long)]
     matrix: bool,
+    /// Mit --matrix: statt der Tabelle die Kontertabelle `counter` für den Block `military`
+    /// in `balance.ron` ausgeben, abgeleitet aus den Verlustanteilen der Matrix.
+    #[arg(long)]
+    ron: bool,
+    /// Spiegelgefechte: jede Klasse und eine gemischte Flotte gegen sich selbst.
+    #[arg(long)]
+    mirror: bool,
+    /// Die Paarung zusätzlich mit vertauschten Seiten rechnen.
+    #[arg(long)]
+    swap: bool,
+    /// Partei A gegen jede einzelne Klasse vom selben Bauwert, in beiden Aufstellungen.
+    #[arg(long)]
+    versus_all: bool,
     /// Bauwert je Partei in der Matrix (Standard: zwei Schlachtschiffe).
     #[arg(long)]
     budget: Option<f64>,
@@ -93,15 +107,44 @@ pub fn run(data: &GameData, args: BattleArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.matrix {
-        matrix(data, &args);
+        if args.ron {
+            counter_table(data, &args);
+        } else {
+            matrix(data, &args);
+        }
+        return ExitCode::SUCCESS;
+    }
+    if args.mirror {
+        mirror(data, &args);
         return ExitCode::SUCCESS;
     }
     if let Some(count) = args.bench {
         bench(data, count, args.seeds.0);
         return ExitCode::SUCCESS;
     }
+    if args.versus_all {
+        let Some(a) = &args.a else {
+            eprintln!("Angabe fehlt: --versus-all braucht --a");
+            return ExitCode::FAILURE;
+        };
+        match Side::parse(data, a) {
+            Ok(mut side) => {
+                side.formation = args.formation_a.into();
+                side.doctrine = args.doctrine_a.into();
+                versus_all(data, &side, args.seeds);
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let (Some(a), Some(b)) = (&args.a, &args.b) else {
-        eprintln!("Angabe fehlt: --a und --b, oder --matrix, --bench N, --designs");
+        eprintln!(
+            "Angabe fehlt: --a und --b, oder --a mit --versus-all, oder --matrix, --mirror, \
+             --bench N, --designs"
+        );
         return ExitCode::FAILURE;
     };
     let side = |text: &str| Side::parse(data, text);
@@ -131,31 +174,196 @@ pub fn run(data: &GameData, args: BattleArgs) -> ExitCode {
         trace(data, args.seeds.0, &[a.clone(), b.clone()], every);
     }
     let sides = [a, b];
-    let mut wins = [0u32; 2];
-    let mut loss = [0.0f32; 2];
-    let mut time = 0.0;
-    let runs = (args.seeds.1 - args.seeds.0) as f32;
-    for seed in args.seeds.0..args.seeds.1 {
-        let outcome = matchup::fight(data, seed, &sides);
-        if let Some(winner) = outcome.winner() {
-            wins[winner] += 1;
-        }
-        for side in 0..2 {
-            loss[side] += outcome.sides[side].loss_share();
-        }
-        time += outcome.time;
-        println!("  Seed {seed:<3} {}", describe(&outcome));
+    let outcomes = fight_many(data, args.seeds, &sides);
+    for (seed, outcome) in (args.seeds.0..).zip(&outcomes) {
+        println!("  Seed {seed:<3} {}", describe(outcome));
     }
-    println!(
-        "A siegt {}×, B siegt {}×, unentschieden {}×. Mittlerer Verlust A {:.0} %, B {:.0} %, Dauer {:.0} s.",
-        wins[0],
-        wins[1],
-        runs as u32 - wins[0] - wins[1],
-        100.0 * loss[0] / runs,
-        100.0 * loss[1] / runs,
-        time / runs
-    );
+    println!("{}", Summary::of(&outcomes, false).line("A", "B"));
+    if args.swap {
+        let swapped = [sides[1].clone(), sides[0].clone()];
+        let outcomes = fight_many(data, args.seeds, &swapped);
+        println!(
+            "Vertauscht: {}",
+            Summary::of(&outcomes, true).line("A (als B)", "B (als A)")
+        );
+    }
     ExitCode::SUCCESS
+}
+
+/// Rechnet die Paarung für alle Seeds, auf alle Kerne verteilt. Jedes Gefecht ist für
+/// sich deterministisch; die Ergebnisse kommen in Seed-Reihenfolge zurück.
+fn fight_many(data: &GameData, seeds: (u64, u64), sides: &[Side]) -> Vec<Outcome> {
+    let seeds: Vec<u64> = (seeds.0..seeds.1).collect();
+    let jobs = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(seeds.len().max(1));
+    let chunk = seeds.len().div_ceil(jobs.max(1)).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = seeds
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|seed| matchup::fight(data, *seed, sides))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("Gefechtsrechnung abgebrochen"))
+            .collect()
+    })
+}
+
+/// Zusammenfassung vieler Gefechte einer Paarung.
+#[derive(Default)]
+struct Summary {
+    runs: u32,
+    wins: [u32; 2],
+    timeouts: u32,
+    stalemates: u32,
+    loss: [f32; 2],
+    /// Mittlere Gefechtsdauer nach dem ersten Kontakt und die längste.
+    fighting: f32,
+    longest: f32,
+    /// Mittlerer Verlust des Siegers und des Verlierers.
+    winner_loss: f32,
+    loser_loss: f32,
+}
+
+impl Summary {
+    /// `swapped`: Die Seiten der Ausgänge sind vertauscht; gezählt wird aus Sicht der
+    /// ursprünglichen Paarung.
+    fn of(outcomes: &[Outcome], swapped: bool) -> Self {
+        let mut summary = Summary::default();
+        let map = |side: usize| if swapped { 1 - side } else { side };
+        for outcome in outcomes {
+            summary.runs += 1;
+            if outcome.timed_out {
+                summary.timeouts += 1;
+            }
+            if outcome.stalemate {
+                summary.stalemates += 1;
+            }
+            if let Some(winner) = outcome.winner() {
+                summary.wins[map(winner)] += 1;
+                summary.winner_loss += outcome.sides[winner].loss_share();
+                summary.loser_loss += outcome.sides[1 - winner].loss_share();
+            }
+            for side in 0..2 {
+                summary.loss[map(side)] += outcome.sides[side].loss_share();
+            }
+            summary.fighting += outcome.fighting_time();
+            summary.longest = summary.longest.max(outcome.fighting_time());
+        }
+        summary
+    }
+
+    fn decided(&self) -> u32 {
+        self.wins[0] + self.wins[1]
+    }
+
+    fn line(&self, a: &str, b: &str) -> String {
+        let runs = self.runs.max(1) as f32;
+        let decided = self.decided().max(1) as f32;
+        format!(
+            "{a} siegt {}×, {b} siegt {}×, offen {}× (Zeit um {}×, Patt {}×). Verlust {a} {:.0} %, {b} {:.0} %; \
+             Sieger {:.0} %, Verlierer {:.0} %. Gefecht nach Kontakt {:.0} s im Mittel, längstens {:.0} s.",
+            self.wins[0],
+            self.wins[1],
+            self.runs - self.decided(),
+            self.timeouts,
+            self.stalemates,
+            100.0 * self.loss[0] / runs,
+            100.0 * self.loss[1] / runs,
+            100.0 * self.winner_loss / decided,
+            100.0 * self.loser_loss / decided,
+            self.fighting / runs,
+            self.longest,
+        )
+    }
+}
+
+/// Jede Klasse gegen sich selbst, dazu eine gemischte Flotte: Gewinnt Partei A so oft wie B?
+fn mirror(data: &GameData, args: &BattleArgs) {
+    let known = vec![false; data.techs.len()];
+    let budget = args.budget.unwrap_or_else(|| default_budget(data));
+    let mut fleets: Vec<(String, Side)> = ShipClass::ALL
+        .iter()
+        .filter(|class| **class != ShipClass::Fighter)
+        .filter_map(|class| {
+            data.best_design(*class, &known)
+                .map(|design| (*class, design))
+        })
+        .map(|(class, design)| {
+            (
+                class.label().to_string(),
+                Side::for_budget(data, design, budget),
+            )
+        })
+        .collect();
+    fleets.push((
+        "gemischt".into(),
+        Side::parse(data, MIXED).expect("gemischte Flotte"),
+    ));
+    for (label, side) in fleets {
+        let outcomes = fight_many(data, args.seeds, &[side.clone(), side.clone()]);
+        let summary = Summary::of(&outcomes, false);
+        println!(
+            "{label:<15} {}×: A {:.0} % der entschiedenen. {}",
+            side.ship_count(),
+            100.0 * summary.wins[0] as f32 / summary.decided().max(1) as f32,
+            summary.line("A", "B")
+        );
+    }
+}
+
+/// Partei `fleet` gegen jede Klasse allein, vom selben Bauwert.
+fn versus_all(data: &GameData, fleet: &Side, seeds: (u64, u64)) {
+    let known = vec![false; data.techs.len()];
+    let budget = fleet.value(data);
+    for class in ShipClass::ALL {
+        let Some(design) = (class != ShipClass::Fighter)
+            .then(|| data.best_design(class, &known))
+            .flatten()
+        else {
+            continue;
+        };
+        let other = Side::for_budget(data, design, budget);
+        let forward = fight_many(data, seeds, &[fleet.clone(), other.clone()]);
+        let backward = fight_many(data, seeds, &[other.clone(), fleet.clone()]);
+        let forward = Summary::of(&forward, false);
+        let backward = Summary::of(&backward, true);
+        let runs = (forward.runs + backward.runs).max(1) as f32;
+        println!(
+            "gegen {:>2}×{:<15} (Wert {:>6.0}): siegt {:>2}/{} als A, {:>2}/{} als B; Verlust {:.0} % : {:.0} %",
+            other.ship_count(),
+            class.label(),
+            other.value(data),
+            forward.wins[0],
+            forward.runs,
+            backward.wins[0],
+            backward.runs,
+            100.0 * (forward.loss[0] + backward.loss[0]) / runs,
+            100.0 * (forward.loss[1] + backward.loss[1]) / runs,
+        );
+    }
+}
+
+/// Eine ausgewogene Flotte vom Wert zweier Schlachtschiffe.
+const MIXED: &str = "bastion:1,speer:1,waechter:1,dolch:2";
+
+fn default_budget(data: &GameData) -> f64 {
+    let known = vec![false; data.techs.len()];
+    ShipClass::ALL
+        .iter()
+        .filter(|class| **class != ShipClass::Fighter)
+        .filter_map(|class| data.best_design(*class, &known))
+        .map(|design| data.designs[design as usize].stats.value)
+        .fold(0.0, f64::max)
+        * 2.0
 }
 
 fn counts(values: &[u32; 6]) -> String {
@@ -187,6 +395,7 @@ fn describe(outcome: &Outcome) -> String {
         Some(0) => "A siegt",
         Some(_) => "B siegt",
         None if outcome.timed_out => "Zeit um",
+        None if outcome.stalemate => "Patt",
         None => "kein Sieger",
     };
     let side = |index: usize| {
@@ -254,62 +463,111 @@ fn list_designs(data: &GameData) {
     }
 }
 
-/// Jede Klasse gegen jede bei gleichem Bauwert. Eine Zelle zeigt, wie oft die Zeilenklasse
-/// siegt, und dahinter die mittleren Verlustanteile beider Seiten.
+/// Jede Klasse gegen jede bei gleichem Bauwert, in beiden Aufstellungen. Eine Zelle zeigt,
+/// wie oft die Zeilenklasse als Partei A und als Partei B siegt, dahinter die mittleren
+/// Verlustanteile beider Seiten.
 fn matrix(data: &GameData, args: &BattleArgs) {
     let known = vec![false; data.techs.len()];
-    let classes: Vec<(ShipClass, u16)> = ShipClass::ALL
+    let mut classes: Vec<(String, Side)> = ShipClass::ALL
         .iter()
         .filter(|class| **class != ShipClass::Fighter)
         .filter_map(|class| {
             data.best_design(*class, &known)
                 .map(|design| (*class, design))
         })
+        .map(|(class, design)| {
+            let budget = args.budget.unwrap_or_else(|| default_budget(data));
+            let side = Side::for_budget(data, design, budget);
+            (format!("{}×{}", side.ship_count(), class.label()), side)
+        })
         .collect();
-    let budget = args.budget.unwrap_or_else(|| {
-        classes
-            .iter()
-            .map(|(_, design)| data.designs[*design as usize].stats.value)
-            .fold(0.0, f64::max)
-            * 2.0
-    });
+    classes.push((
+        "gemischt".into(),
+        Side::parse(data, MIXED).expect("gemischte Flotte"),
+    ));
     println!(
-        "Bauwert je Partei: {budget:.0}. Zelle: Siege der Zeile / Läufe, Verlust Zeile % : Spalte %."
+        "Bauwert je Partei: {:.0}. Zelle: Siege der Zeile als A / als B (je {} Läufe), Verlust Zeile % : Spalte %.",
+        args.budget.unwrap_or_else(|| default_budget(data)),
+        args.seeds.1 - args.seeds.0
     );
-    print!("{:<16}", "");
-    for (class, design) in &classes {
-        let count = Side::for_budget(data, *design, budget).ship_count();
-        print!("{:>18}", format!("{}×{}", count, class.label()));
+    print!("{:<18}", "");
+    for (label, _) in &classes {
+        print!("{label:>20}");
     }
     println!();
-    let runs = args.seeds.1 - args.seeds.0;
-    for (row_class, row_design) in &classes {
-        print!("{:<16}", row_class.label());
-        for (_, column_design) in &classes {
-            let sides = [
-                Side::for_budget(data, *row_design, budget),
-                Side::for_budget(data, *column_design, budget),
-            ];
-            let (mut wins, mut loss_row, mut loss_column) = (0, 0.0, 0.0);
-            for seed in args.seeds.0..args.seeds.1 {
-                let outcome = matchup::fight(data, seed, &sides);
-                if outcome.better_side() == Some(0) {
-                    wins += 1;
-                }
-                loss_row += outcome.sides[0].loss_share();
-                loss_column += outcome.sides[1].loss_share();
-            }
+    for (row_label, row) in &classes {
+        print!("{row_label:<18}");
+        for (_, column) in &classes {
+            let forward = fight_many(data, args.seeds, &[row.clone(), column.clone()]);
+            let backward = fight_many(data, args.seeds, &[column.clone(), row.clone()]);
+            let forward = Summary::of(&forward, false);
+            let backward = Summary::of(&backward, true);
+            let runs = (forward.runs + backward.runs).max(1) as f32;
             print!(
-                "{:>18}",
+                "{:>20}",
                 format!(
-                    "{wins}/{runs} {:>3.0}:{:<3.0}",
-                    100.0 * loss_row / runs as f32,
-                    100.0 * loss_column / runs as f32
+                    "{}/{} {:>3.0}:{:<3.0}",
+                    forward.wins[0],
+                    backward.wins[0],
+                    100.0 * (forward.loss[0] + backward.loss[0]) / runs,
+                    100.0 * (forward.loss[1] + backward.loss[1]) / runs
                 )
             );
         }
         println!();
     }
+}
+
+/// Sockel der Kontertabelle: Ein Verlustanteil von null zählt nicht als unendlich gut.
+const COUNTER_FLOOR: f32 = 0.25;
+
+/// Die Kontertabelle für `balance.ron: military.counter`, abgeleitet aus der Matrix: jede
+/// Klasse gegen jede bei gleichem Bauwert, in beiden Aufstellungen. Der Wert einer Zelle
+/// ist die Wurzel aus dem Verhältnis der Verlustanteile (Spalte zu Zeile, je mit einem
+/// Sockel): 1 heißt gleichwertig, über 1 ist die Zeilenklasse der Spaltenklasse überlegen.
+/// Zwei reine Flotten gleichen Werts stehen dann im Kräfteverhältnis Zelle durch
+/// Gegenzelle. Jäger kämpfen nur mit ihrem Träger und stehen mit 1 in der Tabelle.
+fn counter_table(data: &GameData, args: &BattleArgs) {
+    let known = vec![false; data.techs.len()];
+    let budget = args.budget.unwrap_or_else(|| default_budget(data));
+    let side = |class: ShipClass| {
+        (class != ShipClass::Fighter)
+            .then(|| data.best_design(class, &known))
+            .flatten()
+            .map(|design| Side::for_budget(data, design, budget))
+    };
+    println!(
+        "        // Kontertabelle: Zeile gegen Spalte in der Reihenfolge Jäger, Korvette, Fregatte,\n\
+         \x20       // Kreuzer, Schlachtschiff, Träger. Abgeleitet mit `headless battle --matrix --ron\n\
+         \x20       // --seeds {}..{}` bei Bauwert {budget:.0} je Partei.\n\
+         \x20       counter: [",
+        args.seeds.0, args.seeds.1
+    );
+    for row_class in ShipClass::ALL {
+        let mut cells = Vec::new();
+        for column_class in ShipClass::ALL {
+            let value = match (side(row_class), side(column_class)) {
+                (Some(row), Some(column)) if row_class != column_class => {
+                    let forward = fight_many(data, args.seeds, &[row.clone(), column.clone()]);
+                    let backward = fight_many(data, args.seeds, &[column, row]);
+                    let forward = Summary::of(&forward, false);
+                    let backward = Summary::of(&backward, true);
+                    let runs = (forward.runs + backward.runs).max(1) as f32;
+                    let own = (forward.loss[0] + backward.loss[0]) / runs;
+                    let other = (forward.loss[1] + backward.loss[1]) / runs;
+                    ((COUNTER_FLOOR + other) / (COUNTER_FLOOR + own)).sqrt()
+                }
+                _ => 1.0,
+            };
+            cells.push(format!("{value:.2}"));
+        }
+        println!(
+            "            [{}], // {}",
+            cells.join(", "),
+            row_class.label()
+        );
+    }
+    println!("        ],");
 }
 
 /// Zwei gemischte Flotten, dazu Zeit je Takt und Höchststand an Geschossen.
@@ -387,8 +645,9 @@ fn trace(data: &GameData, seed: u64, sides: &[Side], every: f32) {
                 let ammo: f32 = ships.iter().map(|ship| ship.ammo).sum();
                 let morale: f32 =
                     ships.iter().map(|ship| ship.morale).sum::<f32>() / ships.len().max(1) as f32;
+                let dealt = combatant.damage_dealt;
                 line += &format!(
-                    "   {}: {} aktiv ({}), Rumpf {hull:.0} Schild {shield:.0} Panzer {armor:.0} Mun {ammo:.0} Moral {morale:.0}{}  Anker ({:.0},{:.0})",
+                    "   {}: {} aktiv ({}), Rumpf {hull:.0} Schild {shield:.0} Panzer {armor:.0} Mun {ammo:.0} Moral {morale:.0}{}  Anker ({:.0},{:.0}) Schaden S/G/L/P {:.0}/{:.0}/{:.0}/{:.0}",
                     if index == 0 { "A" } else { "B" },
                     ships.len(),
                     counts(&battle.active_by_class(index)),
@@ -399,6 +658,10 @@ fn trace(data: &GameData, seed: u64, sides: &[Side], every: f32) {
                     },
                     combatant.anchor.x,
                     combatant.anchor.y,
+                    dealt[0],
+                    dealt[1],
+                    dealt[2],
+                    dealt[3],
                 );
             }
             line += &format!("   Geschosse {}", battle.shots.len());

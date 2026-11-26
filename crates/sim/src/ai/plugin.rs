@@ -1,17 +1,21 @@
-use super::best_colony_target;
+use super::military::{Situation, lead_fleets, plan_month};
+use super::{AiState, MilitaryMode, best_colony_target};
 use crate::clock::{SimClock, day_start, month_start};
 use crate::command::{CommandQueue, CommandSource, SimCommand};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, to_credits};
+use crate::economy::{Economy, Money, to_credits, to_money};
 use crate::finance::{Finance, Stage};
+use crate::fleet::{Battles, Fleets, fleet_claim};
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId};
-use crate::polity::Polities;
+use crate::polity::{Polities, claimable_planets};
 use crate::state::SimConfig;
+use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemParam;
 
 pub struct AiPlugin;
 
@@ -22,11 +26,63 @@ impl Plugin for AiPlugin {
             (
                 expand.run_if(day_start),
                 steward_finances.run_if(month_start),
+                plan_military.run_if(month_start),
+                lead_military.run_if(day_start),
             )
                 .chain()
                 .in_set(SimSet::Ai),
         );
     }
+}
+
+/// Lesender Zugriff der militärischen Führung auf den Stand der Welt.
+#[derive(SystemParam)]
+struct MilitaryView<'w> {
+    data: Res<'w, GameData>,
+    galaxy: Res<'w, Galaxy>,
+    polities: Res<'w, Polities>,
+    economy: Res<'w, Economy>,
+    fleets: Res<'w, Fleets>,
+    battles: Res<'w, Battles>,
+    diplomacy: Res<'w, Diplomacy>,
+    research: Res<'w, Research>,
+    clock: Res<'w, SimClock>,
+}
+
+impl MilitaryView<'_> {
+    fn situation(&self) -> Situation<'_> {
+        Situation {
+            data: &self.data,
+            galaxy: &self.galaxy,
+            polities: &self.polities,
+            economy: &self.economy,
+            fleets: &self.fleets,
+            battles: &self.battles,
+            diplomacy: &self.diplomacy,
+            research: &self.research,
+            day: self.clock.day(),
+        }
+    }
+}
+
+/// Monatsbeginn: Forschungspolitik, Rüstung und Stilllegung ([`plan_month`]).
+fn plan_military(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    mut ai: ResMut<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    plan_month(&view.situation(), &mut ai, &mut queue, config.player);
+}
+
+/// Tagesbeginn: Führung der Flotten ([`lead_fleets`]).
+fn lead_military(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    mut ai: ResMut<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    lead_fleets(&view.situation(), &mut ai, &mut queue, config.player);
 }
 
 /// Jede KI-Gemeinschaft, in ID-Reihenfolge, gründet eine Kolonie, sobald sie darf.
@@ -40,8 +96,17 @@ fn expand(
     mut queue: ResMut<CommandQueue>,
 ) {
     let day = clock.day();
+    let balance = &data.balance.economy;
     for polity in polities.alive() {
         if config.player == Some(polity.id) || polity.next_claim_day > day {
+            continue;
+        }
+        // Eine KI gründet nur aus dem, was über dem Sockel ihrer Rücklage liegt: Der
+        // Sockel bleibt für die Ansprüche des Haushalts in schwachen Monaten. Das Geld
+        // dafür spart sie über ihr Rücklagenziel an (`steward_finances`).
+        let free = economy.treasury(polity.id)
+            - to_money(galaxy.population_of(polity.id) * balance.state_reserve_per_million);
+        if free < to_money(data.balance.colonization.cost) {
             continue;
         }
         if let Some(planet) =
@@ -59,16 +124,22 @@ fn expand(
 /// Finanzpolitik der KI-Staaten, einmal im Monat.
 ///
 /// Zusammenhalt: Wo eine Region unruhig wird und der Staat noch viele Anteile an ihren
-/// Betrieben hält, überträgt er einen Teil an den Fonds der Region. Krieg: Ist die Kasse
-/// leer, werden Anleihen ausgegeben und eine Rücklage aufgebaut.
+/// Betrieben hält, überträgt er einen Teil an den Fonds der Region. Ausdehnung: Solange es
+/// etwas zu besiedeln gibt, hebt der Staat sein Rücklagenziel um die Kosten einer Gründung
+/// über den Sockel; der Haushalt füllt sie auf, bevor er ausschüttet. Flotte: Wer rüstet,
+/// hält dazu einige Monate Sold und Wartung zurück (`military.ai.reserve_months`). Krieg: Ist die Kasse
+/// leer, werden Anleihen ausgegeben und eine Kriegskasse aufgebaut.
 fn steward_finances(
     data: Res<GameData>,
     config: Res<SimConfig>,
+    clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
     economy: Res<Economy>,
     finance: Res<Finance>,
     diplomacy: Res<Diplomacy>,
+    fleets: Res<Fleets>,
+    ai: Res<AiState>,
     mut queue: ResMut<CommandQueue>,
 ) {
     let cohesion = &data.balance.finance.cohesion;
@@ -127,18 +198,53 @@ fn steward_finances(
             }
         }
 
+        // Koloniefonds: der Sockel der Rücklage und die Kosten einer Gründung, solange
+        // noch eine Welt in Reichweite frei ist (Kasse und Wartefrist außer Acht).
+        let base = galaxy.population_of(polity.id) * data.balance.economy.state_reserve_per_million;
+        let prospects = !claimable_planets(
+            &galaxy,
+            &polities,
+            &data.balance.colonization,
+            Money::MAX,
+            polity.id,
+            clock.day().max(polity.next_claim_day),
+        )
+        .is_empty();
+        let colony_fund = if prospects {
+            base + data.balance.colonization.cost
+        } else {
+            0.0
+        };
+        // Rücklage für die Flotte: Die Einnahmen schwanken von Monat zu Monat stark, Sold
+        // und Wartung nicht. Wer rüstet, hält deshalb einige Monate Flottenkosten zurück,
+        // damit ein schwacher Abschnitt nicht gleich Sold kostet.
+        let fleet_fund = if ai.mode(polity.id) == MilitaryMode::Resting {
+            0.0
+        } else {
+            data.balance.military.ai.reserve_months
+                * to_credits(fleet_claim(&data, &galaxy, &economy, &fleets, polity))
+        };
+        let colony_fund = if fleet_fund > 0.0 {
+            colony_fund.max(base) + fleet_fund
+        } else {
+            colony_fund
+        };
+        let target = to_credits(economy.treasury_targets[polity.id.index()]);
+
         // Kriegsfinanzierung.
         let treasury = to_credits(economy.treasury(polity.id));
         if diplomacy.is_at_war(polity.id) {
             let revenue = finance.polity(polity.id).revenue.max(100.0);
-            if economy.treasury_targets[polity.id.index()] == 0 {
-                queue.push(
-                    polity.id,
-                    CommandSource::Ai,
-                    SimCommand::SetTreasuryTarget {
-                        amount: revenue * 24.0,
-                    },
-                );
+            // Die Kriegskasse wird einmal gesetzt: wenn das Ziel noch das des Friedens ist.
+            if target <= colony_fund.max(base) * 1.05 {
+                let chest = (revenue * 24.0).max(colony_fund);
+                if (chest - target).abs() > 0.02 * target.max(1.0) {
+                    queue.push(
+                        polity.id,
+                        CommandSource::Ai,
+                        SimCommand::SetTreasuryTarget { amount: chest },
+                    );
+                }
             }
             if treasury < revenue * 3.0 {
                 queue.push(
@@ -149,11 +255,13 @@ fn steward_finances(
                     },
                 );
             }
-        } else if economy.treasury_targets[polity.id.index()] != 0 {
+        } else if (target - colony_fund).abs() > 0.02 * colony_fund.max(1.0) {
             queue.push(
                 polity.id,
                 CommandSource::Ai,
-                SimCommand::SetTreasuryTarget { amount: 0.0 },
+                SimCommand::SetTreasuryTarget {
+                    amount: colony_fund,
+                },
             );
         }
     }

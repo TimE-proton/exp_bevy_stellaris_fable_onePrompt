@@ -2,12 +2,12 @@
 //! werden ausgeglichen.
 
 use super::{
-    Economy, EquityFlows, Money, expected_return, pay, recipes_of, to_credits, to_money,
-    unit_economics,
+    Economy, EquityFlows, Money, book_income, expected_return, factor_of, pay, recipes_of,
+    to_credits, to_money, unit_economics_at,
 };
 use crate::data::{GameData, Sector};
 use crate::galaxy::Galaxy;
-use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
+use crate::ids::{HolderId, IssuerId, PlanetId, PolityId, SystemId};
 
 const MONTHS_PER_YEAR: f64 = 12.0;
 
@@ -26,7 +26,10 @@ pub fn invest_and_depreciate(
     let balance = &data.balance.economy;
     let machines = balance.capital_good_id;
     let Economy {
-        markets, planets, ..
+        markets,
+        planets,
+        tech_yield,
+        ..
     } = economy;
     for market in markets.iter_mut() {
         market.standing[machines.index()] = 0.0;
@@ -43,11 +46,13 @@ pub fn invest_and_depreciate(
         let market = &mut markets[planet.system.index()];
         let local = &mut planets[planet.id.index()];
         let labor_supply = planet.population * balance.workforce_share;
+        // Investoren rechnen mit dem Ertrag, den die Technik der Gemeinschaft hergibt.
+        let tech = factor_of(tech_yield, owner);
 
         // Erwartete Rendite je Rezept zu heutigen Preisen und Löhnen.
         let mut returns = vec![f64::MIN; data.recipes.len()];
         for (index, recipe) in data.recipes.iter().enumerate() {
-            let economics = unit_economics(data, planet, local.wage, market, recipe);
+            let economics = unit_economics_at(data, planet, local.wage, market, recipe, tech);
             if economics.local_yield > 0.0 {
                 // Bestehende Werke rechnen mit ihrer tatsächlichen Auslastung: Wer nicht
                 // absetzen kann, verdient auch bei guten Preisen nichts.
@@ -103,7 +108,7 @@ pub fn invest_and_depreciate(
             let mut monthly_cost = 0.0;
             let mut best: Option<(usize, f64)> = None;
             for (index, recipe) in recipes_of(data, sector) {
-                let economics = unit_economics(data, planet, local.wage, market, recipe);
+                let economics = unit_economics_at(data, planet, local.wage, market, recipe, tech);
                 monthly_cost += local.capital[index]
                     * (economics.inputs + economics.energy + economics.lift + economics.wages)
                     * balance.firm_reserve_days;
@@ -335,8 +340,9 @@ pub fn migrate(galaxy: &mut Galaxy, economy: &mut Economy, data: &GameData, poli
     }
 }
 
-/// Kontore führen Überschüsse als Zölle ab, Staaten geben aus, was über ihre Rücklage
-/// hinausgeht (bis zum Ausbau des Haushalts: als Leistungen an die Haushalte).
+/// Kontore führen Überschüsse als Zölle ab. Was der Staat mit seinen Einnahmen tut, regelt
+/// sein Haushalt ([`super::settle_budget`]); dazu gehört das Kapital, das er Kontoren ohne
+/// Kasse nachschießt ([`market_capital_needs`]).
 pub fn settle_public_accounts(
     galaxy: &Galaxy,
     economy: &mut Economy,
@@ -344,6 +350,7 @@ pub fn settle_public_accounts(
     flows: &mut EquityFlows,
 ) {
     let balance = &data.balance.economy;
+    economy.sync_polities();
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
             continue;
@@ -360,22 +367,6 @@ pub fn settle_public_accounts(
         let working =
             to_money(market.turnover * balance.market_reserve_days + 0.5 * stock_value + 1500.0);
         let excess = market.cash - working;
-        // Ein Kontor ohne Kasse kann keinem Frachter etwas abkaufen. Der Staat schießt
-        // dann Kapital nach und erhält dafür neue Anteile.
-        let floor = to_money(600.0);
-        if market.cash < floor {
-            let needed = to_money(1500.0) - market.cash;
-            let got = pay(
-                &mut economy.treasuries[owner.index()],
-                &mut market.cash,
-                needed,
-            );
-            if got > 0 {
-                flows
-                    .injections
-                    .push((IssuerId::Kontor(system.id), HolderId::State(owner), got));
-            }
-        }
         if excess > 0 {
             // Die Hälfte ist Zoll, die andere Hälfte Gewinn der Anteilseigner des Kontors.
             let tariff = pay(
@@ -388,30 +379,81 @@ pub fn settle_public_accounts(
             flows
                 .dividends
                 .push((IssuerId::Kontor(system.id), dividend));
+            book_income(&mut economy.state_income_running, owner, tariff);
         }
     }
-    for polity in 0..economy.treasuries.len() {
-        let id = PolityId::from_index(polity);
-        let population = galaxy.population_of(id);
-        if population <= 0.0 {
-            continue;
-        }
-        let reserve = to_money(population * balance.state_reserve_per_million)
-            .max(economy.treasury_targets[polity]);
-        let excess = economy.treasuries[polity] - reserve;
-        if excess <= 0 {
-            continue;
-        }
-        let budget = excess / 2;
-        let mut spent: Money = 0;
-        for planet in galaxy.planets_of(id) {
-            let share = (budget as f64 * planet.population / population) as Money;
-            economy.planets[planet.id.index()].households += share;
-            economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
-            spent += share;
-        }
-        economy.treasuries[polity] -= spent;
+}
+
+/// Kasse, unter der ein Kontor als leer gilt, und der Stand, auf den der Staat sie auffüllt.
+const MARKET_CASH_FLOOR: f64 = 600.0;
+const MARKET_CASH_REFILL: f64 = 1500.0;
+
+/// Kontore im Gebiet einer Gemeinschaft, deren Kasse leer ist, mit dem Kapital, das ihnen
+/// fehlt, in der Reihenfolge der Systeme. Ein Kontor ohne Kasse kann keinem Frachter etwas
+/// abkaufen; der Staat schießt Kapital nach, soweit sein Haushalt es hergibt, und erhält
+/// dafür neue Anteile.
+pub fn market_capital_needs(
+    galaxy: &Galaxy,
+    economy: &Economy,
+    polity: PolityId,
+) -> Vec<(SystemId, Money)> {
+    galaxy
+        .systems
+        .iter()
+        .filter(|system| galaxy.system_owner(system.id) == Some(polity))
+        .filter_map(|system| {
+            let cash = economy.markets[system.index()].cash;
+            (cash < to_money(MARKET_CASH_FLOOR))
+                .then(|| (system.id, to_money(MARKET_CASH_REFILL) - cash))
+        })
+        .collect()
+}
+
+/// Rücklage, die ein Staat mit `population` Millionen Einwohnern hält: ein Sockel je
+/// Einwohner, mindestens aber die befohlene (`treasury_targets`). Nur was darüber liegt,
+/// gibt er aus.
+pub fn state_reserve(
+    economy: &Economy,
+    data: &GameData,
+    polity: PolityId,
+    population: f64,
+) -> Money {
+    let ordered = economy
+        .treasury_targets
+        .get(polity.index())
+        .copied()
+        .unwrap_or(0);
+    to_money(population * data.balance.economy.state_reserve_per_million).max(ordered)
+}
+
+/// Der Staat zahlt `budget` an die Haushalte seiner Welten, verteilt nach Bevölkerung:
+/// Grundleistungen und Ausschüttung. (Sold und Gehälter gehen nicht hierhin, sondern an
+/// den Staatsdienst: `Economy::pay_staff`.) Gezahlt wird nie mehr, als die Kasse hergibt;
+/// die Kasse sinkt um genau den Betrag, den die Haushalte erhalten. Gibt ihn zurück; der
+/// Rundungsrest bleibt in der Kasse.
+pub fn pay_households(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    polity: PolityId,
+    budget: Money,
+) -> Money {
+    let Some(treasury) = economy.treasuries.get(polity.index()).copied() else {
+        return 0;
+    };
+    let budget = budget.min(treasury);
+    let population = galaxy.population_of(polity);
+    if budget <= 0 || population <= 0.0 {
+        return 0;
     }
+    let mut spent: Money = 0;
+    for planet in galaxy.planets_of(polity) {
+        let share = (budget as f64 * planet.population / population) as Money;
+        economy.planets[planet.id.index()].households += share;
+        economy.planets[planet.id.index()].income_today += to_credits(share) / 30.0;
+        spent += share;
+    }
+    economy.treasuries[polity.index()] -= spent;
+    spent
 }
 
 /// Geldmengensteuerung: Wächst die Wirtschaft, ohne dass Geld nachkommt, fallen die Preise

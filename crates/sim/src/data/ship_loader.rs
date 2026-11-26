@@ -306,6 +306,7 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     }
 
     // --- Hangars: Bordjäger auflösen und ihre Kosten aufschlagen ---
+    let standoff = data.balance.battle.carrier_standoff;
     for index in 0..data.designs.len() {
         let file = "designs.ron";
         let key = data.designs[index].key.clone();
@@ -374,8 +375,9 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             return Err(invalid(file, format!("`{key}`: Jäger ohne Waffe")));
         }
         // Träger halten Abstand: Ihre Hauptwaffe sind die Jäger.
+        stats.gun_range = stats.main_range;
         if stats.fighters > 0 {
-            stats.main_range = stats.main_range.max(900.0);
+            stats.main_range = stats.main_range.max(standoff);
         }
     }
     for module in &mut data.modules {
@@ -412,6 +414,7 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     military.hull_good_id = hull_good;
     military.ammo_good_id = good("balance.ron", "military.ammo_good", &military.ammo_good)?;
     military.starting_fleet_ids.clear();
+    let mut starting_value = 0.0;
     for (key, count) in &military.starting_fleet {
         let index = design_keys
             .iter()
@@ -422,13 +425,319 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
                     format!("military.starting_fleet: unbekannter Entwurf `{key}`"),
                 )
             })?;
+        let stats = &data.designs[index].stats;
+        if *count == 0 || stats.class == ShipClass::Fighter {
+            return Err(invalid(
+                "balance.ron",
+                format!(
+                    "military.starting_fleet: `{key}` braucht eine Anzahl ab 1 und darf kein Bordjäger sein"
+                ),
+            ));
+        }
+        starting_value += stats.value * *count as f64;
         military.starting_fleet_ids.push((index as u16, *count));
+    }
+    // Die Startflotte ist das Maß der Flottenstärke: Ohne sie gäbe es keinen Maßstab.
+    let start_strength = data.balance.fleets.start_strength as f64;
+    if starting_value <= 0.0 || !(start_strength.is_finite() && start_strength > 0.0) {
+        return Err(invalid(
+            "balance.ron",
+            "military.starting_fleet darf nicht leer sein, fleets.start_strength muss positiv sein"
+                .into(),
+        ));
+    }
+    military.strength_per_value = start_strength / starting_value;
+    military.starting_fleet_value = starting_value;
+    let unit = 0.0..=1.0;
+    let checks = [
+        (
+            "layup_salvage muss in 0..1 liegen",
+            unit.contains(&military.layup_salvage),
+        ),
+        (
+            "upkeep_per_month muss in 0..1 liegen",
+            unit.contains(&military.upkeep_per_month),
+        ),
+        (
+            "maintenance_per_month muss in 0..1 liegen",
+            unit.contains(&military.maintenance_per_month),
+        ),
+        (
+            "arrears_smoothing muss über 0 und höchstens 1 sein",
+            military.arrears_smoothing > 0.0 && military.arrears_smoothing <= 1.0,
+        ),
+        (
+            "yard_capital_per_slot muss positiv sein",
+            military.yard_capital_per_slot > 0.0 && military.yard_capital_per_slot.is_finite(),
+        ),
+        (
+            "yard_open_capital muss positiv sein, yard_close_capital positiv und nicht größer",
+            military.yard_open_capital > 0.0
+                && military.yard_open_capital.is_finite()
+                && military.yard_close_capital > 0.0
+                && military.yard_close_capital <= military.yard_open_capital,
+        ),
+        (
+            "yard_grace_days muss mindestens 1 sein",
+            military.yard_grace_days >= 1,
+        ),
+        (
+            "yard_fee muss in 0..5 liegen",
+            (0.0..=5.0).contains(&military.yard_fee),
+        ),
+        (
+            "yard_queue muss mindestens 1 sein",
+            military.yard_queue >= 1,
+        ),
+        (
+            "repair_per_day muss über 0 und höchstens 1 sein",
+            military.repair_per_day > 0.0 && military.repair_per_day <= 1.0,
+        ),
+        (
+            "repair_parts darf nicht negativ sein",
+            military.repair_parts >= 0.0 && military.repair_parts.is_finite(),
+        ),
+        (
+            "resupply_per_day muss über 0 und höchstens 1 sein",
+            military.resupply_per_day > 0.0 && military.resupply_per_day <= 1.0,
+        ),
+        (
+            "fuel_per_distance darf nicht negativ sein",
+            military.fuel_per_distance >= 0.0 && military.fuel_per_distance.is_finite(),
+        ),
+        (
+            "fuel_per_day muss in 0..1 liegen",
+            (0.0..=1.0).contains(&military.fuel_per_day),
+        ),
+        (
+            "dry_speed muss über 0 und höchstens 1 sein",
+            military.dry_speed > 0.0 && military.dry_speed <= 1.0,
+        ),
+        (
+            "module_weight und repair_hull_share müssen in 0..1 liegen",
+            (0.0..=1.0).contains(&military.module_weight)
+                && (0.0..=1.0).contains(&military.repair_hull_share),
+        ),
+        (
+            "ammo_goods und fuel_goods dürfen nicht negativ sein",
+            military.ammo_goods >= 0.0
+                && military.ammo_goods.is_finite()
+                && military.fuel_goods >= 0.0
+                && military.fuel_goods.is_finite(),
+        ),
+        (
+            "morale_per_arrears muss in 0..100 liegen",
+            (0.0..=100.0).contains(&military.morale_per_arrears),
+        ),
+        (
+            // Ohne Sammelfrist stünde eine geschlagene Flotte am nächsten Morgen wieder im
+            // Gefecht, und ein unentschiedenes begänne sofort von vorn.
+            "regroup_days muss mindestens 1 sein",
+            military.regroup_days >= 1,
+        ),
+        (
+            // Sonst ließe sich eine Sammelfrist mit Frieden und neuem Krieg abkürzen.
+            "truce_days darf nicht unter regroup_days liegen",
+            military.truce_days >= military.regroup_days,
+        ),
+        (
+            "weariness_per_navy_lost muss in 0..100 liegen",
+            (0.0..=100.0).contains(&military.weariness_per_navy_lost),
+        ),
+        (
+            "heavy_defeat_share muss über 0 und höchstens 1 sein",
+            military.heavy_defeat_share > 0.0 && military.heavy_defeat_share <= 1.0,
+        ),
+        (
+            "defeat_shock muss über 0 und höchstens 1 sein",
+            military.defeat_shock > 0.0 && military.defeat_shock <= 1.0,
+        ),
+        (
+            "debris_fade_per_month muss über 0 und höchstens 1 sein",
+            military.debris_fade_per_month > 0.0 && military.debris_fade_per_month <= 1.0,
+        ),
+    ];
+    for (message, ok) in checks {
+        if !ok {
+            return Err(invalid("balance.ron", format!("military: {message}")));
+        }
+    }
+    let classes = ShipClass::ALL.len();
+    let table_ok = military.counter.len() == classes
+        && military.counter.iter().all(|row| {
+            row.len() == classes && row.iter().all(|cell| cell.is_finite() && *cell > 0.0)
+        });
+    if !table_ok {
+        return Err(invalid(
+            "balance.ron",
+            format!("military.counter braucht {classes} Zeilen mit je {classes} positiven Werten"),
+        ));
+    }
+    let ai = &military.ai;
+    let ai_checks = [
+        (
+            "peace_share und max_share müssen in 0..1 liegen, max_share nicht unter peace_share",
+            unit.contains(&ai.peace_share)
+                && unit.contains(&ai.max_share)
+                && ai.max_share >= ai.peace_share,
+        ),
+        ("threat_jumps muss mindestens 1 sein", ai.threat_jumps >= 1),
+        (
+            "war_weight und war_factor müssen mindestens 1 sein, threat_gain darf nicht negativ sein",
+            ai.war_weight >= 1.0
+                && ai.war_weight.is_finite()
+                && ai.war_factor >= 1.0
+                && ai.war_factor.is_finite()
+                && ai.threat_gain >= 0.0
+                && ai.threat_gain.is_finite(),
+        ),
+        (
+            "reserve_months darf nicht negativ sein",
+            ai.reserve_months >= 0.0 && ai.reserve_months.is_finite(),
+        ),
+        (
+            "room_use und mix_weight müssen in 0..1 liegen",
+            unit.contains(&ai.room_use) && unit.contains(&ai.mix_weight),
+        ),
+        (
+            "defend_odds muss positiv sein, offensive_odds nicht kleiner, retreat_odds zwischen 0 und defend_odds",
+            ai.defend_odds > 0.0
+                && ai.offensive_odds >= ai.defend_odds
+                && ai.offensive_odds.is_finite()
+                && ai.retreat_odds >= 0.0
+                && ai.retreat_odds <= ai.defend_odds,
+        ),
+        (
+            "break_off_supply muss unter ready_supply liegen, beide in 0..1",
+            ai.break_off_supply >= 0.0
+                && ai.break_off_supply < ai.ready_supply
+                && ai.ready_supply <= 1.0,
+        ),
+        (
+            "break_off_loss muss über 0 und höchstens 1 sein",
+            ai.break_off_loss > 0.0 && ai.break_off_loss <= 1.0,
+        ),
+        (
+            "offensive_reach muss über 0 und unter 1 sein",
+            ai.offensive_reach > 0.0 && ai.offensive_reach < 1.0,
+        ),
+        (
+            "tech_edge muss in 0..1 liegen, research_cut über 0 und unter 1",
+            unit.contains(&ai.tech_edge) && ai.research_cut > 0.0 && ai.research_cut < 1.0,
+        ),
+        (
+            "research_design_bonus muss mindestens 1 sein",
+            ai.research_design_bonus >= 1.0 && ai.research_design_bonus.is_finite(),
+        ),
+        (
+            "layup_after_months muss mindestens 1 sein",
+            ai.layup_after_months >= 1,
+        ),
+        (
+            "lean_share muss über 0 und höchstens 1 sein",
+            ai.lean_share > 0.0 && ai.lean_share <= 1.0,
+        ),
+        (
+            "revenue_memory_months muss mindestens 1 sein",
+            ai.revenue_memory_months >= 1,
+        ),
+        (
+            "response_jumps muss mindestens 1 sein",
+            ai.response_jumps >= 1,
+        ),
+    ];
+    for (message, ok) in ai_checks {
+        if !ok {
+            return Err(invalid("balance.ron", format!("military.ai: {message}")));
+        }
     }
     let battle = &data.balance.battle;
     if battle.dt <= 0.0 || battle.grid_cell <= 0.0 || battle.exit_radius <= battle.spawn_radius {
         return Err(invalid(
             "balance.ron",
             "battle: dt, grid_cell oder Radien unplausibel".into(),
+        ));
+    }
+    let share = |value: f32| (0.0..=1.0).contains(&value);
+    let doctrine_shares =
+        |values: (f32, f32, f32)| share(values.0) && share(values.1) && share(values.2);
+    if !(battle.damage_scale > 0.0
+        && (0.0..=1.0).contains(&battle.point_defense_hit)
+        && (0.0..=1.0).contains(&battle.reactor_breach)
+        && battle.rear_hull_factor >= 1.0
+        && battle.jump_out_time > 0.0
+        && battle.rearm_time > 0.0
+        && battle.stalemate_time > 0.0
+        && battle.stalemate_pressure > 0.0
+        && battle.stalemate_pressure <= battle.stalemate_time
+        && battle.time_limit > 0.0
+        && battle.morale_shock_recovery >= 0.0
+        && battle.morale_break < battle.morale_start
+        && doctrine_shares(battle.retreat_loss)
+        && doctrine_shares(battle.retreat_ratio)
+        && battle.retreat_unless_ahead >= 1.0
+        && (0.0..=100.0).contains(&battle.morale_per_weariness))
+    {
+        return Err(invalid(
+            "balance.ron",
+            "battle: Tempo-, Moral- oder Rückzugswerte außerhalb ihres Bereichs".into(),
+        ));
+    }
+    let hits = &battle.module_hits;
+    let weights = [
+        hits.engine_rear,
+        hits.engine,
+        hits.weapon_front,
+        hits.weapon,
+        hits.hangar,
+        hits.reactor,
+        hits.shield,
+        hits.magazine,
+        hits.tank,
+    ];
+    let loss = &battle.loss_shock;
+    let targeting = &battle.targeting;
+    let bands = &battle.range_bands;
+    let flank = &battle.flanking;
+    let non_negative = |value: f32| value.is_finite() && value >= 0.0;
+    if !(weights.iter().all(|weight| non_negative(*weight))
+        && weights.iter().any(|weight| *weight > 0.0)
+        && share(battle.magazine_blast)
+        && share(battle.tank_leak)
+        && share(battle.damaged_weapon_below)
+        && battle.damaged_weapon_cooldown >= 1.0
+        && share(battle.dry_speed)
+        && battle.dry_speed > 0.0
+        && non_negative(loss.fighter)
+        && non_negative(loss.escort)
+        && non_negative(loss.capital)
+        && non_negative(battle.point_defense_signature_weight)
+        && battle.tiny_signature > 0.0
+        && battle.tiny_signature <= battle.small_signature
+        && non_negative(battle.slow_tracking)
+        && non_negative(battle.point_defense_size_bias)
+        && non_negative(targeting.damaged)
+        && targeting.routing > 0.0
+        && targeting.disabled > 0.0
+        && targeting.keep >= 1.0
+        && non_negative(targeting.jitter)
+        && bands.urgent < bands.back_off
+        && bands.back_off < 1.0
+        && bands.approach >= 1.0
+        && share(bands.back_off_speed)
+        && flank.engage_distance > 0.0
+        && flank.reach > 0.0
+        && flank.wide > 0.0
+        && non_negative(battle.frigate_leash)
+        && share(battle.fighter_min_speed)
+        && non_negative(battle.first_launch)
+        && battle.launch_interval > 0.0
+        && battle.breakaway_time > 0.0
+        && share(battle.value_hull_floor))
+    {
+        return Err(invalid(
+            "balance.ron",
+            "battle: Modul-, Ziel-, Bewegungs- oder Trägerwerte außerhalb ihres Bereichs".into(),
         ));
     }
     Ok(())

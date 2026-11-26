@@ -24,6 +24,17 @@ pub struct Polity {
     pub next_claim_day: u64,
 }
 
+impl Polity {
+    /// Sitz der Gemeinschaft: die Welt, über die sie ihren Staatsdienst versorgt und bezahlt.
+    /// Das ist ihre Hauptwelt, solange sie ihr gehört, sonst ihre erste Welt; `None`, wenn
+    /// sie keine Welt mehr hält.
+    pub fn seat(&self, galaxy: &Galaxy) -> Option<PlanetId> {
+        self.capital
+            .filter(|planet| galaxy.planet(*planet).owner == Some(self.id))
+            .or_else(|| galaxy.planets_of(self.id).next().map(|planet| planet.id))
+    }
+}
+
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Polities {
     pub list: Vec<Polity>,
