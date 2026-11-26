@@ -433,9 +433,9 @@ pub fn maintain_fleets(
 }
 
 /// Monatlich: Jede Gemeinschaft zahlt den Sold ihrer Besatzungen an den Staatsdienst
-/// ([`Economy::pay_staff`]), aus dem, was der Haushalt der Flotte bewilligt hat. Reicht die Bewilligung nicht
-/// für Sold und Wartung, bleibt Sold aus: Der Anteil des Anspruchs, den der Haushalt nicht
-/// decken konnte, geht geglättet in den Soldrückstand ein.
+/// ([`Economy::pay_staff`]), aus dem, was der Haushalt der Flotte bewilligt hat. Reicht
+/// die Bewilligung nicht für Sold und Wartung, bleibt Sold aus: Der Anteil des Anspruchs,
+/// den der Haushalt nicht decken konnte, geht geglättet in den Soldrückstand ein.
 pub fn pay_upkeep(
     galaxy: &Galaxy,
     economy: &mut Economy,
