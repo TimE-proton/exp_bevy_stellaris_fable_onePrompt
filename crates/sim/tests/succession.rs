@@ -433,6 +433,27 @@ fn succession_conserves() {
             for (tech, known) in research.known(from).iter().enumerate() {
                 assert!(!known || research.knows(into, tech as u16), "{when}");
             }
+            // Die übernommene Kasse zählt nicht als Einnahme des Monats: Der nächste
+            // Monatsabschluss misst die Einnahmen der Erbin an ihrer Kasse samt Erbe. Ihre
+            // geschätzten Einnahmen sind die beider zusammen.
+            let (then, now) = (finance(&base), finance(sim));
+            assert_eq!(
+                now.polity(into).last_treasury,
+                then.polity(into).last_treasury + treasury(&base, from),
+                "{when}"
+            );
+            assert_eq!(
+                now.polity(into).revenue,
+                then.polity(into).revenue + then.polity(from).revenue,
+                "{when}"
+            );
+            assert_eq!(now.polity(from).revenue, 0.0, "{when}");
+            assert_eq!(
+                economy(sim).state_income_of(into),
+                economy(&base).state_income_of(into) + economy(&base).state_income_of(from),
+                "{when}"
+            );
+            assert_eq!(economy(sim).state_income_of(from), 0, "{when}");
         };
 
         // Friedliches Ende: Die Gemeinschaft geht in einer anderen auf.
@@ -791,6 +812,93 @@ fn last_planet() {
     assert!(!sim.polities().get(b).alive);
 }
 
+/// Staatlicher Besitz einer Gemeinschaft, die endet: Anteile, Angebote und Anleihen gehen
+/// an den Staat der Erbin; was sie sich danach selbst schuldete, ist getilgt.
+#[test]
+fn state_holdings_and_bonds_pass_to_the_heir() {
+    let (from, into, third) = (PolityId(1), PolityId(2), PolityId(3));
+    let mut sim = observer(16);
+    sim.run_days(3 * DAYS_PER_YEAR);
+    let (old_state, new_state) = (HolderId::State(from), HolderId::State(into));
+    // Der alte Staat hält Anteile an Betrieben im ganzen Reich und bietet einen Teil an.
+    let stakes = |sim: &Headless| -> Vec<(IssuerId, u64, u64)> {
+        finance(sim)
+            .issuers
+            .iter()
+            .filter(|(_, issuer)| issuer.held_by(old_state) > 0)
+            .map(|(id, issuer)| (*id, issuer.held_by(old_state), issuer.held_by(new_state)))
+            .collect()
+    };
+    let offered = stakes(&sim)[0].0;
+    assert_eq!(
+        command(
+            &mut sim,
+            from,
+            SimCommand::OfferShares {
+                issuer: offered,
+                shares: 40,
+            }
+        ),
+        CommandOutcome::Applied
+    );
+    // Gemessen nach dem Takt des Befehls: Am Monatsersten zeichnet der Staat neue Anteile.
+    let held = stakes(&sim);
+    assert!(held.len() >= 3);
+    assert_eq!(
+        finance(&sim).issuers[&offered].offered.get(&old_state),
+        Some(&40)
+    );
+    // Anleihen in allen Lagen, von Hand ins Buch gestellt (Forderungen sind kein Geld):
+    // die Erbin schuldet dem alten Staat, die Beendete schuldet dem Staat der Erbin, die
+    // Beendete schuldet einer Elite, und eine Dritte schuldet dem alten Staat.
+    let elite = HolderId::Elite(capital(&sim, third));
+    let bond = |issuer: PolityId, holder: HolderId, principal: Money| sim::finance::Bond {
+        issuer,
+        holder,
+        principal,
+        rate: 0.05,
+        matures_on: 99_999,
+    };
+    {
+        let mut finance = sim.world_mut().resource_mut::<Finance>();
+        assert!(finance.bonds.is_empty());
+        finance.bonds.extend([
+            bond(into, old_state, 1_000),
+            bond(from, new_state, 2_000),
+            bond(from, elite, 3_000),
+            bond(third, old_state, 4_000),
+        ]);
+    }
+    let before = Before::of(&sim);
+    let tick = sim.clock().tick;
+    sim.succession(|succession| succession.absorb(from, into, Path::Joined, tick))
+        .unwrap();
+
+    before.assert_conserved(&sim, "Erbe des Staates");
+    for (id, old, new) in &held {
+        let issuer = &finance(&sim).issuers[id];
+        assert_eq!(issuer.held_by(old_state), 0, "{id:?}");
+        assert_eq!(issuer.held_by(new_state), old + new, "{id:?}");
+        assert!(!issuer.offered.contains_key(&old_state), "{id:?}");
+    }
+    assert_eq!(
+        finance(&sim).issuers[&offered].offered.get(&new_state),
+        Some(&40),
+        "das Angebot bleibt bestehen"
+    );
+    // Zwei Anleihen schuldete die Erbin nun sich selbst: getilgt. Die beiden anderen
+    // heißen neu.
+    let bonds: Vec<(PolityId, HolderId, Money)> = finance(&sim)
+        .bonds
+        .iter()
+        .map(|bond| (bond.issuer, bond.holder, bond.principal))
+        .collect();
+    assert_eq!(bonds, vec![(into, elite, 3_000), (third, new_state, 4_000)]);
+    assert_eq!(finance(&sim).debt_of(into), 3_000);
+    sim.run_days(DAYS_PER_YEAR);
+    assert_sound(&sim, "ein Jahr nach dem Erbe");
+}
+
 // --- 5. Wege --------------------------------------------------------------------------------
 
 #[test]
@@ -814,11 +922,23 @@ fn tags() {
     };
     assert_eq!(path(&sim, first), (Path::Own, 0.0, 0.0));
 
-    // Zwei Welten von a werden unter Zwang zu Welten von b.
+    // Zwei Welten von a werden unter Zwang zu Welten von b. Die erste war autonom und
+    // steuerfrei und beginnt unruhig: Dann zahlt sie wieder. Die zweite bleibt nach den
+    // Bedingungen autonom, und nur dann steuerfrei.
     let forced_gap = 1.0 - diplomacy(&sim).affinity(a, b);
-    for planet in [first, second] {
-        sim.succession(|succession| succession.transfer_planet(planet, b, forced_terms(b), tick))
+    sim.world_mut().resource_mut::<Economy>().planets[first.index()].tax_exempt = true;
+    let autonomous = TransferTerms {
+        stage: Stage::Autonomous,
+        ..forced_terms(b)
+    };
+    for (planet, terms) in [(first, forced_terms(b)), (second, autonomous)] {
+        sim.succession(|succession| succession.transfer_planet(planet, b, terms, tick))
             .unwrap();
+        assert_eq!(finance(&sim).region(planet).stage, terms.stage);
+        assert_eq!(
+            economy(&sim).planet(planet).tax_exempt,
+            terms.stage == Stage::Autonomous
+        );
     }
     let as_taken = [path(&sim, first), path(&sim, second)];
     assert_eq!(
