@@ -1016,25 +1016,22 @@ impl<'a> Succession<'a> {
         fleet_succession::sync_hostility(battles, diplomacy);
 
         let system = lesser.capital.map(|capital| galaxy.planet(capital).system);
-        let (kind, text) = if voluntary {
+        let (ward_name, lord_name) = (&lesser.name, &greater.name);
+        let (kind, opening) = if voluntary {
             (
                 ChronicleKind::Diplomacy,
-                format!(
-                    "{} unterstellt sich {}: Welten, Flotten und Staatskasse bleiben ihr, \
-                     über Krieg und Frieden entscheidet das Oberhaupt.",
-                    lesser.name, greater.name
-                ),
+                format!("{ward_name} unterstellt sich {lord_name}."),
             )
         } else {
             (
                 ChronicleKind::War,
-                format!(
-                    "{} wird {} unterstellt: Welten, Flotten und Staatskasse bleiben ihr, \
-                     über Krieg und Frieden entscheidet das Oberhaupt.",
-                    lesser.name, greater.name
-                ),
+                format!("{ward_name} wird {lord_name} unterstellt."),
             )
         };
+        let text = format!(
+            "{opening} Welten, Flotten und Staatskasse behält {ward_name}; über Krieg und \
+             Frieden entscheidet {lord_name}."
+        );
         chronicle.push(tick, kind, Some(lord), system, text);
         Ok(())
     }
@@ -1248,4 +1245,174 @@ pub fn check(world: &World) -> Result<(), String> {
         return Err(format!("die Überlebende {survivor} hat geendet"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Eine frische Partie als Zustandsabbild, dazu eine Welt, um die Prüfung laufen zu
+    /// lassen.
+    fn fresh(seed: u64) -> (GameData, SimState) {
+        let data = GameData::load_workspace().unwrap();
+        let state = SimState::generate(&data, SimConfig { seed, player: None });
+        (data, state)
+    }
+
+    fn checked(data: &GameData, state: &SimState) -> Result<(), String> {
+        let mut world = World::new();
+        world.insert_resource(data.clone());
+        state.clone().install(&mut world);
+        check(&world)
+    }
+
+    /// Länge jeder Liste je Gemeinschaft.
+    fn lengths(state: &SimState) -> Vec<usize> {
+        let SimState {
+            polities,
+            economy,
+            finance,
+            research,
+            logistics,
+            fleets,
+            battles,
+            diplomacy,
+            ..
+        } = state;
+        let mut lengths = vec![
+            polities.list.len(),
+            economy.treasuries.len(),
+            economy.tax_rates.len(),
+            economy.treasury_targets.len(),
+            economy.tech_yield.len(),
+            economy.state_income.len(),
+            economy.state_income_running.len(),
+            finance.polities.len(),
+            research.polities.len(),
+            research.intel.len(),
+            research.beliefs.len(),
+            logistics.tech_speed.len(),
+            fleets.arrears.len(),
+            battles.ships_lost.len(),
+            diplomacy.standing.len(),
+            diplomacy.culture.len(),
+        ];
+        lengths.extend(research.intel.iter().map(Vec::len));
+        lengths.extend(research.beliefs.iter().map(Vec::len));
+        lengths
+    }
+
+    #[test]
+    fn a_fresh_game_keeps_every_rule() {
+        let (data, state) = fresh(2);
+        assert_eq!(checked(&data, &state), Ok(()));
+        let count = state.polities.list.len();
+        assert!(lengths(&state).iter().all(|length| *length == count));
+        assert_eq!(state.endgame.path.len(), state.galaxy.planets.len());
+        assert!(state.endgame.path.iter().all(|path| *path == Path::Own));
+    }
+
+    #[test]
+    fn a_new_community_gets_one_entry_in_every_list_and_what_it_inherits() {
+        let (data, mut state) = fresh(2);
+        let parent = PolityId(1);
+        let count = state.polities.list.len();
+        // Eine Kolonie von Hand: Zu Spielbeginn hält jede Gemeinschaft nur ihre Hauptwelt.
+        let colony = state
+            .galaxy
+            .planets
+            .iter()
+            .find(|planet| planet.owner.is_none())
+            .unwrap()
+            .id;
+        state.galaxy.planet_mut(colony).owner = Some(parent);
+        state.galaxy.planet_mut(colony).population = 25.0;
+        state.economy.tax_rates[parent.index()] = 0.23;
+        state.economy.treasury_targets[parent.index()] = 4_000;
+        state.finance.polities[parent.index()].war_weariness = 40.0;
+        let tech = data.tech_index("antrieb_2").unwrap();
+        state.research.grant(&data, parent, tech);
+        let founding =
+            Founding::free_state(state.polities.get(parent), state.galaxy.planet(colony));
+        assert!(founding.name.starts_with("Freistaat "));
+        assert_eq!(founding.capital, colony);
+        let tick = 77 * TICKS_PER_DAY;
+
+        let mut succession = Succession::of_state(&mut state, &data);
+        let child = succession.spawn(parent, founding.clone(), tick).unwrap();
+        let terms = TransferTerms::secession(colony, &data.balance.finance.cohesion, Path::Own);
+        let transfer = succession
+            .transfer_planet(colony, child, terms, tick)
+            .unwrap();
+        assert_eq!(
+            transfer,
+            Transfer {
+                from: parent,
+                new_capital: None,
+                eliminated: false
+            }
+        );
+
+        // Genau ein Eintrag mehr, in jeder Liste.
+        assert_eq!(child, PolityId::from_index(count));
+        assert!(lengths(&state).iter().all(|length| *length == count + 1));
+        assert_eq!(checked(&data, &state), Ok(()));
+        let born = state.polities.get(child);
+        assert_eq!((&born.name, &born.short), (&founding.name, &founding.short));
+        assert_eq!((born.capital, born.alive), (Some(colony), true));
+        assert_eq!(state.galaxy.planet(colony).owner, Some(child));
+        // Geerbt: Steuersatz, Kultur, Technik. Nicht geerbt: Kasse, Rücklage, Lasten.
+        let index = child.index();
+        assert_eq!(state.economy.tax_rates[index], 0.23);
+        assert_eq!(state.economy.treasuries[index], 0);
+        assert_eq!(state.economy.treasury_targets[index], 0);
+        assert_eq!(
+            state.diplomacy.culture[index],
+            state.diplomacy.culture[parent.index()]
+        );
+        assert_eq!(
+            state.diplomacy.standing[index],
+            Standing {
+                overlord: None,
+                voluntary: false,
+                since_day: 77
+            }
+        );
+        assert!(state.research.knows(child, tech));
+        assert_eq!(state.research.known(child), state.research.known(parent));
+        // Werke und Frachter rechnen sofort mit der geerbten Technik.
+        let effects = state.research.effects(child);
+        assert!(effects.fleet_speed > 1.0);
+        assert_eq!(state.economy.tech_yield[index], effects.yield_factor);
+        assert_eq!(state.logistics.tech_speed[index], effects.freighter_speed);
+        let finance = &state.finance.polities[index];
+        assert_eq!(finance.war_weariness, 0.0);
+        assert_eq!(finance.bond_yield, data.balance.finance.base_yield);
+        assert_eq!(state.fleets.arrears[index], 0.0);
+        assert_eq!(state.battles.ships_lost[index], 0);
+        // Die Mutter behält, was sie hatte.
+        assert_eq!(state.economy.treasury_targets[parent.index()], 4_000);
+        assert_eq!(state.finance.polities[parent.index()].war_weariness, 40.0);
+        assert!(state.polities.get(parent).alive);
+    }
+
+    #[test]
+    fn a_secession_passes_todays_terms() {
+        let (data, _) = fresh(2);
+        let balance = &data.balance.finance.cohesion;
+        let planet = PlanetId(5);
+        let terms = TransferTerms::secession(planet, balance, Path::Joined);
+        assert_eq!(
+            terms,
+            TransferTerms {
+                state_shares_to: HolderId::Public(planet),
+                state_share: 0.5,
+                cohesion: balance.base + balance.honeymoon,
+                stage: Stage::Loyal,
+                shock: 0.85,
+                elite_flight: 0.0,
+                path: Path::Joined,
+            }
+        );
+    }
 }

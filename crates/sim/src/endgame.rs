@@ -728,6 +728,118 @@ mod tests {
     }
 
     #[test]
+    fn the_census_counts_wards_with_their_head_and_the_judge_writes_once() {
+        use crate::state::{SimConfig, SimState};
+        let data = GameData::load_workspace().unwrap();
+        let levers = &data.balance.endgame;
+        let mut state = SimState::generate(
+            &data,
+            SimConfig {
+                seed: 5,
+                player: None,
+            },
+        );
+        let id = PolityId;
+        let home = |state: &SimState, polity: u32| state.polities.get(id(polity)).capital.unwrap();
+        let people =
+            |state: &SimState, polity: u32| state.galaxy.planet(home(state, polity)).population;
+        // Gemeinschaft 1 untersteht 0, ihre Welt gilt als beigetreten. Gemeinschaft 2 hat
+        // geendet, ihre Welt wurde von 3 genommen. Eine Welt von 0 trägt eine alte Spur.
+        state.diplomacy.standing[1].overlord = Some(id(0));
+        let (ward_home, taken_home, own_home) = (home(&state, 1), home(&state, 2), home(&state, 0));
+        state.endgame.tag(ward_home, Path::Joined, 3000.0, 0.2);
+        state.galaxy.planet_mut(taken_home).owner = Some(id(3));
+        state.polities.get_mut(id(2)).alive = false;
+        state.polities.get_mut(id(2)).capital = None;
+        state.endgame.tag(taken_home, Path::Forced, 1000.0, 0.5);
+        state.endgame.tag(own_home, Path::Forced, 500.0, 0.1);
+
+        let count = census(
+            &state.galaxy,
+            &state.polities,
+            &state.diplomacy,
+            &state.endgame,
+        );
+        // Vier freie, lebende Gemeinschaften; die Unterstellte und die Beendete fehlen.
+        let heads: Vec<PolityId> = count.blocs.iter().map(|bloc| bloc.head).collect();
+        assert_eq!(heads, vec![id(0), id(3), id(4), id(5)]);
+        let first = count.blocs[0];
+        assert_eq!(first.population, people(&state, 0) + people(&state, 1));
+        assert_eq!((first.joined, first.forced), (3000.0, 500.0));
+        let second = count.blocs[1];
+        assert_eq!(
+            second.population,
+            people(&state, 3) + state.galaxy.planet(taken_home).population
+        );
+        assert_eq!((second.joined, second.forced), (0.0, 1000.0));
+        assert_eq!((count.blocs[2].joined, count.blocs[2].forced), (0.0, 0.0));
+        let total: f64 = count.blocs.iter().map(|bloc| bloc.population).sum();
+        assert!((count.population - total).abs() < 1e-6);
+        assert_eq!(classify(&count, levers), None, "vier Souveräne");
+
+        // Die Prüfung führt Höchststand und Zähler und schreibt nichts, solange nichts
+        // entschieden ist.
+        let mut chronicle = Chronicle::default();
+        let judged = |state: &mut SimState, chronicle: &mut Chronicle, tick: u64| {
+            judge(
+                &mut state.endgame,
+                &state.galaxy,
+                &state.polities,
+                &state.diplomacy,
+                chronicle,
+                levers,
+                tick,
+            )
+        };
+        assert_eq!(judged(&mut state, &mut chronicle, 0), None);
+        assert_eq!(state.endgame.peak_population, count.population);
+        assert_eq!(state.endgame.months_below, 0);
+        assert!(chronicle.entries.is_empty() && !state.endgame.ended());
+
+        // Die anderen schrumpfen unter die Schwelle: Nur der Verbund von 0 ist noch
+        // souverän, und in ihm sind mehr beigetreten als genommen.
+        for planet in &mut state.galaxy.planets {
+            if planet.owner.is_some_and(|owner| owner.0 >= 2) {
+                planet.population = 1.0;
+            }
+        }
+        let tick = 90 * TICKS_PER_DAY;
+        let outcome = judged(&mut state, &mut chronicle, tick).expect("ein Ende");
+        assert_eq!(
+            (outcome.ending, outcome.survivor, outcome.day),
+            (Ending::Metamorphosis, Some(id(0)), 90)
+        );
+        assert_eq!((outcome.joined, outcome.forced), (3000.0, 500.0));
+        assert_eq!(state.endgame.outcome, Some(outcome));
+        assert_eq!(outcome.year(), 0);
+        // Der Höchststand bleibt stehen. Ein Drittel davon liegt noch über der Schwelle des
+        // Zusammenbruchs: Der Monatszähler läuft nicht.
+        assert_eq!(state.endgame.peak_population, count.population);
+        assert_eq!(state.endgame.months_below, 0);
+        assert_eq!(chronicle.entries.len(), 1);
+        let entry = &chronicle.entries[0];
+        assert_eq!(
+            (entry.kind, entry.polity, entry.tick),
+            (ChronicleKind::End, Some(id(0)), tick)
+        );
+        let name = &state.polities.get(id(0)).name;
+        assert!(
+            entry.text.contains("Metamorphose")
+                && entry.text.contains(name.as_str())
+                && entry.text.contains("3000")
+                && entry.text.contains("500"),
+            "{}",
+            entry.text
+        );
+        // Geschrieben wird genau einmal: Eine weitere Prüfung ändert nichts mehr.
+        let frozen = state.endgame.clone();
+        assert_eq!(judged(&mut state, &mut chronicle, tick + 600), None);
+        assert_eq!(chronicle.entries.len(), 1);
+        assert_eq!(state.endgame.outcome, frozen.outcome);
+        assert_eq!(state.endgame.months_below, frozen.months_below);
+    }
+
+    #[test]
     fn tags_record_how_a_world_came_and_clear_for_own_worlds() {
         let mut endgame = Endgame::new(4);
         assert!(endgame.path.iter().all(|path| *path == Path::Own));

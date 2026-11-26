@@ -23,6 +23,7 @@ use sim::harness::{Headless, check_invariants};
 use sim::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId};
 use sim::logistics::Logistics;
 use sim::polity::{Founding, Polities, TransferTerms};
+use sim::rng::{Domain, Rng};
 use sim::state::{SaveGame, SimConfig, money_drift};
 use sim::tech::Research;
 use std::collections::BTreeMap;
@@ -1135,6 +1136,55 @@ fn wards() {
     assert_sound(&sim, "nach der Aufnahme der Unterstellten");
 }
 
+#[test]
+fn wards_never_form_chains() {
+    let id = PolityId;
+    let mut sim = observer(10);
+    sim.run_days(30);
+    let tick = sim.clock().tick;
+    let unite = |sim: &mut Headless, ward: u32, lord: u32| {
+        sim.succession(|succession| succession.subordinate(id(ward), id(lord), true, tick))
+            .unwrap();
+    };
+    // 1 untersteht 0; 3 untersteht 2; 5 untersteht 4.
+    unite(&mut sim, 1, 0);
+    unite(&mut sim, 3, 2);
+    unite(&mut sim, 5, 4);
+
+    // Ein Oberhaupt (2) geht in einer Unterstellten eines anderen (1) auf: Wer ihm
+    // unterstand (3), untersteht nicht der Erbin, sondern deren Haupt (0).
+    sim.succession(|succession| succession.absorb(id(2), id(1), Path::Joined, tick))
+        .unwrap();
+    assert_eq!(diplomacy(&sim).overlord_of(id(3)), Some(id(0)));
+    assert_eq!(diplomacy(&sim).bloc(id(3)), vec![id(0), id(1), id(3)]);
+    assert_eq!(sim.galaxy().planet(capital(&sim, id(1))).owner, Some(id(1)));
+    assert_sound(&sim, "Erbin ist selbst unterstellt");
+
+    // Ein Oberhaupt (4) geht in seiner eigenen Unterstellten (5) auf: Die ist danach frei.
+    sim.succession(|succession| succession.absorb(id(4), id(5), Path::Forced, tick))
+        .unwrap();
+    assert!(diplomacy(&sim).is_free(id(5)));
+    assert_eq!(diplomacy(&sim).bloc(id(5)), vec![id(5)]);
+    assert_sound(&sim, "Erbin unterstand der Beendeten");
+
+    // Die letzte Welt einer Unterstellten (3) wird übertragen: Sie endet, und ihre
+    // Stellung endet mit ihr.
+    let home = capital(&sim, id(3));
+    let lost: Vec<PlanetId> = colonies(&sim, id(3));
+    for planet in lost.into_iter().chain([home]) {
+        sim.succession(|succession| {
+            succession.transfer_planet(planet, id(5), forced_terms(id(5)), tick)
+        })
+        .unwrap();
+    }
+    assert!(!sim.polities().get(id(3)).alive);
+    assert!(diplomacy(&sim).is_free(id(3)));
+    assert_eq!(diplomacy(&sim).bloc(id(0)), vec![id(0), id(1)]);
+    assert_sound(&sim, "Unterstellte verliert ihre letzte Welt");
+    sim.run_days(DAYS_PER_YEAR);
+    assert_sound(&sim, "ein Jahr später");
+}
+
 // --- Abgelehnte Aufrufe ---------------------------------------------------------------------
 
 #[test]
@@ -1844,6 +1894,138 @@ fn exhausting_data() -> GameData {
     data.balance.economy.depletion *= 1000.0;
     data.balance.economy.reserve_floor = 0.0;
     data
+}
+
+// --- Zufällige Folgen -----------------------------------------------------------------------
+
+/// Ein zufälliger Eingriff in die Partie: Übertragung, Gründung, Ende, Unterstellung,
+/// Krieg, Frieden oder ein Flottenmarsch zur Hauptwelt einer anderen. Abgelehnte Aufrufe
+/// dürfen nichts verändern.
+fn random_upheaval(sim: &mut Headless, rng: &mut Rng) -> String {
+    let alive: Vec<PolityId> = sim.polities().alive().map(|polity| polity.id).collect();
+    let a = alive[rng.range_usize(0, alive.len())];
+    let others: Vec<PolityId> = alive.iter().copied().filter(|id| *id != a).collect();
+    let b = others[rng.range_usize(0, others.len())];
+    let tick = sim.clock().tick;
+    let worlds = planets_of(sim, a);
+    let planet = worlds[rng.range_usize(0, worlds.len())];
+    let hash = sim.hash();
+    let unchanged_if_rejected = |sim: &Headless, result: Result<(), String>| {
+        if result.is_err() {
+            assert_eq!(sim.hash(), hash, "abgelehnt und doch verändert: {result:?}");
+        }
+        result.is_ok()
+    };
+    match rng.range_usize(0, 12) {
+        0..=3 => {
+            let terms = TransferTerms {
+                state_shares_to: [
+                    HolderId::State(b),
+                    HolderId::Public(planet),
+                    HolderId::Elite(planet),
+                ][rng.range_usize(0, 3)],
+                state_share: rng.f64(),
+                cohesion: rng.range_f64(5.0, 80.0),
+                stage: [Stage::Loyal, Stage::Restless, Stage::Autonomous][rng.range_usize(0, 3)],
+                shock: rng.range_f64(0.5, 1.0),
+                elite_flight: rng.f64(),
+                path: [Path::Joined, Path::Forced][rng.range_usize(0, 2)],
+            };
+            let transfer = sim
+                .succession(|succession| succession.transfer_planet(planet, b, terms, tick))
+                .expect("eine Welt einer lebenden Gemeinschaft lässt sich übertragen");
+            format!("Übertragung {planet} von {a} an {b}: {transfer:?}")
+        }
+        4 | 5 => {
+            // Eine Kolonie gründet einen neuen Staat, solange es nicht zu viele werden.
+            let free = colonies(sim, a);
+            if free.is_empty() || sim.polities().list.len() >= 14 {
+                return format!("{a} hat keine Kolonie für einen neuen Staat");
+            }
+            let colony = free[rng.range_usize(0, free.len())];
+            let child = found_free_state(sim, colony);
+            format!("Gründung von {child} auf {colony} aus {a}")
+        }
+        6 => {
+            let path = [Path::Joined, Path::Forced][rng.range_usize(0, 2)];
+            // Nicht die vorletzte Gemeinschaft: Die Partie soll weiterlaufen.
+            if alive.len() <= 3 {
+                return "zu wenige Gemeinschaften für ein weiteres Ende".into();
+            }
+            sim.succession(|succession| succession.absorb(a, b, path, tick))
+                .expect("zwei lebende Gemeinschaften");
+            format!("Ende von {a} in {b} ({})", path.label())
+        }
+        7 | 8 => {
+            let voluntary = rng.chance(0.5);
+            let result = sim.succession(|succession| succession.subordinate(a, b, voluntary, tick));
+            let done = unchanged_if_rejected(sim, result);
+            format!("Unterstellung von {a} unter {b}: {done}")
+        }
+        9 => {
+            sim.issue(a, SimCommand::MakePeace { target: b });
+            format!("{a} bietet {b} Frieden")
+        }
+        _ => {
+            // Krieg, und die Flotten marschieren zur Hauptwelt der anderen: Das gibt ein
+            // Gefecht, in das die späteren Eingriffe hineinfallen. (Wer untersteht, darf
+            // keinen Krieg erklären; dann marschiert die Flotte nur.)
+            sim.issue(a, SimCommand::DeclareWar { target: b });
+            let to = sim.galaxy().planet(capital(sim, b)).system;
+            let own: Vec<FleetId> = fleets(sim).of(a).map(|fleet| fleet.id).collect();
+            for fleet in &own {
+                sim.issue(a, SimCommand::MoveFleet { fleet: *fleet, to });
+            }
+            format!(
+                "{a} erklärt {b} den Krieg und schickt {} Flotten",
+                own.len()
+            )
+        }
+    }
+}
+
+#[test]
+fn random_upheavals_keep_every_rule() {
+    let mut battles_seen = 0;
+    for seed in [21, 22, 23, 24] {
+        let mut sim = observer(seed);
+        sim.run_days(3 * DAYS_PER_YEAR);
+        let mut rng = Rng::stream(seed, Domain::Polity, 4242, 0);
+        let mut history: Vec<String> = Vec::new();
+        for step in 0..60 {
+            if sim.outcome().is_some() {
+                break;
+            }
+            let before = Before::of(&sim);
+            let event = random_upheaval(&mut sim, &mut rng);
+            let when = format!("Seed {seed}, Schritt {step}: {event}");
+            history.push(event);
+            // Der Eingriff selbst schafft und vernichtet nichts …
+            before.assert_conserved(&sim, &when);
+            // … und die Partie läuft danach weiter, ohne eine Regel zu brechen.
+            sim.run_days(20 + rng.range_u32(0, 80) as u64);
+            assert_sound(&sim, &format!("{when}, danach"));
+        }
+        // Die Folge war nicht harmlos: Gemeinschaften haben geendet, andere sind entstanden.
+        let ended = sim
+            .polities()
+            .list
+            .iter()
+            .filter(|polity| !polity.alive)
+            .count();
+        assert!(
+            history.len() >= 20 || sim.outcome().is_some(),
+            "Seed {seed}: {history:#?}"
+        );
+        assert!(ended >= 1, "Seed {seed}: niemand hat geendet: {history:#?}");
+        assert!(
+            sim.polities().list.len() > 6,
+            "Seed {seed}: keine Gründung: {history:#?}"
+        );
+        battles_seen += battles(&sim).next_id;
+    }
+    // Auch Gefechte liefen, während Gemeinschaften endeten und sich unterstellten.
+    assert!(battles_seen >= 1);
 }
 
 // --- 8. Determinismus -----------------------------------------------------------------------
