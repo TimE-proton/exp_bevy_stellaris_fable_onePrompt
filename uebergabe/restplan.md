@@ -1,185 +1,194 @@
-# Plan: KONFLUENZ – jetzt sichern und pausieren, ab 29.11. Meilenstein 4 bis 7 fertigstellen
+# Plan: KONFLUENZ – Kontingent erneut erschöpft: Zwischenstände sichern, pausieren, danach Meilenstein 4 zuerst
 
-Stand 26.11.2026, 07:40 UTC.
+Stand 26.11.2026, 13:10 UTC. Ersetzt den Plan von 07:40 UTC.
 
 ## Kontext
 
-Auftrag bleibt: das 4X-Spiel bis Meilenstein 7 fertigstellen. Meilenstein 1–3 liegen im
-Hauptzweig `claude/keen-franklin-aqi4h7`. Meilenstein 4 lief in vier parallelen Strängen.
+Der Auftrag bleibt: das 4X-Spiel bis Meilenstein 7 fertigstellen. Seit der Wiederaufnahme
+(07:40 UTC) liefen vier Stränge parallel. Gegen 12:40 UTC war das Kontingent des Hauptmodells
+wieder erschöpft (Reset **Sonntag, 29.11., 03:00 UTC**). Alle vier Stränge wurden mitten in
+einem Agentenschritt gestoppt.
 
-- **Kontingent des Hauptmodells erschöpft** (Reset Sonntag, 29.11., 03:00 UTC). Daran sind gescheitert:
-  die Nachbesserung der Schlachtansicht, die Nachbesserung der strategischen Ebene und drei
-  Gegenprüfungen.
-- Die fertigen Stränge liegen **nur lokal im Container** und gehen verloren, wenn er
-  abgeräumt wird. Dasselbe gilt für Entwürfe, Prüfbefunde und Agentenberichte.
-- Verbrauch bisher laut Sitzungsdaten: rund 10 Mio. Ausgabe-Tokens (rechnerisch ≈ 1.100 USD);
-  das Wochenkontingent war nach etwa 13 Stunden verbraucht. Die Prüf-Workflows kosteten je
-  7–9 Mio. Agenten-Tokens und rund 7,5 Stunden.
+- Alles Committete liegt auf GitHub (mit `git ls-remote` gegen die lokalen Stände geprüft).
+- **Drei angefangene Schritte liegen uncommittet nur im Container** und wären verloren, wenn
+  er abgeräumt wird: Staatshaushalt im Kern (23 Dateien, +831/−149), Nachbesserung der
+  Schlachtansicht (7 Dateien, +1233/−188), Rückwirkungen der Belagerung (2 Dateien, +120).
+  Sie zu committen ist Schritt 1 von Teil I.
+- Verbrauch laut Sitzungsdaten seit 07:40 UTC: rund 4,2 Mio. Ausgabe-Tokens (rechnerisch
+  ≈ 585 USD) in fünf Stunden. Sitzung gesamt: 14,2 Mio. (≈ 1.685 USD).
+- 16 aktuelle Bilder sind verschickt (Partie, Fenster, Schlachtansicht, Großgefecht mit
+  400 Schiffen).
 
-**Deine Entscheidungen von heute**
+## Stand nach diesem Lauf
 
-1. Modell: auf das Hauptmodell der Sitzung warten. Jetzt nur sichern und pausieren, weiter nach dem Reset.
-2. Prüftiefe: schlank (etwa 7 Agenten je Paket statt 20–30).
-3. Sicherung: Zwischenstände dürfen als `wip/…`-Branches nach GitHub.
-
-## Stand
-
-| Teil | Wo | Stand |
+| Paket | Branch (Commit) | Stand |
 |---|---|---|
-| M1–M3 | Hauptzweig, gepusht | fertig |
-| Gefechtsrechner | `wip/m4-taktik` 35801ce | fertig, geprüft, 18 Befunde behoben |
-| Technologie | `wip/m4-tech` d314838 | fertig, geprüft, 13 Befunde behoben |
-| Gefechtsrechner + Technologie zusammen | `wip/m4-integ` 9c63cad | Tests und Clippy grün (Kern, Headless) |
-| Strategische Ebene (Schiffe, Werften, Nachschub, Gefechte in der Partie) | `wip/m4-sim` 4b64d65 | umgesetzt, geprüft; 17 bestätigte Befunde **offen** |
-| 3D-Schlachtansicht, Gefechtsübung | Hauptzweig 8206ed1 | umgesetzt, geprüft; 19 bestätigte Befunde **offen**, 3 ungeprüft |
-| Entwürfe M5 und M6 | Notizverzeichnis `entwurf/` (12 Dateien) | fertig |
+| A1 Kern zusammengeführt | `wip/m4-integ` 5ac904d | fertig: Gefechte der Partie über den neuen Rechner, Forschung wirkt auf Kampf, Tempo, Entwürfe; 264 Kerntests grün |
+| A2 Befunde der strategischen Ebene, Staatshaushalt | `wip/m4-integ` 8758cd7 | committet: Gefechte (Abzug bindet, Flotten scheiden einzeln aus), Werften (Rüstungsbetriebe, Aufträge mit Stand und Grund), Treibstoff auf Station, Verlustmaß, Drehbuch für Bestellungen. **Angefangen:** Staatshaushalt (`crates/sim/src/economy/budget.rs` neu). Offen: Abschluss, Tests, Militär-KI, Prüfung |
+| B1 Befunde der Schlachtansicht | `wip/m4-spiel` 5f997cb | alle 12 Befunde behoben, 130 Tests (vorher 64), Rundgang per Klick als Test. Prüfung fertig: 7 bestätigte Nachbefunde. **Angefangen:** deren Nachbesserung |
+| D Nachfolge und Enden | `wip/m6-nachfolge` 816d69c | Umsetzung fertig und grün: ein Pfad für Besitzwechsel und das Ende einer Gemeinschaft, Schutzgebiete, die beiden Enden als reine Funktion mit monatlichem Urteil. Prüfung halb: 4 Befunde nicht gegengeprüft, zweiter Blickwinkel fehlt |
+| E1 Belagerungsrechner | `wip/m5-rechner` 2764a4a | fertig |
+| F1 Belagerung in der Partie | `wip/m5-rechner` ec9c98d | erste Hälfte fertig (Orbit, Tagesablauf, Eroberung gewöhnlicher Welten, fünf Befehle; 327 Kerntests grün). Zweite Hälfte: Landung, Übergabe, Plünderung committet. **Angefangen:** Haken in Produktion und Kursen. Offen: Kriegsmüdigkeit, Monatsbuchführung, Tests 10, 11, 15, 16 |
 
-Schwerste offene Befunde:
+**Bestätigte Nachbefunde im Spiel** (Auftrag der Nachbesserung):
 
-- Spiel: „Zum Hauptmenü" aus einer Partie lässt das Spiel abstürzen; Klicks und Mausrad
-  wirken durch Leisten auf Szene und Karte durch; Inspektor versteckt Modulzeilen;
-  Aufstellungsdialog nimmt jede Schiffszahl; Selbsttest besteht auch ohne sichtbare Szene.
-- Strategische Ebene: erzwungener Rückzug aufhebbar; unentschiedene Gefechte starten endlos
-  neu; Koloniewerften flackern, Aufträge frieren still ein; 30 Tage Unangreifbarkeit bei
-  voller Bewegungsfreiheit; Stellunghalten kostet nichts; Flottenkosten ohne Spur im Haushalt.
+1. Schwer: „Laden (F9)" in einer laufenden Partie beendet das Spiel, wenn der Spielstand
+   eine kleinere Galaxie hat (`crates/game/src/session.rs`; derselbe Mechanismus wie beim
+   behobenen Absturz „Zum Hauptmenü").
+2. Mausblick (M oder rechte Taste): Ein Klick wirkt auf Tafel und Szene zugleich
+   (`crates/game/src/pointer.rs`).
+3. Die Rollposition der Modulliste wandert ins nächste Gefecht (`battle_view/hud.rs`).
+4. Ein Fenster als sehr schmaler Streifen beendet die Schlachtansicht
+   (`battle_view/camera.rs`).
+5. Der Selbsttest zählt Sichtbarkeit für irgendeine aktive Kamera (`battle_view/scene.rs`).
+6. Ein schneller Klick auf die Griffleiste neben einer Tafel wirkt auf Tafel und Karte.
+7. Die Fluggeschwindigkeit des vorigen Gefechts gilt im nächsten weiter.
 
-## Teil I – jetzt, nach deiner Freigabe (eigenhändig, keine Agenten, keine Entwicklung)
+Zwei weitere Befunde haben die Gegenprüfer verworfen.
 
-1. **Stränge sichern**: `git push -u origin` für `wip/m4-taktik`, `wip/m4-tech`,
-   `wip/m4-sim`, `wip/m4-integ`. Der Hauptzweig bleibt unverändert und lauffähig; kein
-   Pull Request. Scheitert der Push technisch, sichere ich die Stränge über die
-   GitHub-Schnittstelle (ein Commit je Strang) und melde es.
-2. **Übergabe-Branch `wip/uebergabe`** (vom Hauptzweig, ein Commit, nur Dokumente unter
-   `uebergabe/`), damit nach dem Abräumen des Containers nichts fehlt:
-   - dieser Restplan und eine Kurzanleitung zum Wiedereinstieg;
-   - die 12 Entwurfsdokumente für M5 und M6 (`M5_Synthese.md`, `M6_Synthese.md`, Entwürfe, Jury);
-   - alle Prüfbefunde zu Schlachtansicht und strategischer Ebene im Wortlaut, mit Urteil
-     und Begründung der Gegenprüfer (aus den Workflow-Protokollen exportiert);
-   - die Agentenberichte mit Schnittstellennotizen, Messwerten und offenen Punkten
-     (Gefechtsrechner, Technologie, strategische Ebene, Schlachtansicht);
-   - die fünf Workflow-Skripte als Vorlagen.
-   Vor dem Commit prüfe ich, dass keine persönlichen Daten darin stehen.
-3. **Notizen im Projektgedächtnis**: Stand und Branches, wo die Übergabe liegt, deine drei
-   Entscheidungen, Reset-Zeitpunkt.
-4. Aufgabenliste aktualisieren, Kurzmeldung mit Branch-Namen und Commits. Danach Pause.
+**Ungeprüfte Befunde der Nachfolge:** `DistributeShares` kann Anteile an den Staat einer
+beendeten Gemeinschaft geben; in zwei Fällen werden Verluste aus einem laufenden Gefecht der
+Erbin angelastet; alte Spielstände werden noch angenommen (erledigt sich, weil ich
+`SAVE_FORMAT` bei der Zusammenführung erhöhe).
 
-Ein automatischer Start nach dem Reset wird **nicht** eingeplant, weil er dein neues
-Wochenkontingent ohne dein Zutun anbrechen würde. Du schreibst ab So., 29.11., 03:00 UTC
-„weiter" (hier oder in einer neuen Sitzung auf demselben Repo). Wenn du lieber einen
-geplanten Start möchtest, sag es bei der Freigabe.
+**Eigene Beobachtungen aus den Bildern von heute** (gehen in die Aufträge der Oberfläche):
 
-## Teil II – ab 29.11., nach deinem Startsignal
+- Verbandstafeln der Schlachtansicht: Schiffe im Rückzug stehen in keiner der Spalten
+  „kämpft / verloren / entkommen" (im Großgefecht fehlten 6 Schlachtschiffe und 4 Träger).
+- Seitentafeln und Chronik der Partie sind leicht durchsichtig, Kartenbeschriftung scheint durch.
+- Eigener Klicktest: Klicks auf Leisten ändern die Auswahl auf der Karte nicht mehr;
+  Partie → Hauptmenü → Gefechtsübung lief ohne Absturz.
 
-### Wiedereinstieg
+## Teil I – sofort nach deiner Freigabe (eigenhändig, ohne Agenten)
 
-- Branches per Namen holen (`git fetch origin wip/m4-integ` usw.), Arbeitsverzeichnisse
-  unter `.worktrees/` neu anlegen, `uebergabe/` lesen, Werkzeuge für die Bildprüfung
-  einrichten (Notiz `reference_cloud_render_check`), erster Bau des Spiels (≈ 20 Minuten).
+1. **Sichern, als Erstes:** in `.worktrees/spiel`, `.worktrees/integ` und
+   `.worktrees/belagerung` je ein Commit „Zwischenstand vor Kontingentende: unvollständig,
+   ungeprüft" auf dem jeweiligen `wip/…`-Branch, dann `git push -u origin <branch>`.
+   Hauptzweig unverändert, kein Pull Request.
+2. **Bauzustand festhalten** (nur Rechenzeit): ein Hintergrundlauf mit `cargo test -p sim`
+   in `integ` und `belagerung` und `cargo test -p game` in `spiel`. Das Ergebnis (baut,
+   welche Tests rot) kommt in die Übergabe. Repariert wird jetzt nichts.
+3. **Übergabe-Branch `wip/uebergabe`:** Abschlussberichte von B1, D und F1 nach
+   `uebergabe/berichte/`; die Nachbefunde im Spiel mit Urteil und die ungeprüften Befunde
+   der Nachfolge nach `uebergabe/befunde/`; die vier Workflow-Skripte nach
+   `uebergabe/workflows/`; `uebergabe/README.md` (Stand, Branch-Tabelle, letzter geprüfter
+   Commit je Strang, was Zwischenstand ist) und `uebergabe/restplan.md` (dieser Plan).
+   Export mit dem vorhandenen `scratchpad/uebergabe_tools/bericht.py`.
+4. **Projektnotiz** und Aufgabenliste auf den neuen Stand.
+5. **Platz schaffen** (frei sind 9,8 GB): regenerierbare Bau- und Prüfkopien im
+   Notizverzeichnis löschen, nach einem Blick hinein: `spiel/{nb,pruefung,bin}`,
+   `nachfolge/{pruefung,mutcopy}`, `game/review`, `sim/{probe_regroup,target_probe,fix}`,
+   `tech/fix`, `taktik/{old,exp,copy}` (zusammen etwa 14 GB). Bilder und Logs bleiben.
+6. Kurzmeldung mit Commits. Danach **Pause, kein automatischer Start.** Du schreibst nach
+   dem Reset „weiter", hier oder in einer neuen Sitzung auf demselben Repo.
 
-### Arbeitsweise je Paket (schlank)
+Modell: Wie am 26.11. entschieden, warte ich auf das Hauptmodell und verlagere nichts auf andere
+Modelle. Wenn du die Zeit bis zum Reset doch mit dem Ausweichmodell überbrücken willst (etwa nur die drei
+angefangenen Schritte abschließen), sag es bei der Freigabe.
 
-1. **Umsetzen**: ein bis zwei Agenten nacheinander im Arbeitsverzeichnis des Pakets;
-   Commits dort, früh und oft.
-2. **Prüfen**: zwei bis drei Prüfer mit getrennten Blickwinkeln (Korrektheit und Geldfluss;
-   Determinismus und Integration; Anforderungen und Ehrlichkeit der Tests; bei Spielpaketen
-   Bedienung mit echten Klicktests über `xdotool` unter Xvfb).
-3. **Gegenprüfen**: je Prüfer ein Skeptiker für alle Befunde dieses Prüfers.
-4. **Nachbessern**: ein Agent behebt die bestätigten Befunde, alle Pflichtbefehle grün.
-5. Ich führe zusammen, lasse Tests, Clippy, Sweeps und Selbsttests selbst laufen, sehe mir
-   die Bilder an und pushe.
+## Teil II – nach dem Reset, auf dein Startsignal
 
-- Modell: das Hauptmodell der Sitzung. Das Ausweichmodell nur dort, wo der Schutzfilter das Hauptmodell stoppt (bisher der
-  Gefechtsrechner; beim Belagerungsrechner möglich). Jeder Stopp wird gemeldet.
-- **Nach jedem Agentenschritt wird der Branch des Pakets gepusht**; lokal ungesicherte
-  Arbeit gibt es nicht mehr.
-- Höchstens drei Pakete gleichzeitig (4 Kerne). Agenten arbeiten nie im Hauptverzeichnis.
+### Haushalten mit dem Kontingent (meine Detailentscheidungen)
+
+- **Meilenstein 4 zuerst**, vollständig bis in den Hauptzweig. Erst danach M5, M6, M7. Die
+  gesicherten Stränge für M5 und M6 ruhen so lange.
+- **Höchstens zwei Stränge gleichzeitig** (Kern und Spiel). Mit vier Strängen auf vier
+  Kernen dauerte ein Testlauf des Kerns 4 bis 10 Minuten; das Warten kostet Tokens, weil
+  jede Abfrage den ganzen Kontext des Agenten neu liest.
+- Prüftiefe bleibt „schlank" wie von dir entschieden. Sie macht etwa ein Viertel des
+  Verbrauchs aus; der große Posten ist die Umsetzung.
+- Agenten setzen auf den Zwischenständen auf: erst sichten, dann übernehmen oder
+  verwerfen. Als Beleg je Korrektur genügt ein Test oder ein Foto.
+- Sweeps, Hash-Vergleiche, Selbsttests, Klicktests und Bilder mache ich selbst zwischen den
+  Agentenschritten.
 
 ### Meilenstein 4 abschließen
 
-- **Paket A – Kern zusammenführen** (`.worktrees/integ`): `wip/m4-sim` einmergen (Konflikte in
-  `crates/headless/src/main.rs`, `crates/sim/src/economy/{capital,mod,production}.rs`,
-  `crates/sim/src/harness.rs`); `crates/sim/src/fleet/battles.rs` auf die neue
-  Gefechts-Schnittstelle umstellen (`Battle::results`, `Fate`,
-  `CombatantSetup::with_war_weariness`, Patt); Forschung verdrahten (`Research::effects` →
-  `CombatModifiers` und Flottentempo, `GameData::best_design` nach bekannten Technologien,
-  `Research::add_intel` nach Gefechten); die 17 Befunde der strategischen Ebene beheben,
-  darunter ein echter Haushaltszwang, damit Flotten und Forschung um dasselbe Geld konkurrieren.
-- **Paket B – Spiel an den neuen Kern, Befunde der Schlachtansicht** (`.worktrees/spiel`):
-  Übersetzungsfehler in `crates/game` beheben, dann die 19 Befunde (Absturz in
-  `crates/game/src/session.rs`, Durchklicken in `battle_view/{hud,camera}.rs` **und**
-  `crates/game/src/map.rs`, Inspektor, Dialog, Selbsttest, kleinere), README zur Gefechtsübung.
-- **Paket C – Militär-KI und Oberfläche**:
-  Kern: `crates/sim/src/ai/levers.rs` (Schiffbau nach Etat und Kontertabelle aus
-  `cargo headless battle --matrix`, Flotten im Frieden und im Krieg), Kriegsskript im
-  Harness, Sweep-Kennzahlen.
-  Spiel: Gefechte der Partie in der 3D-Ansicht (`BattleFeed`/`BattleOrder` aus
-  `Battles.active`), Gefechtsmarken auf der Karte, Flottenfenster (Schiffe, Bauliste,
-  Befehle), Technologiefenster (Baum, Ziel, Etat, Schätzungen über andere).
-- Abschluss: README, Meilenstein-Commit im Hauptzweig, Push, Bilder.
+Kern (`.worktrees/integ`, Skript `scratchpad/workflows/m4-kern-befunde.js` mit angepasstem
+ersten Auftrag):
 
-### Meilenstein 5 – Belagerung (nach `uebergabe/entwurf/M5_Synthese.md`)
+1. **A2 abschließen:** Staatshaushalt mit fester Reihenfolge der Ansprüche (Schuldendienst;
+   Sold und Unterhalt; Schiffbau, Auffüllen, Reparatur; Forschung; Reserve; Ausschüttung an
+   die Haushalte) in `crates/sim/src/economy/budget.rs`, `fleet/supply.rs`, `tech/step.rs`,
+   `finance/plugin.rs`; Lesemodell je Gemeinschaft; ehrliches Maß für
+   `larger_economies_research_faster_in_a_running_game` in `crates/sim/tests/tech.rs`;
+   Sweep-Tabelle vorher/nachher.
+2. **C-Kern, Militär-KI:** `crates/sim/src/ai/levers.rs` als einzige KI-Datei mit Flotten-,
+   Werft- und Forschungsbefehlen; Rüstung nach Etatanteil und Bedrohung; Klassenwahl nach
+   einer Kontertabelle aus `cargo headless battle --matrix`; Flottenführung in Frieden und
+   Krieg; Kriegsskript „Grenzkrieg"; Kennzahlen am Ende von `RunSummary` und CSV.
+3. Prüfung (Korrektheit und Geldfluss; Determinismus und Integration; Anforderungen und
+   Ehrlichkeit der Tests), je eine Sammel-Gegenprüfung, Nachbesserung.
 
-- **Paket D – Besitzwechsel, Nachfolge, Enden** (parallel zu A): ein einziger Pfad für
-  Eigentümerwechsel und das Ende einer Gemeinschaft, den M5 und M6 beide brauchen:
-  `crates/sim/src/polity/succession.rs` (`spawn`, `transfer_planet`, `absorb`,
-  `subordinate`), `crates/sim/src/endgame.rs` (`Endgame`, reine Funktion `classify`,
-  monatliches Urteil, Partie hält nach dem Ende an), `apply_secession` in
-  `crates/sim/src/finance/cohesion.rs` darauf umgestellt, Invarianten in
-  `crates/sim/src/harness.rs`, Stellschrauben `endgame` in `assets/data/balance.ron`.
-- **Paket E – Belagerungsrechner und stehende Verteidigung** (parallel zu A; Schritte 1, 3,
-  5 des Entwurfs): `crates/sim/src/siege/{mod,step,plugin}.rs`, reiner Tagesrechner mit
-  Prognose, Tests 1–8, Beschaffung und Unterhalt im Frieden, Befehle `SetDefensePlan`,
-  `SetGarrisonOrders`, Werkzeug `cargo headless siege`.
-- **Paket F – Belagerung in der Partie** (Schritte 4, 6; braucht A, D, E): `orbit.rs`,
-  Tagesablauf, acht Befehle, Eroberung über `transfer_planet`, Haken in Produktion, Kursen
-  und Zusammenhalt, Lesemodell, Tests 9–16.
-- **Paket G – Belagerungs-KI und Sweeps** (Schritt 7), **Paket H – Belagerungsansicht** (Schritt 8).
+Spiel (`.worktrees/spiel`, gemeinsamer Engine-Bau in `target/`):
+
+1. **B1-Nachbesserung abschließen** (die 7 Nachbefunde oben).
+2. **B2:** Kern einmergen, API-Drift beheben (`crates/game/src/traffic.rs`: Flottenposition
+   über `Fleet::day_range`; Zustände „im Gefecht" und „sammelt sich"; `Retreat` statt
+   `MoveFleet` im Gefecht), **Technologiefenster** (Baum, Ziel, Etat, Schätzungen über andere).
+3. **C-Spiel:** Gefechte der Partie in der 3D-Ansicht (`BattleFeed`/`BattleOrder` aus
+   `Battles.active`, Verlassen und Befehle über die Brücke), Gefechtsmarken auf der Karte,
+   **Flottenfenster** (Schiffe, Bauliste, Befehle, Haushalt), dazu die beiden Beobachtungen
+   aus den Bildern.
+4. Prüfung (Bedienung mit echten Klicktests; Anforderungen), Gegenprüfung, Nachbesserung.
+
+Abschluss: beide Stränge in den Hauptzweig, `SAVE_FORMAT` erhöhen, README, alle Prüfbefehle,
+Bilder, Bericht. **Haltepunkt.**
+
+### Meilenstein 5 – Belagerung
+
+- **F1 abschließen** (`.worktrees/belagerung`): Haken in `economy/production.rs` und
+  `finance/shares.rs`, Kriegsmüdigkeit, Buchführungshälfte von `siege_month`, Tests 10, 11,
+  15, 16.
+- **D fertig prüfen** (`.worktrees/nachfolge`): Gegenprüfung der vier Befunde, zweiter
+  Blickwinkel (Enden, Determinismus, Ehrlichkeit der Tests), Nachbesserung.
+- **F2:** Kern, Nachfolge und Belagerung zusammenführen; die Nahtstelle `hand_over` in
+  `crates/sim/src/siege/conquest.rs` durch `transfer_planet` ersetzen (Hauptwelt fällt,
+  Gemeinschaft endet; Tests 12, 13); Beschaffung und Unterhalt der Verteidigung als Anspruch
+  im Staatshaushalt (`procure_day`, `SetDefensePlan`); Lesemodell; `RunSummary.sieges`.
+- Prüfung des ganzen Belagerungsmoduls, Nachbesserung.
+- **G:** Belagerungs-KI und Sweeps (offene Balance: Aushungern dominiert, Kolonien ohne
+  Vorräte fallen kampflos, Blockade ohne Treibstoff). **H:** Belagerungsansicht im Spiel.
+  Meilenstein-Commit. **Haltepunkt.**
 
 ### Meilenstein 6 – KI, Diplomatie, Enden (nach `uebergabe/entwurf/M6_Synthese.md`)
 
-- **Paket I** – Beziehungen, Verträge, Vorschläge, Embargo, Durchfahrt, Sperrguthaben,
-  Kriegsstand und Friedensbedingungen, Schutzgebiete (Schritte 3–4; braucht D).
-- **Paket J** – verborgene Dispositionen: `choice_probs`, Anlässe, `diplomacy.ron`,
-  Indizien und Einschätzung ohne Blick in den Kopf der KI (Schritte 5–6).
-- **Paket K** – operative KI (Haltung, Flotten, Anteile) und Sweeps mit Skriptspielern;
-  Ziel: jede Partie endet genau einmal (Schritte 7–8).
-- **Paket L** – Spiel: Fenster „Diplomatie" und „Analyse", Endspiel-Leiste, Abschlussbild
-  „Metamorphose" / „Auslöschung", Auto-Pause.
+- **I:** Beziehungen, Verträge, Vorschläge, Embargo, Durchfahrt, Kriegsstand und
+  Friedensbedingungen, Schutzgebiete; Flottenregeln kennen den Block (Geleit, Blockade,
+  Nachschub bei Schutzmacht und Schutzgebiet).
+- **J:** verborgene Dispositionen (`choice_probs`, Anlässe, `diplomacy.ron`, Indizien).
+- **K:** operative KI und Sweeps mit Skriptspielern; jede Partie endet genau einmal.
+- **L:** Spiel: „Diplomatie", „Analyse", Endspiel-Leiste, Abschlussbilder; die Partie hält
+  nach dem Ende an, auch wenn die eigene Gemeinschaft aufgeht. **Haltepunkt.**
 
 ### Meilenstein 7 – Abschluss
 
-- **Paket M** – Speichern/Laden im Menü, Tutorial, UI-Feinschliff, Balance aus Sweeps
-  (32 Seeds, bis 250 Jahre; offene Punkte des Gefechtsrechners), Abschlussprüfung des ganzen
-  Repos, README, `wip/…`-Branches und Arbeitsverzeichnisse aufräumen.
-
-### Reihenfolge
-
-1. A ‖ D ‖ E
-2. B ‖ C-Kern, dann C-Spiel → **Meilenstein 4 im Hauptzweig**
-3. F ‖ I
-4. G ‖ J ‖ H → **Meilenstein 5**
-5. K ‖ L → **Meilenstein 6**
-6. M → **Meilenstein 7**
-
-Nach jedem Meilenstein: `cargo run` startet, Tests und Clippy grün, Commit, Push,
-Kurzmeldung mit Bildern, Detailentscheidungen und Verbrauch. Dort kannst du jederzeit stoppen.
+- **M:** Speichern/Laden im Menü, Tutorial, UI-Feinschliff, Balance aus Sweeps (32 Seeds,
+  bis 250 Jahre; offene Punkte des Gefechtsrechners auf dem Ausweichmodell), Abschlussprüfung, README,
+  `wip/…`-Branches erst nach Rückfrage aufräumen.
 
 ## Verifikation
 
-- Teil I: `git ls-remote origin 'wip/*'` zeigt die fünf Branches mit den erwarteten Commits;
-  `git status` im Hauptverzeichnis sauber; Notizen mit `memory_list` sichtbar.
-- Teil II, Kern: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo fmt --check`, `cargo headless hash --seed 3 --days 3600` zweimal und mit `--exact`,
-  `cargo sweep --seeds 0..8 --years 60` (ab Paket C auch `--war`) ohne Invariantenverletzung.
-- Teil II, Spiel: `xvfb-run -a -s "-screen 0 1600x900x24" cargo run -q -p game -- --selftest N`
-  und `--practice`, Bildschirmfotos ansehen; Klickpfade mit `xdotool` gegen ein laufendes Fenster.
-- Enden (M6): Sweep über viele Seeds, jede Partie endet mit genau einem Ende.
+- Teil I: `git ls-remote origin 'refs/heads/wip/*'` zeigt die neuen Commits; `git status
+  --short` ist in allen Arbeitsverzeichnissen leer; die Projektnotiz zeigt den neuen Stand.
+- Teil II, Kern: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo fmt --check`, `cargo headless hash --seed 3 --days 3600` zweimal und mit
+  `--exact`, `cargo sweep --seeds 0..8 --years 60` (auch mit Kriegsskript) ohne
+  Invariantenverletzung.
+- Teil II, Spiel: `xvfb-run -a -s "-screen 0 1600x900x24" target/debug/game --selftest N
+  --seed 3 --screenshot …`, auch mit `--practice`; Klickpfade mit `xdotool` gegen ein
+  laufendes Fenster; Bilder ansehen und dir schicken.
+- Enden (M6): Sweep über viele Seeds, jede Partie endet mit genau einem der beiden Enden.
 
 ## Aufwand und Risiken
 
-- Teil I: wenige Minuten, kaum Verbrauch.
-- Teil II: grob 20–30 Stunden Laufzeit. Auch schlank geprüft kann der Rest **mehr als ein
-  Wochenkontingent** brauchen; dann sichere ich wieder und melde mich.
-- Unverändert: Push auf den Hauptzweig nur lauffähig, kein Pull Request, Texte deutsch,
-  am Gefechtsrechner arbeite ich nicht eigenhändig, Bildprüfung nur mit Software-Rendering.
-- Die Zahlen in den Entwürfen M5/M6 sind ungetestete Schätzungen; Balance entsteht aus Sweeps.
+- Teil I: etwa 30 bis 40 Minuten, fast nur Testläufe im Hintergrund; kaum Verbrauch.
+- Teil II: grob 55 Agentenschritte. Heute waren es 13 in fünf Stunden. Der Rest ist also
+  etwa das Vierfache des heutigen Laufs, gemessen am ersten Wochenkontingent **rund zwei
+  Wochenkontingente** (Unsicherheit ±50 %). Meilenstein 4 allein braucht etwa ein Viertel
+  davon.
+- Die Zwischenstände können unbrauchbar sein. Dann verwirft sie der nächste Agent; der
+  Verlust ist je Strang höchstens eine knappe Stunde Agentenarbeit.
+- Unverändert: Push auf den Hauptzweig nur lauffähig, kein Pull Request ohne Auftrag, Texte
+  deutsch, am Gefechtsrechner arbeite ich nicht eigenhändig, Bildprüfung nur mit
+  Software-Rendering, an jedem Haltepunkt kannst du stoppen.
