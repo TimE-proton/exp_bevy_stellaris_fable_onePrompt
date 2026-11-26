@@ -157,6 +157,14 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | F1 | Hilfe |
 | Esc | Menü |
 
+Mit Meilenstein 4 führt der Spieler Flotten und Werften, sieht den Staatshaushalt, lenkt
+die Forschung, verfolgt die Gefechte der Partie in 3D und kann Schiffe stilllegen; die
+anderen Gemeinschaften rüsten, führen ihre Flotten und legen Schiffe still, ohne dass
+jemand sie lenkt. „Krieg“ und „Frieden“ stehen in der Übersicht bei den Gemeinschaften;
+nach einem Friedensschluss gilt eine Waffenruhe, so lange nennt der gesperrte Knopf die
+verbleibenden Tage. Die Liste nennt je Gemeinschaft die Zahl ihrer Schiffe und darunter
+jeden laufenden Krieg.
+
 Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
 siehe unten.
 
@@ -229,7 +237,10 @@ Flotte mit jedem Schiff: Klasse, Entwurf, Rumpf, Module, Bordjäger, Munition, T
 beschädigte Schiffe sind markiert. Dort werden Auftrag, Aufstellung und Doktrin gewählt,
 und dort wird umgegliedert: „Vereinigen mit …“ gibt die Schiffe an eine andere eigene
 Flotte im selben System; ein Klick auf Schiffsnummern wählt Schiffe, „Abteilen“ stellt
-mit ihnen eine neue Flotte auf. „Auf der Karte zeigen“ führt die Karte zur Flotte. Ein
+mit ihnen eine neue Flotte auf. „Stilllegen“ nimmt die gewählten Schiffe für immer aus
+dem Spiel; das geht nur, wo die Flotte in einem System mit eigener Werft liegt. Neben dem
+Knopf steht, was der Verkauf der Bauteile am heutigen Markt bringt und was die Flotte
+danach im Monat weniger kostet. „Auf der Karte zeigen“ führt die Karte zur Flotte. Ein
 gesperrter Knopf nennt den Grund, mit dem die Simulation den Befehl ablehnen würde,
 daneben oder im Schwebetext. Liegen fremde Flotten im gewählten System, nennt das Fenster
 auch sie.

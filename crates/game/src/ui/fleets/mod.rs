@@ -1197,6 +1197,13 @@ mod tests {
             "kein gesperrter Knopf „{}“",
             truce_label(until - day)
         );
+        // Solange der Krieg lief, stand er bei den Gemeinschaften; jetzt nicht mehr.
+        assert!(
+            !game
+                .labels()
+                .iter()
+                .any(|(text, _)| text.starts_with("Krieg: "))
+        );
         // Kommt der Befehl dennoch, sagt der Spieler-Hinweis den Grund des Kerns.
         command(&mut game, me, SimCommand::DeclareWar { target: enemy });
         run(&mut game, 3);

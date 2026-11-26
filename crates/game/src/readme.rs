@@ -86,6 +86,7 @@ fn the_manual_names_what_the_research_and_fleet_windows_offer() {
         fleets::MARCH,
         fleets::RETREAT,
         fleets::SPLIT,
+        fleets::LAY_UP,
         fleets::SHOW_ON_MAP,
         fleets::ORDER,
         fleets::CANCEL,

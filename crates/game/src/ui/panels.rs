@@ -17,7 +17,7 @@ use sim::economy::{Economy, to_credits};
 use sim::finance::Finance;
 use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
-use sim::ids::{BattleId, PlanetId, SystemId};
+use sim::ids::{BattleId, PlanetId, PolityId, SystemId};
 use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
 use sim::state::SimConfig;
@@ -744,9 +744,9 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
         .sum();
     egui::Grid::new("gemeinschaften")
         .striped(true)
-        .num_columns(5)
+        .num_columns(6)
         .show(ui, |ui| {
-            for title in ["", "Planeten", "Bevölkerung", "Anteil", ""] {
+            for title in ["", "Planeten", "Bevölkerung", "Anteil", "Schiffe", ""] {
                 ui.label(RichText::new(title).color(MUTED).small());
             }
             ui.end_row();
@@ -772,6 +772,17 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.label(sim.galaxy.planets_of(polity.id).count().to_string());
                 ui.label(population(people));
                 ui.label(percent((people / total.max(1.0)) as f32));
+                // Die Gemeinschaften rüsten selbst: Die Zahl zeigt, wer wie stark ist.
+                let (fleets, ships) = sim
+                    .fleets
+                    .of(polity.id)
+                    .fold((0, 0), |(fleets, ships), fleet| {
+                        (fleets + 1, ships + fleet.ships.len())
+                    });
+                ui.label(ships.to_string()).on_hover_text(format!(
+                    "{ships} Schiffe in {fleets} {}",
+                    if fleets == 1 { "Flotte" } else { "Flotten" }
+                ));
                 match sim.config.player {
                     Some(player) if player != polity.id && polity.alive => {
                         if sim.diplomacy.at_war(player, polity.id) {
@@ -811,6 +822,18 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.end_row();
             }
         });
+    for (a, b) in &sim.diplomacy.wars {
+        ui.label(detail(war_line(sim, *a, *b)).color(MUTED));
+    }
+}
+
+/// Eine Zeile je Krieg: Wer mit wem im Krieg liegt, sieht auch, wer nicht beteiligt ist.
+pub fn war_line(sim: &SimRefs, a: PolityId, b: PolityId) -> String {
+    format!(
+        "Krieg: {} gegen {}",
+        sim.polities.get(a).name,
+        sim.polities.get(b).name
+    )
 }
 
 /// Warum der Knopf „Krieg“ gesperrt ist: Nach einem Friedensschluss gilt eine Waffenruhe.
