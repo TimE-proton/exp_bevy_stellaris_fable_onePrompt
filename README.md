@@ -191,16 +191,28 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 - **Schiffe.** Eine Flotte besteht aus Schiffen mit Entwurf, Rumpf- und Modulzustand,
   Munition, Treibstoff und Bordjägern. Ihre Stärke ist abgeleitet: Bauwert mal Zustand,
   geeicht an der Startflotte. Kaperfahrt, Geleitschutz und Blockade rechnen mit dieser Zahl.
-- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung Kapital steht: je
-  `yard_capital_per_slot` ein Bauplatz, mindestens einer. Die Hauptwelt hat auch ohne
-  Rüstungskapital einen. Der Staat kauft täglich den Tagesanteil der Bauteile am Markt des
-  Systems und zahlt der Rüstungsfirma der Welt einen Aufschlag, an dem ihre Anteilseigner
-  mitverdienen. Fehlt ein Bauteil oder Geld, stockt der Bau: Eine blockierte Werft steht
-  still, weil keine Ware mehr ankommt. Ein neues Schiff kommt mit leeren Magazinen und Tanks.
-- **Nachschub.** Im eigenen, nicht blockierten System fasst eine Flotte Munition und
+- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung genug Kapital steht:
+  Die Werft entsteht bei `yard_open_capital` und besteht, bis das Kapital unter
+  `yard_close_capital` fällt; Reste, die nur noch verfallen, machen keine. Je
+  `yard_capital_per_slot` gibt es einen Bauplatz, mindestens einen. Die Hauptwelt hat auch
+  ohne Rüstungskapital einen. Der Staat kauft täglich den Tagesanteil der Bauteile am Markt
+  des Systems und zahlt der Rüstungsfirma der Welt einen Aufschlag, an dem ihre
+  Anteilseigner mitverdienen. Fehlt ein Bauteil oder Geld, stockt der Bau: Eine blockierte
+  Werft steht still, weil keine Ware mehr ankommt. Ein neues Schiff kommt mit leeren
+  Magazinen und Tanks.
+- **Stand eines Auftrags.** Jeder Bauauftrag sagt, wo er steht und woran es liegt
+  (`BuildOrder::status`, in Worten `status_text`): im Bau, wartet auf einen Bauplatz,
+  stockt (mit dem Bauteil, das fehlt, oder weil das Geld fehlt), fertig im Dock, oder er
+  ruht, weil die Welt keine Werft mehr hat. Ein ruhender Auftrag verliert nichts: Kehrt
+  die Werft binnen `yard_grace_days` zurück, geht der Bau weiter. Danach verfällt er wie
+  ein gestrichener Auftrag, ohne Erstattung; die Chronik nennt den abgeschriebenen Betrag.
+- **Eigenes Gebiet.** Einkaufen kann eine Gemeinschaft für Flotten und Werften in jedem
+  System, in dem sie eine Welt besitzt, auch wenn dort eine andere die Mehrheit stellt.
+  Liegt sie mit dieser im Krieg, verkauft deren Kontor ihr nichts.
+- **Nachschub.** Im eigenen, nicht blockierten Gebiet fasst eine Flotte Munition und
   Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff;
   mit leerem Tank schleppt sich eine Flotte nur noch mit einem Bruchteil ihrer Fahrt.
-- **Instandsetzung.** Im eigenen System mit Werft, gegen Rumpfsegmente vom Markt; verlorene
+- **Instandsetzung.** Im eigenen Gebiet mit Werft, gegen Rumpfsegmente vom Markt; verlorene
   Bordjäger kommen aus ihren eigenen Bauteilen.
 - **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
   Haushalte. Reicht die Kasse nicht, wächst der Soldrückstand der Gemeinschaft.

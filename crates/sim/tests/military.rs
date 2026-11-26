@@ -396,7 +396,7 @@ fn a_shipyard_turns_market_goods_and_treasury_money_into_a_ship() {
     let step = 1.0 / stats.build_days as f64;
     assert_eq!((order.id, order.polity, order.planet), (0, me, capital));
     assert!((order.progress as f64 - step).abs() < 1e-6);
-    assert!(!order.stalled);
+    assert!(!order.stalled());
     for (good, amount) in &stats.parts {
         let taken = economy(&control).market(home).stock_of(*good)
             - economy(&sim).market(home).stock_of(*good);
@@ -493,6 +493,7 @@ fn more_slots_build_more_ships_at_once() {
                 world.resource::<Galaxy>(),
                 world.resource::<Economy>(),
                 world.resource::<Polities>(),
+                world.resource::<Fleets>(),
                 capital
             ),
             slots
@@ -504,7 +505,7 @@ fn more_slots_build_more_ships_at_once() {
             .filter(|order| order.progress > 0.0)
             .count();
         assert_eq!(building, slots as usize);
-        assert!(fleets(&sim).orders.iter().all(|order| !order.stalled));
+        assert!(fleets(&sim).orders.iter().all(|order| !order.stalled()));
         sim.run_days(days - 1);
         let after_one_build = fleets(&sim).ship_count(me) - ships;
         sim.run_days(days);
@@ -546,7 +547,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     // Ohne Bauteile steht die Werft; gezahlt wird nichts, aber der Bedarf ist gemeldet.
     sim.run_days(3);
     assert_eq!((order(&sim).progress, order(&sim).spent), (0.0, 0));
-    assert!(order(&sim).stalled);
+    assert!(order(&sim).stalled());
     let hull = data.balance.military.hull_good_id;
     assert!(economy(&sim).market(home).demand[hull.index()] > 0.0);
 
@@ -554,7 +555,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     set_stock(&mut sim, home, &["rumpfsegmente", "antriebe"], 50.0);
     sim.run_days(1);
     assert_eq!(order(&sim).progress, 0.0);
-    assert!(order(&sim).stalled);
+    assert!(order(&sim).stalled());
     assert_eq!(stock_of(&sim, home, "rumpfsegmente"), 50.0);
     assert_eq!(stock_of(&sim, home, "antriebe"), 50.0);
 
@@ -562,7 +563,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     set_stock(&mut sim, home, &["waffensysteme"], 50.0);
     sim.run_days(1);
     assert!((order(&sim).progress - step).abs() < 1e-6);
-    assert!(!order(&sim).stalled);
+    assert!(!order(&sim).stalled());
     assert!(order(&sim).spent > 0);
 
     // Reicht ein Bauteil nur für einen Teil des Tages, rückt der Bau nur so weit vor, wie
@@ -583,7 +584,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
         gained > 0.2 * step && gained < 0.8 * step,
         "Fortschritt {gained} bei halbem Angebot, voller Tag wäre {step}"
     );
-    assert!(order(&sim).stalled);
+    assert!(order(&sim).stalled());
     set_stock(&mut sim, home, &["waffensysteme"], 50.0);
 
     // Leere Staatskasse: Der Staat nimmt keine Steuern mehr ein und hat nichts mehr.
@@ -592,7 +593,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
         CommandOutcome::Applied
     );
     sim.run_days(1);
-    assert!(!order(&sim).stalled, "mit Ware und Geld läuft der Bau");
+    assert!(!order(&sim).stalled(), "mit Ware und Geld läuft der Bau");
     let purse = {
         let mut economy = sim.world_mut().resource_mut::<Economy>();
         let purse = std::mem::take(&mut economy.treasuries[me.index()]);
@@ -609,7 +610,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     sim.run_days(4);
     assert_eq!(treasury(&sim, me), 0);
     assert_eq!((order(&sim).progress, order(&sim).spent), (before, spent));
-    assert!(order(&sim).stalled);
+    assert!(order(&sim).stalled());
 
     // Kommt das Geld zurück, geht es weiter.
     {
@@ -619,7 +620,7 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     }
     sim.run_days(1);
     assert!((order(&sim).progress - before - step).abs() < 1e-6);
-    assert!(!order(&sim).stalled);
+    assert!(!order(&sim).stalled());
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
 }
@@ -731,7 +732,7 @@ fn a_blockade_starves_a_yard_that_lives_on_imports() {
             if fleets(sim)
                 .orders
                 .first()
-                .is_some_and(|order| order.stalled)
+                .is_some_and(|order| order.stalled())
             {
                 stalled[index] += 1;
             }
@@ -752,7 +753,7 @@ fn a_blockade_starves_a_yard_that_lives_on_imports() {
         .first()
         .expect("unter Blockade ist das Schiff noch nicht fertig");
     assert!(
-        behind.progress < 0.5 && behind.stalled,
+        behind.progress < 0.5 && behind.stalled(),
         "Baufortschritt unter Blockade {:.2}",
         behind.progress
     );
@@ -787,6 +788,136 @@ fn a_blockade_starves_a_yard_that_lives_on_imports() {
 }
 
 // --- 4. Nachschub -----------------------------------------------------------------------
+
+/// Kolonien mit Werft, und ob ihr Rüstungskapital dazu passt: Zurückgegeben werden die
+/// Welten mit Werft außer den Hauptwelten.
+fn colony_yards(sim: &Headless) -> Vec<PlanetId> {
+    let data = data();
+    let military = &data.balance.military;
+    let world = sim.world();
+    let (galaxy, economy, polities) = (
+        world.resource::<Galaxy>(),
+        world.resource::<Economy>(),
+        world.resource::<Polities>(),
+    );
+    let mut yards = Vec::new();
+    for planet in galaxy
+        .planets
+        .iter()
+        .filter(|planet| planet.owner.is_some())
+    {
+        let owner = polities.get(planet.owner.unwrap());
+        if owner.capital == Some(planet.id) {
+            continue;
+        }
+        let slots = yard_slots(data, galaxy, economy, polities, fleets(sim), planet.id);
+        let capital = sim::fleet::arms_capital(data, economy, planet.id);
+        // Eine Werft steht nie auf weniger als dem unteren, keine Welt ohne Werft hat den
+        // oberen Schwellenwert an Rüstungskapital.
+        if slots > 0 {
+            assert!(capital >= military.yard_close_capital, "{}", planet.name);
+            yards.push(planet.id);
+        } else {
+            assert!(capital < military.yard_open_capital, "{}", planet.name);
+        }
+    }
+    yards
+}
+
+#[test]
+fn colony_yards_follow_real_arms_industry_and_do_not_flicker() {
+    // Eine Partie im Frieden, Monat für Monat: Auf den meisten Kolonien liegt etwas
+    // Rüstungskapital, das niemand braucht und das langsam verfällt. Solche Reste machen
+    // keine Werft. Wo eine entsteht, bleibt sie, bis ihre Betriebe wirklich abgebaut sind:
+    // Keine Welt wechselt in zwanzig Jahren öfter als zweimal (gewonnen, verloren).
+    let mut sim = observer(3);
+    let months = 20 * 12;
+    let mut changes: std::collections::BTreeMap<PlanetId, u32> = std::collections::BTreeMap::new();
+    let mut before = colony_yards(&sim);
+    let (mut seen, mut leftovers) = (0usize, 0usize);
+    for _ in 0..months {
+        sim.run_days(DAYS_PER_MONTH);
+        let now = colony_yards(&sim);
+        for planet in before.iter().filter(|planet| !now.contains(planet)) {
+            *changes.entry(*planet).or_default() += 1;
+        }
+        for planet in now.iter().filter(|planet| !before.contains(planet)) {
+            *changes.entry(*planet).or_default() += 1;
+        }
+        seen = seen.max(now.len());
+        // Welten mit einem Rest an Rüstungskapital, aber ohne Werft.
+        let world = sim.world();
+        leftovers = leftovers.max(
+            sim.galaxy()
+                .planets
+                .iter()
+                .filter(|planet| planet.owner.is_some() && !now.contains(&planet.id))
+                .filter(|planet| {
+                    sim::fleet::arms_capital(data(), world.resource::<Economy>(), planet.id) > 0.0
+                })
+                .count(),
+        );
+        before = now;
+    }
+    assert!(
+        seen > 0,
+        "Szenario neu wählen: In zwanzig Jahren sollte eine Kolonie eine Werft bekommen"
+    );
+    assert!(
+        leftovers >= 10,
+        "Reste von Rüstungskapital ohne Werft: höchstens {leftovers} zugleich"
+    );
+    let worst = changes.values().copied().max().unwrap_or(0);
+    assert!(worst <= 2, "eine Welt wechselte {worst}-mal: {changes:?}");
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+#[test]
+fn a_fleet_is_supplied_wherever_its_community_owns_a_world() {
+    let mut sim = observer(5);
+    sim.run_days(18 * DAYS_PER_YEAR);
+    // Ein System, das eine Gemeinschaft nach der Mehrheit seiner Bevölkerung prägt, in dem
+    // aber auch eine andere eine Welt besitzt. Für diese andere ist es eigenes Gebiet.
+    let found = sim.galaxy().systems.iter().find_map(|system| {
+        let holder = sim.galaxy().system_owner(system.id)?;
+        sim.galaxy()
+            .planets_in(system.id)
+            .filter_map(|planet| planet.owner)
+            .find(|owner| *owner != holder && fleets(&sim).of(*owner).next().is_some())
+            .map(|minority| (minority, holder, system.id))
+    });
+    let (me, holder, shared) =
+        found.expect("Szenario neu wählen: Nach 18 Jahren sollte es ein geteiltes System geben");
+    assert_ne!(sim.galaxy().system_owner(shared), Some(me));
+    assert!(sim.galaxy().owns_planet_in(me, shared));
+    assert!(!sim.world().resource::<Diplomacy>().at_war(me, holder));
+    let id = fleets(&sim).of(me).next().unwrap().id;
+    assert!(fleet(&sim, id).ships.iter().all(|ship| ship.fuel == 1.0));
+
+    // Die Flotte marschiert dorthin; unterwegs verbraucht sie Treibstoff.
+    march(&mut sim, id, shared);
+    let arrived = fleet(&sim, id).min_fuel();
+    assert!(
+        arrived < 0.99,
+        "Szenario neu wählen: Der Marsch sollte Treibstoff kosten ({arrived})"
+    );
+    // Am Markt des Systems, an dem auch ihre Welt dort handelt, fasst sie nach: Die Tanks
+    // füllen sich wieder.
+    let mut days = 0;
+    while fleet(&sim, id).min_fuel() < 1.0 {
+        sim.run_days(1);
+        days += 1;
+        assert!(
+            days <= 60,
+            "nach {days} Tagen steht der knappste Tank bei {}",
+            fleet(&sim, id).min_fuel()
+        );
+    }
+    assert!(days >= 1);
+    assert!(fleet(&sim, id).system == shared && !fleet(&sim, id).in_battle);
+    assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
 
 #[test]
 fn a_fleet_restocks_at_home_from_the_market_and_the_treasury_pays() {
@@ -1052,6 +1183,7 @@ fn damaged_ships_are_repaired_only_at_a_yard_and_only_with_hull_segments() {
                 world.resource::<Galaxy>(),
                 world.resource::<Economy>(),
                 world.resource::<Polities>(),
+                world.resource::<Fleets>(),
                 colony
             ),
             0

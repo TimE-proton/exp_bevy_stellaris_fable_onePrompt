@@ -1,6 +1,6 @@
 use super::{
     Battles, Fleets, advance_battles, advance_yards, move_fleets, muster_battles, open_battles,
-    pay_upkeep, repair_fleets, resupply_fleets, update_blockades,
+    pay_upkeep, repair_fleets, resupply_fleets, update_blockades, update_yards,
 };
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
@@ -107,8 +107,16 @@ fn service(
     mut fleets: ResMut<Fleets>,
     mut chronicle: ResMut<Chronicle>,
 ) {
-    resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
-    repair_fleets(&galaxy, &mut economy, &mut fleets, &polities, &data);
+    update_yards(&data, &galaxy, &economy, &mut fleets);
+    resupply_fleets(&galaxy, &mut economy, &mut fleets, &diplomacy, &data);
+    repair_fleets(
+        &galaxy,
+        &mut economy,
+        &mut fleets,
+        &polities,
+        &diplomacy,
+        &data,
+    );
     advance_yards(
         &galaxy,
         &mut economy,

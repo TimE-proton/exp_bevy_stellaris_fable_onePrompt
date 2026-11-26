@@ -7,11 +7,12 @@
 use super::{Fleets, Ship, yard_slots};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::data::GameData;
+use crate::diplomacy::Diplomacy;
 use crate::economy::{
     Economy, Market, Money, pay, pay_households, procure, purchase, to_credits, to_money,
 };
 use crate::galaxy::Galaxy;
-use crate::ids::{GoodId, PolityId};
+use crate::ids::{GoodId, PolityId, SystemId};
 use crate::polity::Polities;
 
 /// Bis auf diesen Rest gilt ein Vorrat oder ein Rumpf als voll.
@@ -34,14 +35,32 @@ fn top_up(level: f32, rate: f32, share: f32) -> f32 {
     if raised >= FULL { 1.0 } else { raised }
 }
 
-/// Flotten, die in einem System der eigenen Gemeinschaft liegen, fassen je Tag einen Teil
-/// ihrer Munition und ihres Treibstoffs nach. Der Staat kauft beides am Markt des Systems;
-/// ist der Markt knapp oder die Kasse leer, gibt es entsprechend weniger. In fremden und
-/// in blockierten Systemen gibt es nichts.
+/// Kann eine Gemeinschaft am Markt eines Systems für ihre Flotten und Werften einkaufen?
+/// Ja, wo sie eine Welt besitzt, es sei denn, das System untersteht (nach der Mehrheit
+/// seiner Bevölkerung) einer Gemeinschaft, mit der sie im Krieg liegt: Deren Kontor
+/// verkauft dem Gegner nichts. Nachschub, Instandsetzung und der Einkauf der Werften
+/// fragen alle hier: Wo eine Werft bauen darf, wird ihr Schiff auch versorgt.
+pub fn supply_base(
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    owner: PolityId,
+    system: SystemId,
+) -> bool {
+    galaxy.owns_planet_in(owner, system)
+        && galaxy
+            .system_owner(system)
+            .is_none_or(|holder| holder == owner || !diplomacy.at_war(owner, holder))
+}
+
+/// Flotten, die in einem System liegen, in dem ihre Gemeinschaft einkaufen kann
+/// ([`supply_base`]), fassen je Tag einen Teil ihrer Munition und ihres Treibstoffs nach.
+/// Der Staat kauft beides am Markt des Systems; ist der Markt knapp oder die Kasse leer,
+/// gibt es entsprechend weniger. In fremden und in blockierten Systemen gibt es nichts.
 pub fn resupply_fleets(
     galaxy: &Galaxy,
     economy: &mut Economy,
     fleets: &mut Fleets,
+    diplomacy: &Diplomacy,
     data: &GameData,
 ) {
     let balance = &data.balance.military;
@@ -54,7 +73,7 @@ pub fn resupply_fleets(
         if !fleet.is_docked()
             || fleet.in_battle
             || fleets.is_blockaded(system)
-            || galaxy.system_owner(system) != Some(owner)
+            || !supply_base(galaxy, diplomacy, owner, system)
         {
             continue;
         }
@@ -132,15 +151,17 @@ fn buy_kits(
     count
 }
 
-/// Flotten, die in einem eigenen System mit Werft liegen, werden instand gesetzt: Rumpf
-/// und Module gewinnen je Tag `repair_per_day`, verlorene Bordjäger werden ersetzt. Die
-/// Rumpfsegmente dafür (und die Bauteile der Jäger) kauft der Staat am Markt des Systems;
-/// ohne Ware keine Instandsetzung.
+/// Flotten, die in einem System mit eigener Werft liegen, in dem ihre Gemeinschaft
+/// einkaufen kann ([`supply_base`]), werden instand gesetzt: Rumpf und Module gewinnen je
+/// Tag `repair_per_day`, verlorene Bordjäger werden ersetzt. Die Rumpfsegmente dafür (und
+/// die Bauteile der Jäger) kauft der Staat am Markt des Systems; ohne Ware keine
+/// Instandsetzung.
 pub fn repair_fleets(
     galaxy: &Galaxy,
     economy: &mut Economy,
     fleets: &mut Fleets,
     polities: &Polities,
+    diplomacy: &Diplomacy,
     data: &GameData,
 ) {
     let balance = &data.balance.military;
@@ -153,13 +174,13 @@ pub fn repair_fleets(
         if !fleet.is_docked()
             || fleet.in_battle
             || !fleet.ships.iter().any(|ship| ship.is_damaged(data))
-            || galaxy.system_owner(system) != Some(owner)
+            || !supply_base(galaxy, diplomacy, owner, system)
         {
             continue;
         }
         let has_yard = galaxy.planets_in(system).any(|planet| {
             planet.owner == Some(owner)
-                && yard_slots(data, galaxy, economy, polities, planet.id) > 0
+                && yard_slots(data, galaxy, economy, polities, fleets, planet.id) > 0
         });
         if !has_yard {
             continue;
@@ -289,6 +310,11 @@ mod tests {
     use crate::economy::setup_economy;
     use crate::ids::FleetId;
 
+    /// Niemand führt Krieg.
+    fn peace() -> Diplomacy {
+        Diplomacy::default()
+    }
+
     fn drain(fleets: &mut Fleets, fleet: usize) {
         for ship in &mut fleets.list[fleet].ships {
             ship.ammo = 0.0;
@@ -309,7 +335,7 @@ mod tests {
         drain(&mut fleets, 0);
 
         let before = economy.clone();
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         let rate = balance.resupply_per_day;
         let (mut ammo_units, mut fuel_units) = (0.0, 0.0);
         for ship in &fleets.list[0].ships {
@@ -337,7 +363,7 @@ mod tests {
 
         // Nach genügend Tagen ist alles voll, und dann wird nichts mehr gekauft.
         for _ in 0..(1.0 / rate).ceil() as u32 {
-            resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+            resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         }
         assert!(
             fleets.list[0]
@@ -346,7 +372,7 @@ mod tests {
                 .all(|ship| ship.ammo == 1.0 && ship.fuel == 1.0)
         );
         let full = economy.clone();
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert_eq!(economy.treasury(PolityId(0)), full.treasury(PolityId(0)));
     }
 
@@ -360,7 +386,7 @@ mod tests {
         drain(&mut fleets, 0);
         // Keine Munition am Markt: Nur die Tanks füllen sich.
         assert_eq!(economy.markets[home.index()].stock[ammo.index()], 0.0);
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(fleets.list[0].ships.iter().all(|ship| ship.ammo == 0.0));
         assert!(fleets.list[0].ships.iter().all(|ship| ship.fuel > 0.0));
         // Der unerfüllte Wunsch steht als Nachfrage im Markt.
@@ -368,7 +394,7 @@ mod tests {
 
         // Ein knapper Bestand wird geteilt: Jedes Schiff bekommt denselben Anteil.
         economy.markets[home.index()].stock[ammo.index()] = 0.2;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         let levels: Vec<f32> = fleets.list[0].ships.iter().map(|ship| ship.ammo).collect();
         assert!(levels[0] > 0.0 && levels[0] < balance.resupply_per_day);
         assert!(levels.iter().all(|level| (level - levels[0]).abs() < 1e-6));
@@ -377,12 +403,12 @@ mod tests {
         economy.markets[home.index()].stock[ammo.index()] = 100.0;
         let cash = std::mem::take(&mut economy.treasuries[0]);
         let before = fleets.clone();
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         for (ship, old) in fleets.list[0].ships.iter().zip(&before.list[0].ships) {
             assert_eq!((ship.ammo, ship.fuel), (old.ammo, old.fuel));
         }
         economy.treasuries[0] = cash;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(fleets.list[0].ships[0].ammo > before.list[0].ships[0].ammo);
     }
 
@@ -407,24 +433,24 @@ mod tests {
 
         // Im Heimatsystem einer anderen Gemeinschaft.
         fleets.list[0].system = abroad;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(untouched(&fleets));
 
         // Zu Hause, aber das System ist gesperrt.
         fleets.list[0].system = home;
         fleets.blockaded = vec![home];
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(untouched(&fleets));
 
         // Zu Hause, aber im Gefecht oder auf dem Marsch.
         fleets.blockaded.clear();
         fleets.list[0].in_battle = true;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(untouched(&fleets));
         fleets.list[0].in_battle = false;
         fleets.list[0].route = vec![galaxy.neighbors(home)[0].system];
         fleets.list[0].progress = 0.5;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(untouched(&fleets));
         assert_eq!(economy.money_in_accounts(), before.money_in_accounts());
         assert_eq!(economy.treasury(PolityId(0)), before.treasury(PolityId(0)));
@@ -432,7 +458,7 @@ mod tests {
         // Gegenprobe: liegt sie frei im eigenen System, wird nachgefasst.
         fleets.list[0].route.clear();
         fleets.list[0].progress = 0.0;
-        resupply_fleets(&galaxy, &mut economy, &mut fleets, &data);
+        resupply_fleets(&galaxy, &mut economy, &mut fleets, &peace(), &data);
         assert!(!untouched(&fleets));
     }
 
@@ -457,7 +483,7 @@ mod tests {
         damage(&mut fleets);
         let weak = fleets.list[0].strength;
         let repair = |galaxy: &Galaxy, economy: &mut Economy, fleets: &mut Fleets| {
-            repair_fleets(galaxy, economy, fleets, &polities, &data)
+            repair_fleets(galaxy, economy, fleets, &polities, &peace(), &data)
         };
 
         // Ohne Rumpfsegmente am Markt geschieht nichts.
@@ -535,7 +561,8 @@ mod tests {
             .iter()
             .position(|recipe| recipe.sector == Sector::Arms)
             .unwrap();
-        economy.planets[colony.index()].capital[arms] = 1.0;
+        economy.planets[colony.index()].capital[arms] = balance.yard_open_capital;
+        super::super::update_yards(&data, &galaxy, &economy, &mut fleets);
         repair(&galaxy, &mut economy, &mut fleets);
         assert!(fleets.list[0].ships.iter().all(|ship| ship.hull > 0.5));
 
@@ -569,7 +596,14 @@ mod tests {
         let fighters = |fleets: &Fleets| fleets.list[0].ships[index].fighters;
 
         // Ohne Bauteile kommt kein Jäger.
-        repair_fleets(&galaxy, &mut economy, &mut fleets, &polities, &data);
+        repair_fleets(
+            &galaxy,
+            &mut economy,
+            &mut fleets,
+            &polities,
+            &peace(),
+            &data,
+        );
         assert_eq!(fighters(&fleets), stats.fighters - 3);
 
         // Mit Bauteilen kommt je Tag eine Maschine, bezahlt zum Preis ihrer Teile.
@@ -577,7 +611,14 @@ mod tests {
             economy.markets[home.index()].stock[good.index()] = 10.0;
         }
         let before = economy.clone();
-        repair_fleets(&galaxy, &mut economy, &mut fleets, &polities, &data);
+        repair_fleets(
+            &galaxy,
+            &mut economy,
+            &mut fleets,
+            &polities,
+            &peace(),
+            &data,
+        );
         assert_eq!(fighters(&fleets), stats.fighters - 2);
         for (good, amount) in &craft.parts {
             let taken = before.markets[home.index()].stock[good.index()]
@@ -589,7 +630,14 @@ mod tests {
         assert!((to_credits(paid) - craft.value * (1.0 + spread)).abs() < 0.01);
         assert_eq!(economy.money_in_accounts(), before.money_in_accounts());
         for _ in 0..5 {
-            repair_fleets(&galaxy, &mut economy, &mut fleets, &polities, &data);
+            repair_fleets(
+                &galaxy,
+                &mut economy,
+                &mut fleets,
+                &polities,
+                &peace(),
+                &data,
+            );
         }
         assert_eq!(
             fighters(&fleets),

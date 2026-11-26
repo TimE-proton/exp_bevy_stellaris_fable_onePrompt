@@ -220,6 +220,16 @@
         arrears_smoothing: 0.5,
         // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
         yard_capital_per_slot: 4.0,
+        // Eine Welt bekommt eine Werft, wenn ihr Rüstungskapital den ersten Wert erreicht,
+        // und behält sie, bis es unter den zweiten fällt. Reste von Kapital, die nur noch
+        // verfallen, machen so keine Werft, und an der Schwelle wechselt nichts von Monat
+        // zu Monat. Die Hauptwelt hat ihre Werft immer.
+        yard_open_capital: 1.0,
+        yard_close_capital: 0.5,
+        // Verliert eine Welt ihre Werft, ruhen ihre Aufträge so viele Tage. Kehrt die
+        // Werft zurück, geht der Bau ohne Verlust weiter; sonst verfällt der Auftrag wie
+        // ein gestrichener, ohne Erstattung.
+        yard_grace_days: 360,
         // Aufschlag der Werft auf den Einkaufswert der Bauteile. Er geht als Erlös an die
         // Rüstungsfirma der Welt: An Staatsaufträgen verdienen ihre Anteilseigner mit.
         yard_fee: 0.15,

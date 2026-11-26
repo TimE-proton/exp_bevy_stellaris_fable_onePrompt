@@ -9,7 +9,7 @@ use sim::clock::{DAYS_PER_YEAR, Date};
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::GoodTier;
 use sim::economy::{Economy, to_credits};
-use sim::fleet::{BuildOrder, Fleets, arms_capital, monthly_upkeep, yard_slots};
+use sim::fleet::{Fleets, arms_capital, monthly_upkeep, yard_slots};
 use sim::harness::{Headless, check_invariants};
 use sim::ids::{GoodId, PolityId};
 use sim::state::SimConfig;
@@ -38,19 +38,6 @@ pub struct FleetsArgs {
 
 fn percent(share: f32) -> String {
     format!("{:.0} %", 100.0 * share)
-}
-
-/// Stand eines Auftrags in der Warteschlange seiner Werft.
-fn order_state(order: &BuildOrder, position: usize, slots: u32) -> &'static str {
-    if order.progress >= 1.0 - 1e-6 {
-        "fertig, bleibt im Dock: feindliche Flotten im System"
-    } else if position >= slots as usize {
-        "wartet auf einen Bauplatz"
-    } else if order.stalled {
-        "stockt: Bauteile oder Geld fehlen"
-    } else {
-        "im Bau"
-    }
 }
 
 pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
@@ -155,10 +142,11 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             to_credits(monthly_upkeep(data, fleets, polity.id)),
             percent(fleets.arrears_of(polity.id))
         );
-        // Werften und der Markt, aus dem sie und die Flotte leben.
+        // Werften und der Markt, aus dem sie und die Flotte leben. Eine Welt, die ihre
+        // Werft verloren hat, steht hier weiter, solange dort Aufträge ruhen.
         for planet in galaxy.planets_of(polity.id) {
-            let slots = yard_slots(data, galaxy, economy, polities, planet.id);
-            if slots == 0 {
+            let slots = yard_slots(data, galaxy, economy, polities, fleets, planet.id);
+            if slots == 0 && fleets.orders_at(planet.id).next().is_none() {
                 continue;
             }
             let market = economy.market(planet.system);
@@ -176,7 +164,11 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             println!(
                 "  Werft {:<14} {} {} (Rüstungskapital {:.1}){}  Markt {}: {}",
                 planet.name,
-                slots,
+                if slots == 0 {
+                    "keine".to_string()
+                } else {
+                    slots.to_string()
+                },
                 if slots == 1 { "Bauplatz" } else { "Bauplätze" },
                 arms_capital(data, economy, planet.id),
                 if fleets.is_blockaded(planet.system) {
@@ -187,7 +179,7 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
                 galaxy.system(planet.system).name,
                 stock.join(", ")
             );
-            for (position, order) in fleets.orders_at(planet.id).enumerate() {
+            for order in fleets.orders_at(planet.id) {
                 let design = &data.designs[order.design as usize];
                 println!(
                     "    Auftrag {:<3} {:<14} {:<9} {:>5}  gezahlt {:>6.0}  seit {}  {}",
@@ -197,7 +189,7 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
                     percent(order.progress),
                     to_credits(order.spent),
                     Date::from_day(order.started),
-                    order_state(order, position, slots)
+                    order.status_text(data)
                 );
             }
         }

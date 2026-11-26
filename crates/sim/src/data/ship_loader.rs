@@ -462,6 +462,17 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             military.yard_capital_per_slot > 0.0 && military.yard_capital_per_slot.is_finite(),
         ),
         (
+            "yard_open_capital muss positiv sein, yard_close_capital positiv und nicht größer",
+            military.yard_open_capital > 0.0
+                && military.yard_open_capital.is_finite()
+                && military.yard_close_capital > 0.0
+                && military.yard_close_capital <= military.yard_open_capital,
+        ),
+        (
+            "yard_grace_days muss mindestens 1 sein",
+            military.yard_grace_days >= 1,
+        ),
+        (
             "yard_fee muss in 0..5 liegen",
             (0.0..=5.0).contains(&military.yard_fee),
         ),

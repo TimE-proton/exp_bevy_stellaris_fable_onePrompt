@@ -36,9 +36,10 @@ pub use battles::{
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
-pub use supply::{monthly_upkeep, pay_upkeep, repair_fleets, resupply_fleets};
+pub use supply::{monthly_upkeep, pay_upkeep, repair_fleets, resupply_fleets, supply_base};
 pub use yard::{
-    BuildOrder, advance_yards, arms_capital, cancel_order, design_buildable, order_ship, yard_slots,
+    BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable,
+    order_ship, update_yards, yard_slots,
 };
 
 use crate::battle::{Doctrine, Formation, ShipSpec};
@@ -341,6 +342,10 @@ pub struct Fleets {
     /// zuletzt schuldig blieb. Lesen mit [`Fleets::arrears_of`].
     #[serde(default)]
     pub arrears: Vec<f32>,
+    /// Welten, deren Rüstungskapital für eine Werft reicht, aufsteigend. Täglich
+    /// nachgeführt ([`update_yards`]); die Hauptwelten haben ihre Werft unabhängig davon.
+    #[serde(default)]
+    pub yards: Vec<PlanetId>,
 }
 
 impl Fleets {
@@ -562,6 +567,9 @@ impl Fleets {
         }
         if let Some(arrears) = self.arrears.iter().find(|arrears| !unit(**arrears)) {
             return Some(format!("Soldrückstand {arrears}"));
+        }
+        if self.yards.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Some("Werften stehen außer der Reihe".into());
         }
         None
     }
@@ -971,7 +979,7 @@ mod tests {
             design: 1,
             progress: 0.5,
             spent: 0,
-            stalled: false,
+            status: BuildStatus::Building,
             started: 0,
         };
         let mut with_order = clean.clone();

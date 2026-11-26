@@ -409,6 +409,12 @@ pub struct MilitaryBalance {
     /// geschlossen wird (Glättung des Soldrückstands).
     pub arrears_smoothing: f32,
     pub yard_capital_per_slot: f64,
+    /// Rüstungskapital, ab dem auf einer Welt eine Werft entsteht, und der Stand, unter
+    /// dem eine bestehende Werft erlischt (höchstens der erste Wert).
+    pub yard_open_capital: f64,
+    pub yard_close_capital: f64,
+    /// So viele Tage ruht ein Auftrag, dessen Welt keine Werft mehr hat, bevor er verfällt.
+    pub yard_grace_days: u64,
     /// Aufschlag der Werft auf den Einkaufswert der Bauteile; Erlös der Rüstungsfirma.
     pub yard_fee: f64,
     /// So viele Aufträge nimmt die Werft einer Welt höchstens an.
