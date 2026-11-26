@@ -16,6 +16,7 @@ use crate::hash::Fnv64;
 use crate::ids::PolityId;
 use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
+use crate::siege::{Sieges, setup_sieges};
 use crate::tech::{Research, setup_research};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -78,6 +79,7 @@ sim_state! {
     research: Research,
     logistics: Logistics,
     fleets: Fleets,
+    sieges: Sieges,
     diplomacy: Diplomacy,
     queue: CommandQueue,
     log: CommandLog,
@@ -132,6 +134,7 @@ impl SimState {
         // Das Startwissen wirkt vom ersten Takt an, auch für Befehle vor dem ersten Tag.
         research.publish_effects(&mut economy, &mut logistics);
         let fleets = setup_fleets(data, &galaxy, &polities);
+        let sieges = setup_sieges(data, &galaxy, &polities);
         Self {
             config,
             clock: SimClock::default(),
@@ -142,6 +145,7 @@ impl SimState {
             research,
             logistics,
             fleets,
+            sieges,
             diplomacy: Diplomacy::default(),
             queue: CommandQueue::default(),
             log: CommandLog::default(),

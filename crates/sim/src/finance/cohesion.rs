@@ -174,6 +174,12 @@ pub struct CohesionFactors {
     /// Jahre unter dem heutigen Besitzer.
     pub years: f64,
     pub expropriation: f64,
+    /// Besatzung nach einer Eroberung (0..1) und wie weit stationierte Truppen sie
+    /// auffangen (0..1); Kriegsschäden, solange ihr Verursacher die Welt hält (0..1).
+    /// Spiegel aus [`Region`], dort von der Belagerung geschrieben.
+    pub occupation: f64,
+    pub garrison_cover: f64,
+    pub war_damage: f64,
     /// Wert, auf den der Zusammenhalt zustrebt.
     pub target: f64,
 }
@@ -232,8 +238,16 @@ impl CohesionFactors {
                 "Entfernung",
                 -(balance.distance * self.distance).min(balance.distance_cap),
             ),
-            ("Aufbruchstimmung", honeymoon),
+            // Unter Besatzung kommt keine Aufbruchstimmung auf.
+            ("Aufbruchstimmung", honeymoon * (1.0 - self.occupation)),
             ("Enteignungen", -balance.expropriation * self.expropriation),
+            (
+                "Besatzung",
+                -balance.occupation
+                    * self.occupation
+                    * (1.0 - balance.occupation_hold * self.garrison_cover),
+            ),
+            ("Kriegsschäden", -balance.war_damage * self.war_damage),
         ]
     }
 }
@@ -268,6 +282,14 @@ pub struct Region {
     /// Besitzer beim letzten Monatsabschluss und Tag, seit dem er es ist.
     pub owner_seen: Option<PolityId>,
     pub since_day: u64,
+    /// Spiegelwerte der Belagerung; nur sie schreibt sie. `besieged`: Ein Datensatz
+    /// besteht. `occupation`: Besatzung nach einer Eroberung (0..1). `garrison_cover`:
+    /// Anteil der Garnison, die eine besetzte Welt ruhig hielte (0..1). `war_damage`:
+    /// Kriegsschäden, soweit der heutige Besitzer sie verursacht hat (0..1).
+    pub besieged: bool,
+    pub occupation: f64,
+    pub garrison_cover: f64,
+    pub war_damage: f64,
 }
 
 /// Abspaltung einer Region.
@@ -400,6 +422,9 @@ pub fn update_cohesion(
             distance,
             years: (day.saturating_sub(region.since_day)) as f64 / DAYS_PER_YEAR as f64,
             expropriation: state.expropriation_risk,
+            occupation: region.occupation,
+            garrison_cover: region.garrison_cover,
+            war_damage: region.war_damage,
             target: 0.0,
         };
         let target = cohesion_target(&factors, balance);

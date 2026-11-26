@@ -25,6 +25,7 @@ pub mod ids;
 pub mod logistics;
 pub mod polity;
 pub mod rng;
+pub mod siege;
 pub mod state;
 pub mod tech;
 
@@ -133,6 +134,7 @@ impl PluginGroup for SimPlugins {
             .add(finance::FinancePlugin)
             .add(tech::TechPlugin)
             .add(fleet::FleetPlugin)
+            .add(siege::SiegePlugin)
             .add(ai::AiPlugin)
     }
 }
