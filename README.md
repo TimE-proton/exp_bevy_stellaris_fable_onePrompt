@@ -41,22 +41,33 @@ Volkswirtschaftliche Kennzahlen im Jahresabstand (Versorgung, Auslastung, Preisn
 Geldverteilung), dazu Markt und Werke eines Systems. Das Werkzeug zum Auswuchten.
 
 ```bash
-cargo headless fleets --seed 7 --years 20 --order speer:1,dolch:2
+cargo headless run --seed 7 --years 30 --war 10:0:1 --war 12:2:1 --peace 20:0:1 \
+    --navy 11:alle:1 --order 14:1:speer:1,dolch:2@kolonie
 ```
 
-Flotten, Schiffe, Vorräte, Werften und Bauaufträge je Gemeinschaft. Mit `--order` gibt
-jede Gemeinschaft dieselben Schiffe bei der Werft ihrer Hauptwelt in Auftrag; `--ships`
-listet jedes Schiff einzeln.
+Kriege, Bestellungen und Flottenprogramme nach Drehbuch, solange keine KI Krieg führt und
+rüstet. Jede Angabe beginnt mit dem Jahr und darf beliebig oft stehen:
+
+- `--war JAHR:A:B`: Gemeinschaft A erklärt B den Krieg und schickt ihre Flotten im
+  Blockadeauftrag in deren Heimatsystem. `--peace JAHR:A:B` schließt Frieden.
+- `--order JAHR:WER:SCHIFFE[@ORT]`: WER (Nummer ab 0 oder `alle`) bestellt die Schiffe bei
+  der Werft der Hauptwelt, mit `@kolonie` bei der Kolonie mit den meisten Bauplätzen.
+- `--navy JAHR:WER:FAKTOR`: WER hält seine Marine von da an auf dem FAKTOR-fachen der
+  Startflotte und bestellt jeden Monat nach, was fehlt. `1` ersetzt Verluste, `2`
+  verdoppelt die Flotte, `0` beendet das Programm.
+
+Die Ausgabe zeigt die Chronik, abgelehnte Befehle, die Bilanz jedes Gefechts samt Ausgang
+und je Gemeinschaft Staatskasse, Kriegsmüdigkeit und Zusammenhalt. `sweep`, `hash` und
+`fleets` nehmen dieselben Angaben: So gehen Gefechte, Verluste und Nachbau auch in Sweeps
+und Prüfsummen ein.
 
 ```bash
-cargo headless run --seed 7 --years 30 --war 10:0:1 --war 12:2:1 --peace 20:0:1
+cargo headless fleets --seed 7 --years 20 --order 10:alle:speer:1,dolch:2
 ```
 
-Kriege nach Drehbuch, solange keine KI Krieg führt: Im Jahr 10 erklärt Gemeinschaft 0 der
-Gemeinschaft 1 den Krieg und schickt ihre Flotten im Blockadeauftrag in deren
-Heimatsystem. Die Ausgabe zeigt die Chronik, die Bilanz jedes Gefechts samt Ausgang und je
-Gemeinschaft Staatskasse, Kriegsmüdigkeit und Zusammenhalt. `sweep` und `hash` nehmen
-dieselben Angaben: So gehen Gefechte auch in Sweeps und Prüfsummen ein.
+Flotten, Schiffe, Vorräte, Werften und Bauaufträge je Gemeinschaft nach einer Partie mit
+demselben Drehbuch; `--ships` listet jedes Schiff einzeln, `--polity N` zeigt nur eine
+Gemeinschaft, `--save datei.ron` schreibt den Spielstand weg.
 
 ```bash
 cargo headless research --seed 7 --years 100

@@ -4,12 +4,13 @@
 mod battle;
 mod fleets;
 mod research;
+mod script;
 mod war;
 
 use clap::{Parser, Subcommand};
 use sim::GameData;
 use sim::clock::{DAYS_PER_YEAR, date_of_tick};
-use sim::harness::{Headless, RunSummary, ScriptedEvent, run_scripted, summarize, sweep_scripted};
+use sim::harness::{Headless, RunSummary, run_scripted, summarize, sweep_scripted};
 use sim::state::{SaveGame, SimConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -41,14 +42,9 @@ enum Command {
         /// Nur die Zusammenfassung, keine Chronik.
         #[arg(long)]
         quiet: bool,
-        /// Krieg nach Drehbuch, beliebig oft: Zu Beginn des Jahres erklärt Gemeinschaft A
-        /// (Nummer ab 0) der Gemeinschaft B den Krieg und schickt ihre Flotten im
-        /// Blockadeauftrag in deren Heimatsystem.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
-        war: Vec<ScriptedEvent>,
-        /// Frieden nach Drehbuch, beliebig oft: Zu Beginn des Jahres schließt A mit B Frieden.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
-        peace: Vec<ScriptedEvent>,
+        /// Kriege, Bestellungen und Flottenprogramme nach Drehbuch.
+        #[command(flatten)]
+        script: script::ScriptArgs,
     },
     /// Viele Seeds parallel laufen lassen und Kennzahlen als Tabelle ausgeben.
     Sweep {
@@ -63,12 +59,9 @@ enum Command {
         /// Ergebnis zusätzlich als CSV schreiben.
         #[arg(long)]
         csv: Option<PathBuf>,
-        /// Krieg nach Drehbuch in jedem Lauf, wie bei `run`.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
-        war: Vec<ScriptedEvent>,
-        /// Frieden nach Drehbuch in jedem Lauf, wie bei `run`.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
-        peace: Vec<ScriptedEvent>,
+        /// Dasselbe Drehbuch in jedem Lauf, wie bei `run`.
+        #[command(flatten)]
+        script: script::ScriptArgs,
     },
     /// Zustandsprüfsummen ausgeben. Zwei Aufrufe mit gleichem Seed müssen gleich sein.
     Hash {
@@ -82,12 +75,9 @@ enum Command {
         /// Jeden Takt rechnen statt Leertakte zu überspringen (muss dasselbe ergeben).
         #[arg(long)]
         exact: bool,
-        /// Krieg nach Drehbuch, wie bei `run`: So gehen auch Gefechte in die Prüfsummen ein.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_war)]
-        war: Vec<ScriptedEvent>,
-        /// Frieden nach Drehbuch, wie bei `run`.
-        #[arg(long, value_name = "JAHR:A:B", value_parser = war::parse_peace)]
-        peace: Vec<ScriptedEvent>,
+        /// Drehbuch wie bei `run`: So gehen auch Gefechte und Werften in die Prüfsummen ein.
+        #[command(flatten)]
+        script: script::ScriptArgs,
     },
     /// Volkswirtschaftliche Kennzahlen im Jahresabstand, zum Auswuchten der Balance.
     Economy {
@@ -145,10 +135,12 @@ fn main() -> ExitCode {
             years,
             save,
             quiet,
-            war,
-            peace,
+            script,
         } => {
-            let script = war::script(&war, &peace);
+            let script = match script.script(&data) {
+                Ok(script) => script,
+                Err(error) => return script_error(&error),
+            };
             let (sim, violation) = run_scripted(&data, seed, years * DAYS_PER_YEAR, &script);
             if !quiet {
                 for entry in &sim.world().resource::<sim::chronicle::Chronicle>().entries {
@@ -178,10 +170,12 @@ fn main() -> ExitCode {
             years,
             jobs,
             csv,
-            war,
-            peace,
+            script,
         } => {
-            let script = war::script(&war, &peace);
+            let script = match script.script(&data) {
+                Ok(script) => script,
+                Err(error) => return script_error(&error),
+            };
             let seeds: Vec<u64> = (seeds.0..seeds.1).collect();
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism()
@@ -333,10 +327,12 @@ fn main() -> ExitCode {
             days,
             every,
             exact,
-            war,
-            peace,
+            script,
         } => {
-            let script = war::script(&war, &peace);
+            let script = match script.script(&data) {
+                Ok(script) => script,
+                Err(error) => return script_error(&error),
+            };
             let mut sim = Headless::new(data, SimConfig { seed, player: None });
             let every = every.max(1);
             println!("Tag {:>7}  {:016x}", 0, sim.hash());
@@ -622,6 +618,12 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Meldet eine Angabe des Drehbuchs, die sich nicht lesen ließ.
+fn script_error(error: &str) -> ExitCode {
+    eprintln!("Fehler im Drehbuch: {error}");
+    ExitCode::FAILURE
 }
 
 fn print_summary(summary: &RunSummary) {

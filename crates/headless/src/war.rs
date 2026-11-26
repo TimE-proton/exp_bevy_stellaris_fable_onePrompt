@@ -1,48 +1,13 @@
-//! Kriege nach Drehbuch auf der Kommandozeile: die Angaben `--war` und `--peace` und die
-//! Ausgabe dessen, was die Gefechte hinterlassen haben. Gespielt wird das Drehbuch von
-//! `sim::harness::WarScript`.
+//! Was die Kriege eines Drehbuchs hinterlassen haben, auf der Kommandozeile: abgelehnte
+//! Befehle, laufende Gefechte, Bilanzen und Trümmerfelder. Die Angaben des Drehbuchs
+//! selbst liest `crate::script`.
 
-use sim::clock::{DAYS_PER_YEAR, date_of_tick};
+use sim::clock::date_of_tick;
 use sim::command::CommandOutcome;
 use sim::data::ShipClass;
 use sim::fleet::{BattleOutcome, BattleReport, Battles};
-use sim::harness::{Headless, ScriptedAct, ScriptedEvent, WarScript};
+use sim::harness::Headless;
 use sim::ids::PolityId;
-
-/// Liest `JAHR:A:B`, z. B. `12:0:3`, als Ereignis zu Beginn des Jahres.
-fn parse_event(text: &str, act: ScriptedAct) -> Result<ScriptedEvent, String> {
-    let parts: Vec<&str> = text.split(':').map(str::trim).collect();
-    let [year, a, b] = parts.as_slice() else {
-        return Err("erwartet wird JAHR:A:B, z. B. 12:0:3".into());
-    };
-    let number = |text: &str, what: &str| {
-        text.parse::<u32>()
-            .map_err(|_| format!("{what} „{text}“ ist keine Zahl"))
-    };
-    let event = ScriptedEvent {
-        day: number(year, "Jahr")? as u64 * DAYS_PER_YEAR,
-        act,
-        a: PolityId(number(a, "Gemeinschaft")?),
-        b: PolityId(number(b, "Gemeinschaft")?),
-    };
-    if event.a == event.b {
-        return Err("A und B müssen verschiedene Gemeinschaften sein".into());
-    }
-    Ok(event)
-}
-
-pub fn parse_war(text: &str) -> Result<ScriptedEvent, String> {
-    parse_event(text, ScriptedAct::War)
-}
-
-pub fn parse_peace(text: &str) -> Result<ScriptedEvent, String> {
-    parse_event(text, ScriptedAct::Peace)
-}
-
-/// Das Drehbuch aus den Angaben `--war` und `--peace`.
-pub fn script(wars: &[ScriptedEvent], peace: &[ScriptedEvent]) -> WarScript {
-    WarScript::new(wars.iter().chain(peace).copied().collect())
-}
 
 fn counts(values: &[u32; 6]) -> String {
     let parts: Vec<String> = ShipClass::ALL
@@ -187,39 +152,19 @@ pub fn print_aftermath(sim: &Headless) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn events_are_parsed_and_checked() {
-        assert_eq!(
-            parse_war("12:0:3"),
-            Ok(ScriptedEvent {
-                day: 12 * DAYS_PER_YEAR,
-                act: ScriptedAct::War,
-                a: PolityId(0),
-                b: PolityId(3)
-            })
-        );
-        assert_eq!(parse_peace(" 2 : 1 : 0 ").unwrap().act, ScriptedAct::Peace);
-        assert!(parse_war("12:0").is_err());
-        assert!(parse_war("zwölf:0:3").is_err());
-        assert!(parse_war("12:2:2").is_err());
-        assert!(script(&[], &[]).is_empty());
-        assert!(!script(&[parse_war("1:0:1").unwrap()], &[]).is_empty());
-    }
+    use sim::harness::{ScriptedEvent, WarScript};
 
     #[test]
     fn a_script_naming_a_community_that_does_not_exist_is_reported_not_fatal() {
         let data = sim::GameData::load_workspace().unwrap();
         // Sechs Gemeinschaften, Nummern 0 bis 5: Die 6 ist der klassische Zählfehler, die 99
         // ein Tippfehler. Beides einmal als Urheber und einmal als Ziel.
-        let script = script(
-            &[
-                parse_war("0:6:1").unwrap(),
-                parse_war("0:0:99").unwrap(),
-                parse_war("0:2:3").unwrap(),
-            ],
-            &[parse_peace("0:99:0").unwrap()],
-        );
+        let script = WarScript::new(vec![
+            ScriptedEvent::war(0, PolityId(6), PolityId(1)),
+            ScriptedEvent::war(0, PolityId(0), PolityId(99)),
+            ScriptedEvent::war(0, PolityId(2), PolityId(3)),
+            ScriptedEvent::peace(0, PolityId(99), PolityId(0)),
+        ]);
         let (sim, violation) = sim::harness::run_scripted(&data, 3, 40, &script);
         assert_eq!(violation, None);
         assert_eq!(polity_name(&sim, PolityId(2)), sim.polities().list[2].name);

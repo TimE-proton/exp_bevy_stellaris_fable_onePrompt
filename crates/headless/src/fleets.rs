@@ -1,18 +1,18 @@
 //! Flotten, Schiffe, Vorräte und Bauaufträge einer Partie auf der Kommandozeile. Mit
-//! `--order` gibt jede Gemeinschaft dieselben Schiffe in Auftrag: So lässt sich ohne
-//! Militär-KI sehen, was Werften, Märkte und Staatskassen daraus machen.
+//! dem Drehbuch (`--order`, `--navy`, `--war`, `--peace`) bestellen und kämpfen die
+//! Gemeinschaften: So lässt sich ohne Militär-KI sehen, was Werften, Märkte und
+//! Staatskassen aus Rüstung, Verlusten und Nachbau machen.
 
 use clap::Args;
 use sim::GameData;
-use sim::battle::matchup::Side;
 use sim::clock::{DAYS_PER_YEAR, Date};
-use sim::command::{CommandOutcome, SimCommand};
 use sim::data::GoodTier;
 use sim::economy::{Economy, to_credits};
 use sim::fleet::{Fleets, arms_capital, monthly_upkeep, yard_slots};
-use sim::harness::{Headless, check_invariants};
+use sim::harness::{check_invariants, run_scripted};
 use sim::ids::{GoodId, PolityId};
-use sim::state::SimConfig;
+use sim::state::SaveGame;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Args)]
@@ -21,19 +21,18 @@ pub struct FleetsArgs {
     seed: u64,
     #[arg(long, default_value_t = 10)]
     years: u64,
-    /// Jede Gemeinschaft bestellt diese Schiffe bei der Werft ihrer Hauptwelt,
-    /// z. B. `speer:1,dolch:2`.
-    #[arg(long)]
-    order: Option<String>,
-    /// Jahr, in dem die Bestellung aus `--order` aufgegeben wird.
-    #[arg(long, default_value_t = 0)]
-    order_year: u64,
+    /// Bestellungen, Flottenprogramme, Kriege und Friedensschlüsse nach Drehbuch.
+    #[command(flatten)]
+    script: crate::script::ScriptArgs,
     /// Nur diese Gemeinschaft ausgeben (Nummer ab 0).
     #[arg(long)]
     polity: Option<u32>,
     /// Jedes Schiff einzeln auflisten.
     #[arg(long)]
     ships: bool,
+    /// Spielstand am Ende hierhin schreiben.
+    #[arg(long)]
+    save: Option<PathBuf>,
 }
 
 fn percent(share: f32) -> String {
@@ -41,25 +40,14 @@ fn percent(share: f32) -> String {
 }
 
 pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
-    let wanted = match args
-        .order
-        .as_deref()
-        .map(|text| Side::parse(data, text))
-        .transpose()
-    {
-        Ok(side) => side.map(|side| side.ships).unwrap_or_default(),
+    let script = match args.script.script(data) {
+        Ok(script) => script,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("Fehler im Drehbuch: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let mut sim = Headless::new(
-        data.clone(),
-        SimConfig {
-            seed: args.seed,
-            player: None,
-        },
-    );
+    let (sim, violation) = run_scripted(data, args.seed, args.years * DAYS_PER_YEAR, &script);
     if let Some(only) = args.polity
         && only as usize >= sim.polities().list.len()
     {
@@ -69,29 +57,6 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let order_year = args.order_year.min(args.years);
-    sim.run_days(order_year * DAYS_PER_YEAR);
-    if !wanted.is_empty() {
-        let capitals: Vec<_> = sim
-            .polities()
-            .alive()
-            .filter_map(|polity| polity.capital.map(|capital| (polity.id, capital)))
-            .collect();
-        for (polity, planet) in capitals {
-            for (design, count) in &wanted {
-                for _ in 0..*count {
-                    sim.issue(
-                        polity,
-                        SimCommand::BuildShip {
-                            planet,
-                            design: *design,
-                        },
-                    );
-                }
-            }
-        }
-    }
-    sim.run_days((args.years - order_year) * DAYS_PER_YEAR);
 
     let world = sim.world();
     let galaxy = sim.galaxy();
@@ -106,14 +71,8 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
         100.0 * military.upkeep_per_month,
         100.0 * military.yard_fee
     );
-    for entry in &sim.command_log().entries {
-        if let CommandOutcome::Rejected(reason) = &entry.outcome {
-            println!(
-                "Abgelehnt ({}): {:?}: {reason}",
-                crate::war::polity_name(&sim, entry.polity),
-                entry.command
-            );
-        }
+    if !script.is_empty() {
+        crate::war::print_aftermath(&sim);
     }
     // Wovon Flotten und Werften leben: Treibstoff und alle Rüstungsgüter.
     let fuel = data.balance.economy.fuel_id;
@@ -261,9 +220,16 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             }
         }
     }
-    if let Err(message) = check_invariants(world) {
+    if let Some(message) = violation.or_else(|| check_invariants(world).err()) {
         eprintln!("INVARIANTE VERLETZT: {message}");
         return ExitCode::FAILURE;
+    }
+    if let Some(path) = args.save {
+        if let Err(error) = SaveGame::write(&sim.save(), &path) {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+        println!("Spielstand: {}", path.display());
     }
     ExitCode::SUCCESS
 }

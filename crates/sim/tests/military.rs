@@ -4237,7 +4237,7 @@ fn a_blockade_far_from_home_runs_dry_without_supply() {
 
 #[test]
 fn losses_are_weighed_against_a_stable_measure_not_against_what_is_left() {
-    use sim::harness::{ScriptedAct, ScriptedEvent, WarScript};
+    use sim::harness::{ScriptedEvent, WarScript};
     let data = data();
     let balance = &data.balance.military;
     let start = balance.starting_fleet_value;
@@ -4251,12 +4251,11 @@ fn losses_are_weighed_against_a_stable_measure_not_against_what_is_left() {
             } else {
                 (pair.1, pair.0)
             };
-            events.push(ScriptedEvent {
-                day: 30 + round * 300,
-                act: ScriptedAct::War,
-                a: PolityId(a),
-                b: PolityId(b),
-            });
+            events.push(ScriptedEvent::war(
+                30 + round * 300,
+                PolityId(a),
+                PolityId(b),
+            ));
         }
     }
     let script = WarScript::new(events);
@@ -4901,4 +4900,240 @@ fn a_battle_sharpens_the_picture_of_the_opponents_technology() {
     let faded = intel(&sim, a, b);
     assert!(faded < after[0] && faded > before[0], "{faded}");
     assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+// --- 15. Ganze Partien ohne Eingriff ------------------------------------------------
+//
+// Die Prüfungen oben legen Ware in die Lager, wo sie auf das Tausendstel genau rechnen. Hier
+// läuft die Wirtschaft unberührt: Was Werften, Flotten und Kriege brauchen und bewirken,
+// muss aus der Partie selbst kommen.
+
+/// Preis der drei Bauteile am Markt eines Systems.
+fn part_prices(sim: &Headless, system: SystemId) -> [f64; 3] {
+    PARTS.map(|key| economy(sim).market(system).price_of(good(key)))
+}
+
+#[test]
+fn an_order_in_an_untouched_economy_is_built_from_the_market_and_moves_it() {
+    let me = PolityId(0);
+    let (corvette, cruiser) = (design("dolch"), design("speer"));
+    let days_of = |design: u16| u64::from(data().designs[design as usize].stats.build_days);
+    for seed in [3, 12, 18, 40] {
+        let mut ordered = observer(seed);
+        let mut control = observer(seed);
+        ordered.run_days(20 * DAYS_PER_YEAR);
+        control.run_days(20 * DAYS_PER_YEAR);
+        let (capital, home) = home_of(&ordered, me);
+        let before = fleets(&ordered).ship_count(me);
+        // Eine Korvette, danach zwei Kreuzer: ein kleines Flottenprogramm auf dem einen
+        // Bauplatz der Hauptwelt.
+        for design in [corvette, cruiser, cruiser] {
+            ordered.issue(
+                me,
+                SimCommand::BuildShip {
+                    planet: capital,
+                    design,
+                },
+            );
+        }
+        let mut first_ship = None;
+        let mut all_ships = None;
+        let mut peak = [0.0f64; 3];
+        for day in 1..=2 * DAYS_PER_YEAR {
+            ordered.run_days(1);
+            control.run_days(1);
+            let built = fleets(&ordered).ship_count(me) - before;
+            if built >= 1 && first_ship.is_none() {
+                first_ship = Some(day);
+            }
+            if built >= 3 && all_ships.is_none() {
+                all_ships = Some(day);
+            }
+            let (with, without) = (part_prices(&ordered, home), part_prices(&control, home));
+            for index in 0..3 {
+                peak[index] = peak[index].max(with[index] / without[index]);
+            }
+        }
+        // Die Wirtschaft liefert, was die Werft braucht: Die Schiffe sind kaum später
+        // fertig, als ihre Bauzeit verlangt.
+        let first_ship = first_ship.expect("die Korvette wurde nie fertig");
+        let all_ships = all_ships.expect("das Programm wurde nie fertig");
+        assert!(
+            first_ship <= days_of(corvette) * 3 / 2,
+            "Seed {seed}: Korvette nach {first_ship} Tagen"
+        );
+        assert!(
+            all_ships <= (days_of(corvette) + 2 * days_of(cruiser)) * 5 / 4,
+            "Seed {seed}: Programm nach {all_ships} Tagen"
+        );
+        // Der Bedarf der Werft kommt am Markt an: Jedes Bauteil wird zeitweise deutlich
+        // teurer als in der Partie ohne Auftrag …
+        for (index, key) in PARTS.iter().enumerate() {
+            assert!(
+                peak[index] >= 1.5,
+                "Seed {seed}: {key} höchstens {:.2}-mal so teuer",
+                peak[index]
+            );
+        }
+        // … und die Rüstungsbetriebe der Hauptwelt wachsen daran.
+        let arms = |sim: &Headless| sim::fleet::arms_capital(data(), economy(sim), capital);
+        assert!(
+            arms(&ordered) > arms(&control) * 1.1,
+            "Seed {seed}: Rüstungskapital {:.2} gegen {:.2}",
+            arms(&ordered),
+            arms(&control)
+        );
+        assert_eq!(money_drift(ordered.world()), Some(0));
+        assert_eq!(check_invariants(ordered.world()), Ok(()));
+    }
+}
+
+#[test]
+fn a_war_wears_on_cohesion_and_makes_borrowing_dearer() {
+    use sim::finance::bond_yield;
+    use sim::harness::{ScriptedEvent, WarScript};
+    let (a, b) = (PolityId(0), PolityId(1));
+    for seed in [3, 22, 28] {
+        // Zwei Jahre Krieg gegen dieselbe Partie im Frieden.
+        let script = WarScript::new(vec![ScriptedEvent::war(5 * DAYS_PER_YEAR, a, b)]);
+        let mut war = observer(seed);
+        let mut peace = observer(seed);
+        script.run_until(&mut war, 7 * DAYS_PER_YEAR, false);
+        peace.run_days(7 * DAYS_PER_YEAR);
+        assert!(battles(&war).next_id > 0, "Seed {seed}: kein Gefecht");
+        for polity in [a, b] {
+            let cohesion = |sim: &Headless| summarize(sim).polities[polity.index()].cohesion;
+            let rate = |sim: &Headless| bond_yield(data(), finance(sim), polity);
+            assert!(weariness(&war, polity) > 10.0);
+            assert_eq!(weariness(&peace, polity), 0.0);
+            // Die Müdigkeit drückt den Zusammenhalt der eigenen Welten …
+            assert!(
+                cohesion(&war) < cohesion(&peace) - 1.5,
+                "Seed {seed}, {polity:?}: Zusammenhalt {:.1} gegen {:.1}",
+                cohesion(&war),
+                cohesion(&peace)
+            );
+            // … und der Markt verlangt für neue Anleihen mehr Zins.
+            assert!(
+                rate(&war) > rate(&peace) + 0.01,
+                "Seed {seed}, {polity:?}: Rendite {:.3} gegen {:.3}",
+                rate(&war),
+                rate(&peace)
+            );
+        }
+        assert_eq!(check_invariants(war.world()), Ok(()));
+    }
+}
+
+#[test]
+fn commands_given_during_a_battle_replay_to_the_same_war() {
+    let (a, b) = (PolityId(0), PolityId(1));
+    for seed in [5, 23] {
+        let mut original = observer(seed);
+        original.run_days(40);
+        let home = home_of(&original, a).1;
+        let target = home_of(&original, b).1;
+        original.issue(a, SimCommand::DeclareWar { target: b });
+        original.issue(
+            a,
+            SimCommand::SetStance {
+                fleet: FleetId(0),
+                stance: Stance::Blockade,
+            },
+        );
+        original.issue(
+            a,
+            SimCommand::MoveFleet {
+                fleet: FleetId(0),
+                to: target,
+            },
+        );
+        for _ in 0..2 * DAYS_PER_YEAR {
+            if battles(&original).in_system(target).is_some() {
+                break;
+            }
+            original.run_days(1);
+        }
+        assert!(
+            battles(&original).in_system(target).is_some(),
+            "Seed {seed}: kein Gefecht"
+        );
+        // Mitten am Tag eine neue Aufstellung …
+        for _ in 0..7 {
+            original.tick();
+        }
+        original.issue(
+            a,
+            SimCommand::SetFleetOrders {
+                fleet: FleetId(0),
+                formation: Formation::Wedge,
+                doctrine: Doctrine::Aggressive,
+            },
+        );
+        original.run_days(3);
+        // … ein Marschbefehl, den das Gefecht abweist …
+        original.issue(
+            a,
+            SimCommand::MoveFleet {
+                fleet: FleetId(0),
+                to: home,
+            },
+        );
+        for _ in 0..5 {
+            original.tick();
+        }
+        // … und der Rückzug.
+        original.issue(a, SimCommand::Retreat { fleet: FleetId(0) });
+        original.run_days(200);
+        let log = original.command_log().clone();
+        let outcome_of = |wanted: fn(&SimCommand) -> bool| {
+            log.entries
+                .iter()
+                .rev()
+                .find(|entry| wanted(&entry.command))
+                .map(|entry| entry.outcome.clone())
+        };
+        assert_eq!(
+            outcome_of(|command| matches!(command, SimCommand::SetFleetOrders { .. })),
+            Some(CommandOutcome::Applied)
+        );
+        assert!(matches!(
+            outcome_of(|command| matches!(command, SimCommand::MoveFleet { .. })),
+            Some(CommandOutcome::Rejected(_))
+        ));
+        assert_eq!(
+            outcome_of(|command| matches!(command, SimCommand::Retreat { .. })),
+            Some(CommandOutcome::Applied)
+        );
+        let report = battles(&original)
+            .reports
+            .first()
+            .expect("das Gefecht ist zu Ende");
+        assert!(
+            report
+                .sides
+                .iter()
+                .any(|side| side.owner == a && side.retreated)
+        );
+
+        // Dieselbe Partie noch einmal, nur aus dem Protokoll: derselbe Krieg.
+        let mut replay = observer(seed);
+        replay.set_replay(&log);
+        while replay.clock().tick < original.clock().tick {
+            replay.tick();
+        }
+        assert_eq!(replay.hash(), original.hash(), "Seed {seed}");
+        assert_eq!(battles(&replay).reports, battles(&original).reports);
+        assert_eq!(replay.command_log().entries, log.entries);
+        // Ohne die Befehle im Gefecht verläuft sie anders.
+        let mut passive = observer(seed);
+        passive.set_replay(&sim::command::CommandLog {
+            entries: log.entries[..3].to_vec(),
+            ..Default::default()
+        });
+        while passive.clock().tick < original.clock().tick {
+            passive.tick();
+        }
+        assert_ne!(passive.hash(), original.hash(), "Seed {seed}");
+    }
 }
