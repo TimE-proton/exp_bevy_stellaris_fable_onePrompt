@@ -32,6 +32,11 @@ const MARKER_GONE: f32 = 46.0;
 const MARKER_FULL: f32 = 20.0;
 /// Ab dieser Rumpflänge trägt ein Schiff seinen Namen (wenn Namen eingeschaltet sind).
 const LABEL_FROM: f32 = 46.0;
+/// Abstand der Tafeln von der Kopfleiste und vom Fensterrand.
+const PANEL_GAP: f32 = 11.0;
+const EDGE_GAP: f32 = 8.0;
+/// Weniger Höhe bekommt die Modulliste nie, auch nicht in sehr niedrigen Fenstern.
+const MIN_MODULE_LIST: f32 = 60.0;
 
 /// Was die Tafeln lesen.
 pub struct HudRefs<'a> {
@@ -161,31 +166,62 @@ fn health_color(fraction: f32) -> Color32 {
     }
 }
 
+/// Rahmen der Tafeln über der Schlacht: deckend. Durch die leicht durchsichtigen Fenster
+/// der Partie schienen sonst Markierungen, Namen und Leuchtspuren in die Zahlen.
+fn panel_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::window(&ctx.global_style()).fill(panels::opaque_window_fill(ctx))
+}
+
 /// Zeichnet alle Tafeln der Schlachtansicht.
 pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudAction>) {
     let Some(battle) = refs.feed.battle() else {
         return;
     };
     markers(root.ctx(), refs, battle);
-    egui::Panel::top("gefechtsleiste").show(root, |ui| top_bar(ui, refs, battle, actions));
+    let style = root.ctx().global_style();
+    let bar = egui::Panel::top("gefechtsleiste")
+        .frame(egui::Frame::side_top_panel(&style).fill(style.visuals.panel_fill.to_opaque()))
+        .show(root, |ui| top_bar(ui, refs, battle, actions));
+    // Die Tafeln hängen unter der Kopfleiste, wie hoch sie auch ist: In schmalen Fenstern
+    // hat sie zwei Zeilen.
+    let top = bar.response.rect.bottom() + PANEL_GAP;
     let ctx = root.ctx().clone();
+    let mut panel_bottoms = [top - EDGE_GAP; 2];
     for side in 0..battle.combatants.len() {
-        side_panel(&ctx, refs, battle, side, actions);
+        let rect = side_panel(&ctx, refs, battle, side, top, actions);
+        if let (Some(bottom), Some(rect)) = (panel_bottoms.get_mut(side), rect) {
+            *bottom = rect.bottom();
+        }
     }
     if let Some(ship) = refs
         .selected
         .and_then(|index| battle.ships.get(index as usize).map(|ship| (index, ship)))
     {
-        inspector(&ctx, refs, battle, ship.0, ship.1, actions);
+        // Die Tafel des Schiffs steht unter der Lagetafel ihrer Seite und darf den Raum
+        // bis dorthin nutzen.
+        let below = panel_bottoms[inspector_side(refs)] + EDGE_GAP;
+        inspector(&ctx, refs, battle, ship.0, ship.1, below, actions);
     }
     if battle.finished && refs.options.summary {
         summary(&ctx, refs, battle, actions);
     }
 }
 
+/// Seite, auf der die Tafel des gewählten Schiffs steht (0 = links, 1 = rechts): nicht
+/// dort, wo die höhere Lagetafel des Spielers mit ihren Befehlen steht.
+fn inspector_side(refs: &HudRefs) -> usize {
+    if refs.feed.info.player_side == Some(1) {
+        0
+    } else {
+        1
+    }
+}
+
 fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec<HudAction>) {
     let speed = refs.speed;
-    ui.horizontal(|ui| {
+    // Beide Hälften der Leiste melden Aktionen.
+    let actions = std::cell::RefCell::new(actions);
+    let left = |ui: &mut egui::Ui| {
         ui.add_space(4.0);
         ui.label(RichText::new(&refs.feed.info.title).strong().color(ACCENT));
         ui.separator();
@@ -210,7 +246,7 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
             .on_hover_text("Leertaste")
             .clicked()
         {
-            actions.push(HudAction::TogglePause);
+            actions.borrow_mut().push(HudAction::TogglePause);
         }
         for (level, label) in SPEED_LABELS.iter().enumerate() {
             let active = !speed.paused && speed.level == level;
@@ -219,7 +255,7 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
                 .on_hover_text(format!("Taste {}", level + 1))
                 .clicked()
             {
-                actions.push(HudAction::SetSpeed(level));
+                actions.borrow_mut().push(HudAction::SetSpeed(level));
             }
         }
         if refs.feed.info.still {
@@ -232,82 +268,92 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
             };
             ui.label(RichText::new(hint).color(ACCENT).strong());
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Verlassen").clicked() {
-                actions.push(HudAction::Request(BattleViewRequest::Leave));
-            }
-            if ui.button("Hilfe").on_hover_text("F1").clicked() {
-                actions.push(HudAction::ToggleHelp);
-            }
-            ui.separator();
-            if battle.finished
-                && ui
-                    .selectable_label(refs.options.summary, "Bilanz")
-                    .on_hover_text("Bilanz des Gefechts ein- und ausblenden")
-                    .clicked()
-            {
-                actions.push(HudAction::ToggleSummary);
-            }
-            if ui
-                .selectable_label(refs.options.labels, "Namen")
-                .on_hover_text("Namen an nahen Schiffen (N)")
+    };
+    let right = |ui: &mut egui::Ui| {
+        if ui.button("Verlassen").clicked() {
+            actions
+                .borrow_mut()
+                .push(HudAction::Request(BattleViewRequest::Leave));
+        }
+        if ui.button("Hilfe").on_hover_text("F1").clicked() {
+            actions.borrow_mut().push(HudAction::ToggleHelp);
+        }
+        ui.separator();
+        if battle.finished
+            && ui
+                .selectable_label(refs.options.summary, "Bilanz")
+                .on_hover_text("Bilanz des Gefechts ein- und ausblenden")
                 .clicked()
-            {
-                actions.push(HudAction::ToggleLabels);
-            }
-            if ui
-                .selectable_label(refs.options.overlay, "Taktik")
-                .on_hover_text("Flottenanker, Reichweiten und Ziellinien (T)")
-                .clicked()
-            {
-                actions.push(HudAction::ToggleOverlay);
-            }
-            ui.separator();
-            if ui
-                .button("Gefecht")
-                .on_hover_text("Zum Schwerpunkt des Gefechts (G)")
-                .clicked()
-            {
-                actions.push(HudAction::Camera(CameraRequest::FocusFight));
-            }
-            if ui
-                .button("Übersicht")
-                .on_hover_text("Alle Schiffe auf dem Feld im Blick (U)")
-                .clicked()
-            {
-                actions.push(HudAction::Camera(CameraRequest::Overview));
-            }
-            // Das Mausrad ändert die Fluggeschwindigkeit; ohne diese Anzeige sähe man davon
-            // nichts.
-            ui.label(
-                RichText::new(format!("Flug {}×", decimal(refs.frame.fly_speed as f64, 1)))
-                    .color(MUTED),
-            )
-            .on_hover_text("Fluggeschwindigkeit der Kamera. Das Mausrad ändert sie.");
-        });
-    });
+        {
+            actions.borrow_mut().push(HudAction::ToggleSummary);
+        }
+        if ui
+            .selectable_label(refs.options.labels, "Namen")
+            .on_hover_text("Namen an nahen Schiffen (N)")
+            .clicked()
+        {
+            actions.borrow_mut().push(HudAction::ToggleLabels);
+        }
+        if ui
+            .selectable_label(refs.options.overlay, "Taktik")
+            .on_hover_text("Flottenanker, Reichweiten und Ziellinien (T)")
+            .clicked()
+        {
+            actions.borrow_mut().push(HudAction::ToggleOverlay);
+        }
+        ui.separator();
+        if ui
+            .button("Gefecht")
+            .on_hover_text("Zum Schwerpunkt des Gefechts (G)")
+            .clicked()
+        {
+            actions
+                .borrow_mut()
+                .push(HudAction::Camera(CameraRequest::FocusFight));
+        }
+        if ui
+            .button("Übersicht")
+            .on_hover_text("Alle Schiffe auf dem Feld im Blick (U)")
+            .clicked()
+        {
+            actions
+                .borrow_mut()
+                .push(HudAction::Camera(CameraRequest::Overview));
+        }
+        // Das Mausrad ändert die Fluggeschwindigkeit; ohne diese Anzeige sähe man davon
+        // nichts.
+        ui.label(
+            RichText::new(format!("Flug {}×", decimal(refs.frame.fly_speed as f64, 1)))
+                .color(MUTED),
+        )
+        .on_hover_text("Fluggeschwindigkeit der Kamera. Das Mausrad ändert sie.");
+    };
+    panels::split_bar(ui, left, right);
 }
 
-/// Lagetafel einer Partei; für die Partei des Spielers mit Befehlen.
+/// Lagetafel einer Partei; für die Partei des Spielers mit Befehlen. `top` ist ihre
+/// Oberkante. Gibt zurück, wo die Tafel steht.
 fn side_panel(
     ctx: &egui::Context,
     refs: &HudRefs,
     battle: &Battle,
     side: usize,
+    top: f32,
     actions: &mut Vec<HudAction>,
-) {
+) -> Option<egui::Rect> {
     let combatant = &battle.combatants[side];
     let summary = summarize(battle, refs.data, side);
     let color = color32(refs.feed.side_color(side));
     // Die ersten beiden Parteien stehen links und rechts, weitere dazwischen.
     let (anchor, offset) = match side {
-        0 => (Align2::LEFT_TOP, [8.0, 34.0]),
-        1 => (Align2::RIGHT_TOP, [-8.0, 34.0]),
-        more => (Align2::CENTER_TOP, [(more as f32 - 2.5) * 270.0, 34.0]),
+        0 => (Align2::LEFT_TOP, [EDGE_GAP, top]),
+        1 => (Align2::RIGHT_TOP, [-EDGE_GAP, top]),
+        more => (Align2::CENTER_TOP, [(more as f32 - 2.5) * 270.0, top]),
     };
     egui::Window::new(format!("partei_{side}"))
         .title_bar(false)
         .resizable(false)
+        .frame(panel_frame(ctx))
         .anchor(anchor, offset)
         .show(ctx, |ui| {
             ui.set_width(236.0);
@@ -380,7 +426,8 @@ fn side_panel(
                 ui.separator();
                 orders(ui, battle, side, actions);
             }
-        });
+        })
+        .map(|shown| shown.response.rect)
 }
 
 /// Befehle des Spielers an seine Partei.
@@ -430,29 +477,49 @@ fn orders(ui: &mut egui::Ui, battle: &Battle, side: usize, actions: &mut Vec<Hud
     });
 }
 
-/// Tafel des gewählten Schiffs: Zustand, Vorräte, Ziel und alle Module.
+/// Wie viele Module eines Schiffs ausgefallen und wie viele beschädigt sind.
+pub fn module_damage(data: &GameData, ship: &BattleShip) -> (usize, usize) {
+    let design = &data.designs[ship.design as usize];
+    let (mut failed, mut damaged) = (0, 0);
+    for (slot, state) in design.modules.iter().zip(&ship.modules) {
+        match module_condition(state.hp, data.modules[slot.module_id as usize].hp) {
+            "ausgefallen" => failed += 1,
+            "beschädigt" => damaged += 1,
+            _ => {}
+        }
+    }
+    (failed, damaged)
+}
+
+/// Tafel des gewählten Schiffs: Zustand, Vorräte, Ziel und alle Module. `below` ist die
+/// Höhe im Fenster, unter der sie bleiben muss (die Lagetafel darüber).
 fn inspector(
     ctx: &egui::Context,
     refs: &HudRefs,
     battle: &Battle,
     index: u32,
     ship: &BattleShip,
+    below: f32,
     actions: &mut Vec<HudAction>,
 ) {
     let design = &refs.data.designs[ship.design as usize];
     let side_color = color32(refs.feed.side_color(ship.side as usize));
     // Die Tafel steht unten auf der Seite, auf der nicht die (höhere) Lagetafel des Spielers
-    // mit ihren Befehlen steht; in niedrigen Fenstern schrumpft die Modulliste.
-    let (anchor, offset) = if refs.feed.info.player_side == Some(1) {
-        (Align2::LEFT_BOTTOM, [8.0, -8.0])
+    // mit ihren Befehlen steht.
+    let (anchor, offset) = if inspector_side(refs) == 0 {
+        (Align2::LEFT_BOTTOM, [EDGE_GAP, -EDGE_GAP])
     } else {
-        (Align2::RIGHT_BOTTOM, [-8.0, -8.0])
+        (Align2::RIGHT_BOTTOM, [-EDGE_GAP, -EDGE_GAP])
     };
-    let list_height = (ctx.content_rect().height() - 710.0).clamp(60.0, 190.0);
+    let frame = panel_frame(ctx);
+    // So hoch darf die ganze Tafel werden; was nach Kopf und Zustandsbalken davon bleibt,
+    // gehört der Modulliste.
+    let room = ctx.content_rect().bottom() - EDGE_GAP - below - frame.total_margin().sum().y;
     egui::Window::new("schiff")
         .title_bar(false)
         .resizable(false)
         .default_height(640.0)
+        .frame(frame)
         .anchor(anchor, offset)
         .show(ctx, |ui| {
             ui.set_width(330.0);
@@ -574,9 +641,34 @@ fn inspector(
             });
             ui.separator();
 
-            ui.label(RichText::new("Module").strong());
+            // Was ausgefallen ist, steht schon in der Überschrift: Die Liste selbst kann
+            // länger sein, als die Tafel hoch ist.
+            let (failed, damaged) = module_damage(refs.data, ship);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Module").strong());
+                ui.label(RichText::new(design.modules.len().to_string()).color(MUTED));
+                if failed > 0 {
+                    ui.label(RichText::new(format!("{failed} ausgefallen")).color(WARNING));
+                }
+                if damaged > 0 {
+                    ui.label(RichText::new(format!("{damaged} beschädigt")).color(ACCENT));
+                }
+                if failed + damaged == 0 {
+                    ui.label(RichText::new("alle intakt").color(MUTED));
+                }
+            });
+            let list_height =
+                (room - ui.min_rect().height() - ui.spacing().item_spacing.y).max(MIN_MODULE_LIST);
+            // Ein Rollbalken, der immer zu sehen ist, sobald die Liste nicht ganz passt; der
+            // übliche erscheint erst unter dem Mauszeiger.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
             egui::ScrollArea::vertical()
+                // Je Schiff eine eigene Rollstellung: Ein neu gewähltes beginnt oben.
+                .id_salt(("module", index))
+                // Genau so hoch, wie Raum ist (oder die Liste lang): Das Fenster selbst
+                // merkt sich nur seine erste Höhe und gäbe sonst nie mehr her.
                 .max_height(list_height)
+                .min_scrolled_height(list_height)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     egui::Grid::new("module")
@@ -632,6 +724,7 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
+        .frame(panel_frame(ctx))
         .default_pos([ctx.content_rect().center().x - 260.0, 150.0])
         .show(ctx, |ui| {
             ui.set_min_width(500.0);
@@ -956,6 +1049,7 @@ mod tests {
     use super::super::feed::testing::{MIXED, data, stepped};
     use super::super::to_world;
     use super::*;
+    use crate::ui::testing::{Painted, Screen, overlap};
 
     /// Zeichnet ein Frame ohne Fenster und Grafikkarte.
     fn frame(mut draw: impl FnMut(&mut egui::Ui)) {
@@ -1084,15 +1178,420 @@ mod tests {
         for (side, result) in outcome.sides.iter().enumerate() {
             let summary = summarize(&battle, &data, side);
             assert_eq!(summary.active, result.holding);
+            // Kein Schiff zählt doppelt: Was verloren, entkommen oder noch im Feld ist,
+            // war anfangs da (Bordjäger eingerechnet).
             for class in 0..6 {
+                let accounted = result.lost[class] + result.escaped[class] + result.holding[class];
                 assert!(
-                    result.lost[class] + result.escaped[class] + result.holding[class]
-                        <= result.initial[class].max(
-                            result.lost[class] + result.escaped[class] + result.holding[class]
-                        )
+                    accounted <= result.initial[class],
+                    "Partei {side}, Klasse {class}: {accounted} von {}",
+                    result.initial[class]
                 );
             }
+            assert!(result.lost.iter().sum::<u32>() + result.escaped.iter().sum::<u32>() > 0);
         }
+    }
+
+    /// Was die Tafeln für einen Zustand der Ansicht brauchen, an einem Stück.
+    struct Scene {
+        data: GameData,
+        battle: Battle,
+        feed: BattleFeed,
+        frame: ViewFrame,
+        speed: SimSpeed,
+        options: ViewOptions,
+    }
+
+    impl Scene {
+        fn new(ticks: u32) -> Self {
+            let data = data();
+            let (battle, feed) = stepped(&data, MIXED, ticks);
+            Self::of(data, battle, feed)
+        }
+
+        fn finished() -> Self {
+            let data = data();
+            let (mut battle, mut feed) = stepped(&data, MIXED, 0);
+            while !battle.finished {
+                battle.step(&data);
+                feed.refresh(&battle);
+            }
+            Self::of(data, battle, feed)
+        }
+
+        fn of(data: GameData, battle: Battle, feed: BattleFeed) -> Self {
+            let camera = super::super::camera::overview_transform(2400.0);
+            let frame = view_frame(&feed, &camera);
+            Self {
+                data,
+                battle,
+                feed,
+                frame,
+                speed: SimSpeed::default(),
+                options: ViewOptions::default(),
+            }
+        }
+
+        fn refs(&self, selected: Option<u32>) -> HudRefs<'_> {
+            HudRefs {
+                feed: &self.feed,
+                data: &self.data,
+                frame: &self.frame,
+                speed: &self.speed,
+                selected,
+                options: &self.options,
+            }
+        }
+
+        /// Erstes Schiff einer Klasse und Partei.
+        fn ship(&self, class: ShipClass, side: u16) -> u32 {
+            self.battle
+                .ships
+                .iter()
+                .position(|ship| ship.class == class && ship.side == side)
+                .expect("Schiff der Klasse") as u32
+        }
+
+        /// Zeichnet die Tafeln, bis sie ihren Platz gefunden haben.
+        fn settle(&self, screen: &mut Screen, selected: Option<u32>) -> Painted {
+            let refs = self.refs(selected);
+            screen.settle(|ui| battle_hud(ui, &refs, &mut Vec::new()))
+        }
+
+        /// Klickt auf eine Stelle und gibt zurück, was die Tafeln dabei auslösen.
+        fn click(
+            &self,
+            screen: &mut Screen,
+            selected: Option<u32>,
+            at: egui::Pos2,
+        ) -> Vec<HudAction> {
+            let refs = self.refs(selected);
+            let mut actions = Vec::new();
+            screen.click(at, |ui| battle_hud(ui, &refs, &mut actions));
+            actions
+        }
+
+        /// Klickt auf den Knopf mit dieser Aufschrift.
+        fn press(&self, screen: &mut Screen, selected: Option<u32>, label: &str) -> Vec<HudAction> {
+            let at = self
+                .settle(screen, selected)
+                .text(label)
+                .unwrap_or_else(|| panic!("„{label}“ ist nicht zu sehen"))
+                .center();
+            self.click(screen, selected, at)
+        }
+    }
+
+    fn window_rect(screen: &Screen, title: &str) -> egui::Rect {
+        screen
+            .ctx
+            .memory(|memory| memory.area_rect(egui::Id::new(Some(title))))
+            .unwrap_or_else(|| panic!("Tafel „{title}“ fehlt"))
+    }
+
+    #[test]
+    fn every_button_reports_its_action() {
+        let scene = Scene::new(200);
+        let mut screen = Screen::new(1600.0, 900.0);
+        let ship = scene.ship(ShipClass::Cruiser, 0);
+        let selected = Some(ship);
+        let combatant = &scene.battle.combatants[0];
+        assert_eq!(
+            (combatant.formation, combatant.doctrine),
+            (Formation::Line, Doctrine::Balanced)
+        );
+
+        // Kopfleiste.
+        for (label, expected) in [
+            ("▶ Weiter", HudAction::TogglePause),
+            ("½×", HudAction::SetSpeed(0)),
+            ("25×", HudAction::SetSpeed(5)),
+            ("Namen", HudAction::ToggleLabels),
+            ("Taktik", HudAction::ToggleOverlay),
+            ("Gefecht", HudAction::Camera(CameraRequest::FocusFight)),
+            ("Übersicht", HudAction::Camera(CameraRequest::Overview)),
+            ("Hilfe", HudAction::ToggleHelp),
+            ("Verlassen", HudAction::Request(BattleViewRequest::Leave)),
+            // Befehle an die eigene Partei.
+            (
+                "Keil",
+                HudAction::Order(BattleOrder::SetOrders {
+                    side: 0,
+                    formation: Formation::Wedge,
+                    doctrine: Doctrine::Balanced,
+                }),
+            ),
+            (
+                "defensiv",
+                HudAction::Order(BattleOrder::SetOrders {
+                    side: 0,
+                    formation: Formation::Line,
+                    doctrine: Doctrine::Defensive,
+                }),
+            ),
+            (
+                "Rückzug befehlen",
+                HudAction::Order(BattleOrder::Retreat { side: 0 }),
+            ),
+            // Tafel des gewählten Schiffs.
+            (
+                "Heranholen",
+                HudAction::Camera(CameraRequest::FocusShip(ship)),
+            ),
+            ("Verfolgen", HudAction::ToggleFollow),
+            ("×", HudAction::Select(None)),
+        ] {
+            assert_eq!(
+                scene.press(&mut screen, selected, label),
+                vec![expected],
+                "Knopf „{label}“"
+            );
+        }
+        // Was schon gilt, löst nichts aus; ein Klick neben die Knöpfe auch nicht.
+        assert!(scene.press(&mut screen, selected, "Linie").is_empty());
+        assert!(scene.press(&mut screen, selected, "ausgewogen").is_empty());
+        assert!(scene.press(&mut screen, selected, "Kampfwert").is_empty());
+        // Das Ziel des Schiffs ist ein Verweis: Ein Klick wählt es.
+        let target = scene.battle.ships[ship as usize].target.expect("ein Ziel");
+        let name = &scene.data.designs[scene.battle.ships[target as usize].design as usize].name;
+        let link = format!(
+            "{name} ({})",
+            scene.battle.ships[target as usize].class.label()
+        );
+        assert_eq!(
+            scene.press(&mut screen, selected, &link),
+            vec![HudAction::Select(Some(target))]
+        );
+        // Die Befehle stehen nur auf der Tafel der eigenen Partei.
+        let painted = scene.settle(&mut screen, selected);
+        assert_eq!(painted.all("Rückzug befehlen").len(), 1);
+        assert_eq!(painted.all("Keil").len(), 1);
+    }
+
+    #[test]
+    fn the_summary_offers_restart_and_orders_are_locked_after_the_end() {
+        let scene = Scene::finished();
+        let mut screen = Screen::new(1600.0, 900.0);
+        for (label, expected) in [
+            (
+                "Neu starten",
+                HudAction::Request(BattleViewRequest::Restart),
+            ),
+            ("Zurück", HudAction::Request(BattleViewRequest::Leave)),
+            ("Feld ansehen", HudAction::ToggleSummary),
+            ("Bilanz", HudAction::ToggleSummary),
+        ] {
+            assert_eq!(
+                scene.press(&mut screen, None, label),
+                vec![expected],
+                "Knopf „{label}“"
+            );
+        }
+        // Nach dem Ende nimmt die Partei keine Befehle mehr an.
+        for label in ["Keil", "defensiv", "Rückzug befehlen"] {
+            assert!(
+                scene.press(&mut screen, None, label).is_empty(),
+                "„{label}“ ist gesperrt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_inspector_lists_modules_down_to_the_window_edge() {
+        let scene = Scene::new(0);
+        let bastion = scene.ship(ShipClass::Battleship, 0);
+        let modules = scene.data.designs[scene.battle.ships[bastion as usize].design as usize]
+            .modules
+            .len();
+        assert!(modules > 20, "das Schlachtschiff hat viele Module");
+        // Vor dem ersten Schuss ist jedes Modul intakt: Jede sichtbare Zeile der Liste
+        // trägt genau dieses Wort.
+        let rows = |painted: &Painted| painted.all("intakt").len();
+
+        // Im üblichen Fenster passt nicht alles; die Liste nutzt den Raum bis unter die
+        // Lagetafel, und ein Rollbalken zeigt, dass sie weitergeht.
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = scene.settle(&mut screen, Some(bastion));
+        let shown = rows(&painted);
+        assert!(
+            shown >= 14 && shown < modules,
+            "{shown} von {modules} Modulzeilen bei 900 Pixeln Höhe"
+        );
+        let tafel = window_rect(&screen, "schiff");
+        let above = window_rect(&screen, "partei_1");
+        assert!(tafel.top() >= above.bottom(), "die Tafeln überdecken sich");
+        assert!(
+            tafel.top() < above.bottom() + 40.0,
+            "zwischen den Tafeln bleibt Raum ungenutzt: {} bis {}",
+            above.bottom(),
+            tafel.top()
+        );
+        let handle = |painted: &Painted, tafel: egui::Rect| {
+            painted
+                .rects
+                .iter()
+                .filter(|(rect, color)| {
+                    tafel.contains_rect(*rect)
+                        && rect.right() > tafel.right() - 16.0
+                        && rect.width() <= 10.0
+                        && rect.height() >= 24.0
+                        && color.a() > 100
+                })
+                .count()
+        };
+        assert!(
+            handle(&painted, tafel) >= 1,
+            "kein sichtbarer Rollbalken, obwohl Module verdeckt sind"
+        );
+        // Die Überschrift nennt die Zahl der Module, auch der verdeckten.
+        assert!(painted.text(&modules.to_string()).is_some());
+        assert!(painted.text("alle intakt").is_some());
+
+        // In einem hohen Fenster stehen alle Module da, ohne Rollbalken.
+        let mut tall = Screen::new(1600.0, 1200.0);
+        let painted = scene.settle(&mut tall, Some(bastion));
+        assert_eq!(rows(&painted), modules);
+        assert_eq!(handle(&painted, window_rect(&tall, "schiff")), 0);
+
+        // In einem niedrigen Fenster schrumpft die Liste, bleibt aber benutzbar.
+        let mut low = Screen::new(1600.0, 620.0);
+        let painted = scene.settle(&mut low, Some(bastion));
+        assert!((2..shown).contains(&rows(&painted)));
+        assert!(window_rect(&low, "schiff").bottom() <= 620.0);
+    }
+
+    #[test]
+    fn a_newly_selected_ship_starts_at_the_top_of_its_module_list() {
+        let scene = Scene::new(0);
+        let (own, other) = (
+            scene.ship(ShipClass::Battleship, 0),
+            scene.ship(ShipClass::Battleship, 1),
+        );
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = scene.settle(&mut screen, Some(own));
+        // Die Liste beginnt mit den Antrieben.
+        let drives = painted.all("Fusionsantrieb").len();
+        assert!(drives >= 2);
+        // Nach unten blättern, bis die Antriebe verschwunden sind.
+        let list = painted.all("intakt")[4].center();
+        let refs = scene.refs(Some(own));
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -6.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        };
+        screen.run(vec![egui::Event::PointerMoved(list)], |ui| {
+            battle_hud(ui, &refs, &mut Vec::new())
+        });
+        screen.run(vec![wheel], |ui| battle_hud(ui, &refs, &mut Vec::new()));
+        // Die Liste rollt weich aus; das dauert einige Durchläufe.
+        for _ in 0..12 {
+            scene.settle(&mut screen, Some(own));
+        }
+        let scrolled = scene.settle(&mut screen, Some(own));
+        assert_eq!(scrolled.all("Fusionsantrieb").len(), 0, "die Liste rollt");
+        // Ein anderes Schiff derselben Klasse: Seine Liste beginnt wieder oben.
+        let painted = scene.settle(&mut screen, Some(other));
+        assert_eq!(painted.all("Fusionsantrieb").len(), drives);
+        // Zurück beim ersten Schiff steht dessen Liste, wo man sie verließ.
+        let painted = scene.settle(&mut screen, Some(own));
+        assert_eq!(painted.all("Fusionsantrieb").len(), 0);
+    }
+
+    #[test]
+    fn failed_modules_are_announced_above_the_list() {
+        let mut scene = Scene::new(0);
+        let bastion = scene.ship(ShipClass::Battleship, 0) as usize;
+        // Die letzten Module der Liste (weit unter dem sichtbaren Teil) fallen aus oder
+        // werden beschädigt.
+        let count = scene.battle.ships[bastion].modules.len();
+        let mut battle = scene.battle.clone();
+        battle.ships[bastion].modules[count - 1].hp = 0.0;
+        battle.ships[bastion].modules[count - 2].hp = 0.0;
+        battle.ships[bastion].modules[count - 3].hp *= 0.5;
+        scene.feed.refresh(&battle);
+        scene.battle = battle;
+        assert_eq!(
+            module_damage(&scene.data, &scene.battle.ships[bastion]),
+            (2, 1)
+        );
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = scene.settle(&mut screen, Some(bastion as u32));
+        assert!(painted.text("2 ausgefallen").is_some());
+        assert!(painted.text("1 beschädigt").is_some());
+        assert!(painted.text("alle intakt").is_none());
+        // Die betroffenen Zeilen selbst liegen unter dem sichtbaren Teil der Liste.
+        assert!(painted.all("ausgefallen").is_empty());
+    }
+
+    #[test]
+    fn the_top_bar_never_overlaps_itself() {
+        let scene = Scene::new(0);
+        for (width, rows) in [(1600.0, 1), (1280.0, 1), (1024.0, 2), (800.0, 2)] {
+            let mut screen = Screen::new(width, 720.0);
+            let painted = scene.settle(&mut screen, None);
+            let panel = window_rect(&screen, "partei_0");
+            let bar: Vec<(String, egui::Rect)> = painted
+                .texts
+                .iter()
+                .filter(|(_, rect)| rect.bottom() <= panel.top())
+                .cloned()
+                .collect();
+            assert!(bar.len() >= 15, "{} Texte in der Leiste", bar.len());
+            assert_eq!(overlap(&bar), None, "Kopfleiste bei {width} Pixeln Breite");
+            for (text, rect) in &bar {
+                assert!(
+                    rect.left() >= 0.0 && rect.right() <= width,
+                    "„{text}“ ragt bei {width} Pixeln Breite aus dem Fenster"
+                );
+            }
+            // Im breiten Fenster bleibt die Leiste einzeilig, im schmalen bekommt sie eine
+            // zweite Zeile; die Tafeln hängen in beiden Fällen darunter.
+            let bottom = bar
+                .iter()
+                .map(|(_, rect)| rect.bottom())
+                .fold(0.0, f32::max);
+            assert_eq!(
+                bottom > 30.0,
+                rows == 2,
+                "Leiste endet bei {bottom} ({width} Pixel breit)"
+            );
+            assert!(panel.top() >= bottom);
+        }
+    }
+
+    #[test]
+    fn panels_over_the_battle_are_opaque() {
+        let scene = Scene::finished();
+        let mut screen = Screen::new(1600.0, 900.0);
+        // Neue Fenster blenden sich über einige Durchläufe ein; gemessen wird danach.
+        for _ in 0..6 {
+            scene.settle(&mut screen, Some(0));
+        }
+        let painted = scene.settle(&mut screen, Some(0));
+        // Hintergründe der Kopfleiste, der Lagetafeln, der Schiffstafel und der Bilanz:
+        // Durch keine scheint die Szene dahinter.
+        let backgrounds: Vec<_> = painted
+            .rects
+            .iter()
+            .filter(|(rect, _)| rect.width() >= 200.0 && rect.height() >= 20.0)
+            .collect();
+        assert!(backgrounds.len() >= 5, "{} Hintergründe", backgrounds.len());
+        for (rect, color) in backgrounds {
+            assert_eq!(color.a(), 255, "Hintergrund {rect:?} ist durchsichtig");
+        }
+        let mut open = true;
+        for _ in 0..6 {
+            screen.settle(|ui| panels::help_window(ui.ctx(), &mut open, true));
+        }
+        let help = screen.settle(|ui| panels::help_window(ui.ctx(), &mut open, true));
+        assert!(
+            help.rects
+                .iter()
+                .filter(|(rect, _)| rect.width() >= 200.0 && rect.height() >= 100.0)
+                .all(|(_, color)| color.a() == 255)
+        );
     }
 
     #[test]

@@ -48,7 +48,8 @@ impl Painted {
             }
             epaint::Shape::Rect(rect) => {
                 let visible = rect.rect.intersect(clip);
-                if visible.is_positive() && rect.fill.a() > 0 {
+                // Weichgezeichnete Rechtecke sind Schatten, keine Flächen.
+                if visible.is_positive() && rect.fill.a() > 0 && rect.blur_width == 0.0 {
                     self.rects.push((visible, rect.fill));
                 }
             }

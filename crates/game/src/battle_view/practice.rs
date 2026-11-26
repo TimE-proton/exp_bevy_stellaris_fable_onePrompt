@@ -1008,6 +1008,78 @@ mod tests {
     }
 
     #[test]
+    fn orders_clicked_on_the_side_panel_reach_the_battle() {
+        use crate::testing::TestGame;
+
+        let mut game = TestGame::start("--practice --seed 3");
+        game.frames(4);
+        let orders = |game: &TestGame| {
+            let combatant = &game.resource::<PracticeBattle>().battle.combatants[0];
+            (
+                combatant.formation,
+                combatant.doctrine,
+                combatant.retreating,
+            )
+        };
+        let start = orders(&game);
+        assert_eq!(start, (Formation::Line, Doctrine::Balanced, false));
+        // Die Befehle stehen unten auf der Lagetafel der eigenen Partei. Einmal über alle
+        // Knöpfe dort klicken: Formation, Doktrin und zuletzt der Rückzug kommen im
+        // Gefecht an, auch in der Pause.
+        let panel = game.window_rect("partei_0").expect("Lagetafel");
+        let (mut formations, mut doctrines) = (Vec::new(), Vec::new());
+        let mut y = panel.bottom() - 6.0;
+        while y > panel.top() + 190.0 && !orders(&game).2 {
+            let mut x = panel.left() + 12.0;
+            while x < panel.right() - 6.0 && !orders(&game).2 {
+                game.click(Vec2::new(x, y));
+                let now = orders(&game);
+                if !formations.contains(&now.0) {
+                    formations.push(now.0);
+                }
+                if !doctrines.contains(&now.1) {
+                    doctrines.push(now.1);
+                }
+                x += 14.0;
+            }
+            y -= 9.0;
+        }
+        assert!(orders(&game).2, "der Rückzug wurde befohlen");
+        assert_eq!(
+            game.resource::<PracticeBattle>().battle.tick,
+            0,
+            "ohne einen Takt"
+        );
+        // Der Rückzugsknopf liegt zuunterst; die übrigen Befehle sind danach gesperrt.
+        // Ein zweiter Durchgang von oben nach unten erreicht deshalb erst sie.
+        let mut game = TestGame::start("--practice --seed 3");
+        game.frames(4);
+        let panel = game.window_rect("partei_0").expect("Lagetafel");
+        let mut y = panel.top() + 200.0;
+        while y < panel.bottom() - 26.0 {
+            let mut x = panel.left() + 12.0;
+            while x < panel.right() - 6.0 {
+                game.click(Vec2::new(x, y));
+                let now = orders(&game);
+                if !formations.contains(&now.0) {
+                    formations.push(now.0);
+                }
+                if !doctrines.contains(&now.1) {
+                    doctrines.push(now.1);
+                }
+                x += 14.0;
+            }
+            y += 9.0;
+        }
+        assert!(!orders(&game).2);
+        assert_eq!(formations.len(), Formation::ALL.len(), "{formations:?}");
+        assert_eq!(doctrines.len(), Doctrine::ALL.len(), "{doctrines:?}");
+        // Die Ansicht zeigt, was befohlen wurde.
+        let shown = game.resource::<BattleFeed>().battle().unwrap().combatants[0].formation;
+        assert_eq!(shown, orders(&game).0);
+    }
+
+    #[test]
     fn dialog_draws_without_a_window() {
         let data = data();
         let ctx = egui::Context::default();

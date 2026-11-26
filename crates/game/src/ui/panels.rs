@@ -62,6 +62,54 @@ pub fn apply_style(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
+/// Leiste aus einer linken und einer rechtsbündigen Gruppe. Reicht die Breite nicht für
+/// beide nebeneinander (schmales Fenster), rückt die rechte Gruppe in eine zweite Zeile,
+/// statt die linke zu überdecken.
+pub fn split_bar(
+    ui: &mut egui::Ui,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
+) {
+    // Wie breit die rechte Gruppe ist, zeigt sich erst beim Zeichnen; es zählt die Breite
+    // aus dem vorigen Durchlauf.
+    let id = ui.id().with("rechte_gruppe");
+    let known: Option<f32> = ui.data(|data| data.get_temp(id));
+    let full = ui.available_width();
+    let gap = ui.spacing().item_spacing.x * 2.0;
+    let mut right = Some(right);
+    let mut measured = None;
+    ui.horizontal(|ui| {
+        left(ui);
+        let used = ui.min_rect().width();
+        if known.is_none_or(|width| used + gap + width <= full)
+            && let Some(right) = right.take()
+        {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                right(ui);
+                measured = Some(ui.min_rect().width());
+            });
+        }
+    });
+    if let Some(right) = right {
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                right(ui);
+                measured = Some(ui.min_rect().width());
+            });
+        });
+    }
+    if let Some(width) = measured {
+        ui.data_mut(|data| data.insert_temp(id, width));
+    }
+}
+
+/// Fensterfarbe ohne Durchsicht. Die Fenster der Partie lassen die Karte leicht
+/// durchscheinen; über der Schlacht stünden dann Markierungen und Leuchtspuren in den
+/// Zahlen der Tafeln.
+pub fn opaque_window_fill(ctx: &egui::Context) -> Color32 {
+    ctx.global_style().visuals.window_fill().to_opaque()
+}
+
 pub fn color32(color: Rgb) -> Color32 {
     let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgb(byte(color.0), byte(color.1), byte(color.2))
@@ -193,7 +241,7 @@ fn top_bar(
     speed: &SimSpeed,
     actions: &mut Vec<UiAction>,
 ) {
-    ui.horizontal(|ui| {
+    let left = |ui: &mut egui::Ui| {
         ui.add_space(4.0);
         match sim.config.player {
             Some(player) => {
@@ -253,35 +301,36 @@ fn top_bar(
         if speed.paused {
             ui.label(RichText::new("PAUSIERT").color(ACCENT).strong());
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Menü").on_hover_text("Esc").clicked() {
-                state.menu_open = !state.menu_open;
-            }
-            if ui.button("Hilfe").on_hover_text("F1").clicked() {
-                state.help_open = !state.help_open;
-            }
-            ui.separator();
-            ui.toggle_value(&mut state.fleets_open, "Flotten");
-            ui.toggle_value(&mut state.treasury_open, "Staat");
-            ui.toggle_value(&mut state.exchange_open, "Börse");
-            ui.toggle_value(&mut state.chains_open, "Ketten");
-            ui.toggle_value(&mut state.flows_open, "Warenflüsse");
-            ui.separator();
-            let free = sim
-                .galaxy
-                .planets
-                .iter()
-                .filter(|planet| planet.owner.is_none())
-                .count();
-            ui.label(
-                RichText::new(format!(
-                    "{free} von {} Planeten frei",
-                    sim.galaxy.planets.len()
-                ))
-                .color(if free == 0 { ACCENT } else { MUTED }),
-            );
-        });
-    });
+    };
+    let right = |ui: &mut egui::Ui| {
+        if ui.button("Menü").on_hover_text("Esc").clicked() {
+            state.menu_open = !state.menu_open;
+        }
+        if ui.button("Hilfe").on_hover_text("F1").clicked() {
+            state.help_open = !state.help_open;
+        }
+        ui.separator();
+        ui.toggle_value(&mut state.fleets_open, "Flotten");
+        ui.toggle_value(&mut state.treasury_open, "Staat");
+        ui.toggle_value(&mut state.exchange_open, "Börse");
+        ui.toggle_value(&mut state.chains_open, "Ketten");
+        ui.toggle_value(&mut state.flows_open, "Warenflüsse");
+        ui.separator();
+        let free = sim
+            .galaxy
+            .planets
+            .iter()
+            .filter(|planet| planet.owner.is_none())
+            .count();
+        ui.label(
+            RichText::new(format!(
+                "{free} von {} Planeten frei",
+                sim.galaxy.planets.len()
+            ))
+            .color(if free == 0 { ACCENT } else { MUTED }),
+        );
+    };
+    split_bar(ui, left, right);
 }
 
 fn chronicle(ui: &mut egui::Ui, sim: &SimRefs) {
@@ -749,9 +798,14 @@ pub const BATTLE_KEYS: [(&str, &str); 16] = [
 /// Hilfefenster. In der Schlachtansicht (`battle`) zeigt es deren Bedienung.
 pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
     let keys: &[(&str, &str)] = if battle { &BATTLE_KEYS } else { &MAP_KEYS };
+    let mut frame = egui::Frame::window(&ctx.global_style());
+    if battle {
+        frame = frame.fill(opaque_window_fill(ctx));
+    }
     egui::Window::new("Hilfe")
         .open(open)
         .resizable(false)
+        .frame(frame)
         .show(ctx, |ui| {
             egui::Grid::new("hilfe")
                 .num_columns(2)
@@ -781,8 +835,10 @@ pub fn notice(root: &mut egui::Ui, notice: &Notice) {
     if notice.seconds_left <= 0.0 || notice.text.is_empty() {
         return;
     }
+    // Unter der Kopfleiste, auch wenn sie in einem schmalen Fenster zwei Zeilen hat.
+    let top = (root.available_rect_before_wrap().top() + 21.0).max(44.0);
     egui::Area::new("hinweis".into())
-        .anchor(Align2::CENTER_TOP, [0.0, 44.0])
+        .anchor(Align2::CENTER_TOP, [0.0, top])
         .interactable(false)
         .show(root.ctx(), |ui| {
             let color = if notice.is_error {
@@ -920,6 +976,49 @@ mod tests {
                 )
             });
         }
+    }
+
+    #[test]
+    fn the_top_bar_wraps_instead_of_overlapping_in_narrow_windows() {
+        use crate::ui::testing::{Screen, overlap};
+
+        let fixture = fixture();
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection::default();
+        for (width, rows) in [(1600.0, 1), (1280.0, 2), (1024.0, 2)] {
+            let mut state = UiState::default();
+            let mut screen = Screen::new(width, 720.0);
+            let painted = screen
+                .settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+            // Was über den Reitern der linken Tafel steht, gehört zur Kopfleiste.
+            let below = painted.text("Übersicht").expect("Reiter").top();
+            let bar: Vec<(String, egui::Rect)> = painted
+                .texts
+                .iter()
+                .filter(|(_, rect)| rect.bottom() <= below)
+                .cloned()
+                .collect();
+            assert!(bar.len() >= 15, "{} Texte in der Leiste", bar.len());
+            assert_eq!(overlap(&bar), None, "Kopfleiste bei {width} Pixeln Breite");
+            let bottom = bar
+                .iter()
+                .map(|(_, rect)| rect.bottom())
+                .fold(0.0, f32::max);
+            assert_eq!(bottom > 30.0, rows == 2, "Leiste endet bei {bottom}");
+        }
+        // Die Knöpfe der zweiten Zeile tun weiter ihren Dienst.
+        let mut state = UiState::default();
+        let mut screen = Screen::new(1024.0, 720.0);
+        let painted =
+            screen.settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+        let at = painted.text("Flotten").unwrap().center();
+        assert!(!state.fleets_open);
+        screen.click(at, |ui| {
+            in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new())
+        });
+        assert!(state.fleets_open);
     }
 
     #[test]
