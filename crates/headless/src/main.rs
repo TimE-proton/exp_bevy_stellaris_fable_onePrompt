@@ -455,18 +455,25 @@ fn main() -> ExitCode {
                 }
                 for planet in galaxy.planets_in(found.id).filter(|p| p.owner.is_some()) {
                     let local = economy.planet(planet.id);
+                    // Mit dem Ertragsfaktor der Technik des Besitzers: dieselbe Rechnung,
+                    // aus der die Simulation Rendite und Ausstoß bildet.
+                    let tech_yield = planet
+                        .owner
+                        .map_or(1.0, |owner| economy.yield_factor(owner));
                     println!(
-                        "\n  {} ({:.0} Mio., Lohn {:.2}, Stellen besetzt {:.2}, Haushalte {:.0})",
+                        "\n  {} ({:.0} Mio., Lohn {:.2}, Stellen besetzt {:.2}, Haushalte {:.0}, \
+                         Ertragsfaktor der Technik {:.2})",
                         planet.name,
                         planet.population,
                         local.wage,
                         local.employment,
-                        sim::economy::to_credits(local.households)
+                        sim::economy::to_credits(local.households),
+                        tech_yield
                     );
                     for (index, recipe) in data.recipes.iter().enumerate() {
                         if local.capital[index] > 0.0 {
-                            let unit = sim::economy::unit_economics(
-                                &data, planet, local.wage, market, recipe,
+                            let unit = sim::economy::unit_economics_at(
+                                &data, planet, local.wage, market, recipe, tech_yield,
                             );
                             println!(
                                 "    {:<16} Kapital {:>7.1}  Ausstoß {:>7.2}  Auslastung {:>4.2} (Trend {:>4.2})  Rendite {:>6.2}  je Einheit: Erlös {:>6.2} Vorprodukte {:>6.2} Energie {:>5.2} Start {:>5.2} Löhne {:>5.2}",

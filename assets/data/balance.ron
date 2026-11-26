@@ -402,31 +402,45 @@
     ),
     research: (
         // --- Mittel ---
-        // Anteil der geglätteten Staatseinnahmen, der anfangs je Monat in die Forschung
-        // geht, und der höchste Anteil, den eine Gemeinschaft einstellen kann. Das Geld ist
-        // das Gehalt der Forschenden: Es fließt aus der Staatskasse an die Haushalte, aber
-        // nur aus dem, was über der Rücklage des Staates liegt.
-        budget_share: 0.10,
-        max_budget_share: 0.25,
+        // Anteil der laufenden Staatseinnahmen des Vormonats (Lohnsteuer, Zölle der
+        // Kontore, Dividenden auf staatliche Anteile; kein Geld der Notenbank, keine
+        // Anleihen, keine Verkäufe), der in die Forschung geht: der übliche, wenn die
+        // Vorlage einer Gemeinschaft keinen eigenen nennt, und der höchste, der sich
+        // einstellen lässt. Die Vorlagen in polities.ron liegen zwischen beiden: Wer den
+        // höchsten Etat wählt, forscht anderthalbmal so viel wie eine übliche Gemeinschaft,
+        // nicht ein Vielfaches.
+        // Das Geld ist das Gehalt der Forschenden: Es fließt aus der Staatskasse an die
+        // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
+        // Kriegskasse und Schuldendienst gehen vor.
+        budget_share: 0.20,
+        max_budget_share: 0.30,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
-        efficiency: 0.65,
+        efficiency: 0.026,
         // Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
         population_exponent: 0.25,
 
         // --- Wissenstransfer ---
-        // Eine Technologie, die Gemeinschaften in Kontakt schon beherrschen, kostet weniger:
-        // höchstens um diesen Anteil. Jede kundige Gemeinschaft zählt mit einem Gewicht, das
-        // sich je spillover_half_hops Sprüngen zwischen den Gebieten halbiert; im Krieg ruht
-        // der Austausch. Nachlass = spillover_max * Summe / (1 + Summe).
+        // Eine Technologie, die Gemeinschaften in Kontakt erkennbar beherrschen, kostet
+        // weniger: höchstens um diesen Anteil. Erkennbar heißt: Die untere Grenze der
+        // eigenen Schätzung erreicht die Stufe (siehe Einblick). Jede solche Gemeinschaft
+        // zählt mit einem Gewicht, das sich je spillover_half_hops Sprüngen zwischen den
+        // Gebieten halbiert; im Krieg ruht der Austausch.
+        // Nachlass = spillover_max * Summe / (1 + Summe).
         spillover_max: 0.35,
         spillover_half_hops: 3.0,
 
         // --- Automatische Zielwahl ---
         // Gewählt wird die erforschbare Technologie mit dem höchsten Verhältnis von Gewicht
-        // zu Restkosten. Weil bis zur fünften jede Stufe gut das Doppelte der vorigen
-        // kostet, heißt doppeltes Gewicht: etwa eine Stufe Vorsprung.
+        // zu Restkosten. Die Gewichte hier gelten für alle; jede Vorlage in polities.ron
+        // setzt mit research_focus ihre eigenen Vorlieben als Faktor darauf.
         auto_peace: (economy: 1.8, propulsion: 1.3, weapons: 0.8, defense: 0.8, ground: 0.5),
         auto_war:   (economy: 0.6, propulsion: 0.9, weapons: 1.8, defense: 1.5, ground: 1.0),
+
+        // --- Etat der KI ---
+        // Eine KI-Gemeinschaft setzt den Etat ihrer Vorlage an (research_share in
+        // polities.ron), im Krieg das ai_war_factor-Fache davon, höchstens
+        // max_budget_share. Sie stellt ihn wie der Spieler per Befehl ein.
+        ai_war_factor: 1.25,
 
         // --- Einblick in fremde Forschung (0..1) ---
         // Grundwert ohne jede Verflechtung; Besitz an den Betrieben der anderen hebt ihn bis
@@ -437,8 +451,14 @@
         // Was Ereignisse (etwa beobachtete Gefechte) darüber hinaus einbringen, verliert je
         // Monat diesen Anteil.
         intel_decay: 0.02,
-        // Schätzungen fremder Stufen liegen höchstens um so viele Stufen daneben; bei vollem
-        // Einblick sind sie genau.
+        // Schätzungen fremder Stufen sind höchstens 2 * estimate_spread Stufen weit; bei
+        // vollem Einblick sind sie genau. Die untere Grenze einer Schätzung ist bestätigt
+        // und fällt nie.
         estimate_spread: 2,
+        // Wahrscheinlichkeit je Monat, dass sich für einen Betrachter eine weitere Stufe
+        // bestätigt, die eine andere Gemeinschaft in einem Zweig schon beherrscht. Etwa so
+        // häufig wie ein Stufenaufstieg selbst: Dann liegt die Wahrheit im Mittel an
+        // keiner bestimmten Stelle der Spanne.
+        sighting_per_month: 0.004,
     ),
 )

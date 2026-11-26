@@ -41,13 +41,9 @@ fn trade(
     mut chronicle: ResMut<Chronicle>,
 ) {
     // Der Fahrtfaktor der Technik gilt ab dem Tag nach dem Abschluss einer Technologie.
-    logistics.tech_speed.clear();
-    logistics.tech_speed.extend(
-        research
-            .polities
-            .iter()
-            .map(|entry| entry.effects.freighter_speed),
-    );
+    // Der Forschungsschritt hat ihn schon übergeben; hier wird er aufgefrischt, falls
+    // Wissen von außen kam.
+    research.publish_speed(&mut logistics);
     move_and_trade(
         &galaxy,
         &mut economy,

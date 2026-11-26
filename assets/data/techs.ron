@@ -1,19 +1,22 @@
 // Technologien: fünf Zweige mit je sechs Stufen. Jede Stufe setzt die vorige voraus.
 // branch: Economy | Propulsion | Weapons | Defense | Ground
-// cost: Forschungspunkte. Die Leiter (3000, 6000, 13000, 30000, 70000, 400000) steigt so
-//   steil wie die Forschungsleistung einer wachsenden Gemeinschaft: Mit dem üblichen Etat
-//   dauert eine Technologie der ersten Stufe drei bis sechs Jahre, und die vierte bis
-//   fünfte Stufe ist in einigen Zweigen nach 80 bis 100 Jahren erreicht. Die sechste ist
-//   ein Jahrhundertwerk: Bis zum Jahr 150 schließen nur wohlhabende Gemeinschaften
-//   einzelne Technologien dieser Stufe ab, und niemand vollendet den ganzen Baum.
-// effects: Aufschläge (0.08 = +8 %), sie addieren sich.
+// cost: Forschungspunkte. Die Leiter (3000, 6000, 12000, 24000, 54000, 400000) verdoppelt
+//   sich bis zur vierten Stufe: Eine Gemeinschaft, die einen Zweig doppelt so hoch schätzt
+//   wie eine andere (research_focus in polities.ron), ist dort etwa eine Stufe voraus,
+//   und wer doppelt so viel forscht, ebenso. Mit dem üblichen Etat dauert die erste
+//   Technologie drei bis sechs Jahre, und die vierte bis fünfte Stufe ist in den
+//   bevorzugten Zweigen nach 80 bis 100 Jahren erreicht. Die sechste ist ein
+//   Jahrhundertwerk: Bis zum Jahr 150 schließen nur wohlhabende Gemeinschaften einzelne
+//   Technologien dieser Stufe ab, und niemand vollendet den ganzen Baum, auch nicht mit
+//   dem höchsten Etat.
+// effects: Aufschläge (0.08 = +8 %), sie addieren sich. Zwei Stufen Vorsprung bei Waffen
+//   und Verteidigung sind im Gefecht ein deutlicher Vorteil.
 //   Yield            Ausstoß aller Werke
 //   FreighterSpeed   Frachter
 //   FleetSpeed       Flotten auf der Karte
 //   ShipSpeed        Schiffe im Gefecht
-//   WeaponDamage / WeaponRange
-//   Shields / Armor / Hull
-//   GroundAttack / GroundDefense
+//   WeaponDamage, WeaponRange, Shields, Armor, Hull
+//   GroundAttack, GroundDefense
 //   Research         Forschung selbst
 // Module und Entwürfe verweisen über `tech` auf diese Schlüssel.
 [
@@ -22,11 +25,11 @@
      requires: [], effects: [Yield(0.04)]),
     (key: "wirtschaft_2", name: "Frachtleitsysteme", branch: Economy, tier: 2, cost: 6000.0,
      requires: ["wirtschaft_1"], effects: [FreighterSpeed(0.10)]),
-    (key: "wirtschaft_3", name: "Tiefenförderung", branch: Economy, tier: 3, cost: 13000.0,
+    (key: "wirtschaft_3", name: "Tiefenförderung", branch: Economy, tier: 3, cost: 12000.0,
      requires: ["wirtschaft_2"], effects: [Yield(0.05)]),
-    (key: "wirtschaft_4", name: "Selbstwartende Werke", branch: Economy, tier: 4, cost: 30000.0,
+    (key: "wirtschaft_4", name: "Selbstwartende Werke", branch: Economy, tier: 4, cost: 24000.0,
      requires: ["wirtschaft_3"], effects: [Yield(0.05), Research(0.05)]),
-    (key: "wirtschaft_5", name: "Schwarmlogistik", branch: Economy, tier: 5, cost: 70000.0,
+    (key: "wirtschaft_5", name: "Schwarmlogistik", branch: Economy, tier: 5, cost: 54000.0,
      requires: ["wirtschaft_4"], effects: [FreighterSpeed(0.15), Yield(0.03)]),
     (key: "wirtschaft_6", name: "Geschlossene Kreisläufe", branch: Economy, tier: 6, cost: 400000.0,
      requires: ["wirtschaft_5"], effects: [Yield(0.08)]),
@@ -35,51 +38,51 @@
      requires: [], effects: [FleetSpeed(0.10)]),
     (key: "antrieb_2", name: "Vektorschub", branch: Propulsion, tier: 2, cost: 6000.0,
      requires: ["antrieb_1"], effects: [ShipSpeed(0.06)]),
-    (key: "antrieb_3", name: "Plasmaantriebe", branch: Propulsion, tier: 3, cost: 13000.0,
+    (key: "antrieb_3", name: "Plasmaantriebe", branch: Propulsion, tier: 3, cost: 12000.0,
      requires: ["antrieb_2"], effects: [FleetSpeed(0.10), ShipSpeed(0.04)]),
-    (key: "antrieb_4", name: "Trägheitsdämpfer", branch: Propulsion, tier: 4, cost: 30000.0,
+    (key: "antrieb_4", name: "Trägheitsdämpfer", branch: Propulsion, tier: 4, cost: 24000.0,
      requires: ["antrieb_3"], effects: [ShipSpeed(0.08)]),
-    (key: "antrieb_5", name: "Faltkorridore", branch: Propulsion, tier: 5, cost: 70000.0,
+    (key: "antrieb_5", name: "Faltkorridore", branch: Propulsion, tier: 5, cost: 54000.0,
      requires: ["antrieb_4"], effects: [FleetSpeed(0.15), FreighterSpeed(0.10)]),
     (key: "antrieb_6", name: "Gravitationssegel", branch: Propulsion, tier: 6, cost: 400000.0,
      requires: ["antrieb_5"], effects: [ShipSpeed(0.10), FleetSpeed(0.10)]),
     // --- Weapons ---
     (key: "waffen_1", name: "Zielrechner", branch: Weapons, tier: 1, cost: 3000.0,
-     requires: [], effects: [WeaponRange(0.05)]),
+     requires: [], effects: [WeaponRange(0.06)]),
     (key: "waffen_2", name: "Spulenbeschleuniger", branch: Weapons, tier: 2, cost: 6000.0,
-     requires: ["waffen_1"], effects: [WeaponDamage(0.08)]),
-    (key: "waffen_3", name: "Gekoppelte Feuerleitung", branch: Weapons, tier: 3, cost: 13000.0,
-     requires: ["waffen_2"], effects: [WeaponRange(0.06), WeaponDamage(0.04)]),
-    (key: "waffen_4", name: "Fokussierkristalle", branch: Weapons, tier: 4, cost: 30000.0,
-     requires: ["waffen_3"], effects: [WeaponDamage(0.08)]),
-    (key: "waffen_5", name: "Vorhaltealgorithmen", branch: Weapons, tier: 5, cost: 70000.0,
-     requires: ["waffen_4"], effects: [WeaponRange(0.08)]),
+     requires: ["waffen_1"], effects: [WeaponDamage(0.10)]),
+    (key: "waffen_3", name: "Gekoppelte Feuerleitung", branch: Weapons, tier: 3, cost: 12000.0,
+     requires: ["waffen_2"], effects: [WeaponRange(0.06), WeaponDamage(0.06)]),
+    (key: "waffen_4", name: "Fokussierkristalle", branch: Weapons, tier: 4, cost: 24000.0,
+     requires: ["waffen_3"], effects: [WeaponDamage(0.12)]),
+    (key: "waffen_5", name: "Vorhaltealgorithmen", branch: Weapons, tier: 5, cost: 54000.0,
+     requires: ["waffen_4"], effects: [WeaponRange(0.10), WeaponDamage(0.04)]),
     (key: "waffen_6", name: "Resonanzladung", branch: Weapons, tier: 6, cost: 400000.0,
-     requires: ["waffen_5"], effects: [WeaponDamage(0.12)]),
+     requires: ["waffen_5"], effects: [WeaponDamage(0.15)]),
     // --- Defense ---
     (key: "verteidigung_1", name: "Schottverstärkung", branch: Defense, tier: 1, cost: 3000.0,
-     requires: [], effects: [Hull(0.08)]),
+     requires: [], effects: [Hull(0.10)]),
     (key: "verteidigung_2", name: "Phasenschilde", branch: Defense, tier: 2, cost: 6000.0,
-     requires: ["verteidigung_1"], effects: [Shields(0.12)]),
-    (key: "verteidigung_3", name: "Kompaktreaktoren", branch: Defense, tier: 3, cost: 13000.0,
-     requires: ["verteidigung_2"], effects: [Shields(0.06), Hull(0.04)]),
-    (key: "verteidigung_4", name: "Schichtpanzerung", branch: Defense, tier: 4, cost: 30000.0,
-     requires: ["verteidigung_3"], effects: [Armor(0.12)]),
-    (key: "verteidigung_5", name: "Regenerative Felder", branch: Defense, tier: 5, cost: 70000.0,
-     requires: ["verteidigung_4"], effects: [Shields(0.12)]),
+     requires: ["verteidigung_1"], effects: [Shields(0.15)]),
+    (key: "verteidigung_3", name: "Kompaktreaktoren", branch: Defense, tier: 3, cost: 12000.0,
+     requires: ["verteidigung_2"], effects: [Shields(0.08), Hull(0.06)]),
+    (key: "verteidigung_4", name: "Schichtpanzerung", branch: Defense, tier: 4, cost: 24000.0,
+     requires: ["verteidigung_3"], effects: [Armor(0.15)]),
+    (key: "verteidigung_5", name: "Regenerative Felder", branch: Defense, tier: 5, cost: 54000.0,
+     requires: ["verteidigung_4"], effects: [Shields(0.15), Hull(0.04)]),
     (key: "verteidigung_6", name: "Selbstheilende Hüllen", branch: Defense, tier: 6, cost: 400000.0,
-     requires: ["verteidigung_5"], effects: [Hull(0.10), Armor(0.10)]),
+     requires: ["verteidigung_5"], effects: [Hull(0.12), Armor(0.12)]),
     // --- Ground ---
     (key: "boden_1", name: "Landungsdoktrin", branch: Ground, tier: 1, cost: 3000.0,
-     requires: [], effects: [GroundAttack(0.08)]),
+     requires: [], effects: [GroundAttack(0.10)]),
     (key: "boden_2", name: "Tiefbunkerbau", branch: Ground, tier: 2, cost: 6000.0,
-     requires: ["boden_1"], effects: [GroundDefense(0.10)]),
-    (key: "boden_3", name: "Orbitale Feuerleitung", branch: Ground, tier: 3, cost: 13000.0,
-     requires: ["boden_2"], effects: [GroundAttack(0.08)]),
-    (key: "boden_4", name: "Tunnelkriegführung", branch: Ground, tier: 4, cost: 30000.0,
-     requires: ["boden_3"], effects: [GroundAttack(0.06), GroundDefense(0.06)]),
-    (key: "boden_5", name: "Schildgeneratoren", branch: Ground, tier: 5, cost: 70000.0,
-     requires: ["boden_4"], effects: [GroundDefense(0.12)]),
+     requires: ["boden_1"], effects: [GroundDefense(0.12)]),
+    (key: "boden_3", name: "Orbitale Feuerleitung", branch: Ground, tier: 3, cost: 12000.0,
+     requires: ["boden_2"], effects: [GroundAttack(0.10)]),
+    (key: "boden_4", name: "Tunnelkriegführung", branch: Ground, tier: 4, cost: 24000.0,
+     requires: ["boden_3"], effects: [GroundAttack(0.08), GroundDefense(0.08)]),
+    (key: "boden_5", name: "Schildgeneratoren", branch: Ground, tier: 5, cost: 54000.0,
+     requires: ["boden_4"], effects: [GroundDefense(0.15)]),
     (key: "boden_6", name: "Mobile Festungen", branch: Ground, tier: 6, cost: 400000.0,
-     requires: ["boden_5"], effects: [GroundAttack(0.10), GroundDefense(0.08)]),
+     requires: ["boden_5"], effects: [GroundAttack(0.12), GroundDefense(0.10)]),
 ]

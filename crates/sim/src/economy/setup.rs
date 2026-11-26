@@ -26,7 +26,10 @@ pub fn setup_economy(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> E
         initial_money: 0,
         minted: 0,
         tech_yield: Vec::new(),
+        state_income: Vec::new(),
+        state_income_running: Vec::new(),
     };
+    economy.sync_polities();
     for polity in &polities.list {
         if let Some(capital) = polity.capital {
             setup_home_world(data, galaxy.planet(capital), &mut economy);
