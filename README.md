@@ -147,15 +147,16 @@ Die Kopfleiste zeigt Gefechtszeit und Geschwindigkeit; rechts stehen „Übersic
 Tafeln beider Verbände zählen je Klasse, was kämpft, was sich zurückzieht und noch auf dem
 Feld ist, was ohne Energie treibt, was verloren und was entkommen ist. Jede Zeile ergibt
 zusammen die Anfangsstärke der Klasse; Jäger an Bord zählen bei ihrem Träger mit. Die
-Bilanz am Ende zählt genauso. Die
-Tafel des eigenen Verbands (links) ändert während des Gefechts Formation und Doktrin und
-befiehlt den Rückzug; ein befohlener Rückzug lässt sich nicht zurücknehmen. Ein Klick auf
-ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition, Treibstoff,
-Moral, Ziel und allen Modulen; „Heranholen“ und „Verfolgen“ führen die Kamera zu ihm.
-Klicks, Züge und Mausrad auf Leisten und Tafeln wirken nicht auf die Szene dahinter.
-Beim Umsehen ist der Mauszeiger gefangen und unsichtbar. Solange gehört die Maus allein der
-Kamera: Das Mausrad ändert die Fluggeschwindigkeit, und ein Klick gilt weder einer Tafel
-noch einem Schiff.
+Bilanz am Ende zählt genauso.
+
+Die Tafel des eigenen Verbands (links) ändert während des Gefechts Formation und Doktrin
+und befiehlt den Rückzug; ein befohlener Rückzug lässt sich nicht zurücknehmen. Ein Klick
+auf ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition,
+Treibstoff, Moral, Ziel und allen Modulen; „Heranholen“ und „Verfolgen“ führen die Kamera
+zu ihm. Klicks, Züge und Mausrad auf Leisten und Tafeln wirken nicht auf die Szene
+dahinter. Beim Umsehen ist der Mauszeiger gefangen und unsichtbar. Solange gehört die Maus
+allein der Kamera: Das Mausrad ändert die Fluggeschwindigkeit, und ein Klick gilt weder
+einer Tafel noch einem Schiff.
 
 Die Übersicht rückt so weit ab, dass jedes Schiff auf dem Feld neben den offenen Tafeln zu
 sehen ist. Die Blicke des Ziffernblocks gelten dem gewählten Schiff, ohne Auswahl allen
