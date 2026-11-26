@@ -41,6 +41,24 @@ Volkswirtschaftliche Kennzahlen im Jahresabstand (Versorgung, Auslastung, Preisn
 Geldverteilung), dazu Markt und Werke eines Systems. Das Werkzeug zum Auswuchten.
 
 ```bash
+cargo headless fleets --seed 7 --years 20 --order speer:1,dolch:2
+```
+
+Flotten, Schiffe, Vorräte, Werften und Bauaufträge je Gemeinschaft. Mit `--order` gibt
+jede Gemeinschaft dieselben Schiffe bei der Werft ihrer Hauptwelt in Auftrag; `--ships`
+listet jedes Schiff einzeln.
+
+```bash
+cargo headless run --seed 7 --years 30 --war 10:0:1 --war 12:2:1 --peace 20:0:1
+```
+
+Kriege nach Drehbuch, solange keine KI Krieg führt: Im Jahr 10 erklärt Gemeinschaft 0 der
+Gemeinschaft 1 den Krieg und schickt ihre Flotten im Blockadeauftrag in deren
+Heimatsystem. Die Ausgabe zeigt die Chronik, die Bilanz jedes Gefechts und je
+Gemeinschaft Staatskasse, Kriegsmüdigkeit und Zusammenhalt. `sweep` und `hash` nehmen
+dieselben Angaben: So gehen Gefechte auch in Sweeps und Prüfsummen ein.
+
+```bash
 cargo headless hash --seed 7 --days 3600
 ```
 
@@ -161,6 +179,58 @@ wählt `--data-dir PFAD` oder die Umgebungsvariable `KONFLUENZ_DATA`.
 
 Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 
+## Flotten, Werften und Nachschub
+
+- **Schiffe.** Eine Flotte besteht aus Schiffen mit Entwurf, Rumpf- und Modulzustand,
+  Munition, Treibstoff und Bordjägern. Ihre Stärke ist abgeleitet: Bauwert mal Zustand,
+  geeicht an der Startflotte. Kaperfahrt, Geleitschutz und Blockade rechnen mit dieser Zahl.
+- **Werften.** Eine Welt baut Schiffe, wenn in ihrem Zweig Rüstung Kapital steht: je
+  `yard_capital_per_slot` ein Bauplatz, mindestens einer. Die Hauptwelt hat auch ohne
+  Rüstungskapital einen. Der Staat kauft täglich den Tagesanteil der Bauteile am Markt des
+  Systems und zahlt der Rüstungsfirma der Welt einen Aufschlag, an dem ihre Anteilseigner
+  mitverdienen. Fehlt ein Bauteil oder Geld, stockt der Bau: Eine blockierte Werft steht
+  still, weil keine Ware mehr ankommt. Ein neues Schiff kommt mit leeren Magazinen und Tanks.
+- **Nachschub.** Im eigenen, nicht blockierten System fasst eine Flotte Munition und
+  Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff;
+  mit leerem Tank schleppt sich eine Flotte nur noch mit einem Bruchteil ihrer Fahrt.
+- **Instandsetzung.** Im eigenen System mit Werft, gegen Rumpfsegmente vom Markt; verlorene
+  Bordjäger kommen aus ihren eigenen Bauteilen.
+- **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
+  Haushalte. Reicht die Kasse nicht, wächst der Soldrückstand der Gemeinschaft.
+- **Befehle.** Schiffe bestellen und Aufträge streichen, Flotten teilen und vereinigen,
+  Aufstellung und Doktrin als stehende Befehle, Rückzug aus einem laufenden Gefecht.
+
+Die Stellschrauben stehen in `assets/data/balance.ron` unter `military`.
+
+## Gefechte
+
+- **Beginn.** Liegen am Tagesanfang einsatzbereite Flotten verfeindeter Gemeinschaften im
+  selben System, beginnt ein Gefecht: jede Flotte eine Partei, mit ihrer Aufstellung und
+  Doktrin und jedem Schiff in dem Zustand, in dem es gerade ist. Die Moral der Besatzungen
+  sinkt mit der Kriegsmüdigkeit daheim und mit ausstehendem Sold. Wer später dazukommt
+  und mit einer Partei im Krieg liegt, greift am nächsten Morgen als Verstärkung ein.
+- **Verlauf.** Gerechnet wird im taktischen Rechner (`sim::battle`), ein Schritt je Takt,
+  zwei Sekunden Gefechtszeit je Kalendertag. Ein Gefecht zweier Startflotten dauert meist
+  vier bis sechs Wochen. Solange es läuft, nimmt eine Flotte keinen Marschbefehl an; neue
+  Aufstellung und Doktrin gelten sofort, und der Rückzug lässt sich befehlen. Ein
+  Friedensschluss beendet das Gefecht. Welche Flotte im Rechner die erste Partei ist,
+  entscheidet das Los des Gefechts.
+- **Ende.** Zerstörte Schiffe sind fort, ebenso treibende einer Partei, die das Feld nicht
+  hält. Alle anderen behalten ihre Schäden und was von Munition und Treibstoff übrig ist.
+  Überlebende Bordjäger kehren auf Träger ihrer Flotte zurück, soweit die Hangars reichen.
+  Wer das Feld nicht hält, weicht in ein Nachbarsystem aus (woher er kam, sonst eigenes
+  Gebiet, sonst wo kein Feind steht) und sammelt sich dort: So lange beginnt die Flotte
+  kein Gefecht, wird nicht angegriffen und zählt weder für Blockade noch für Kaperfahrt
+  oder Geleitschutz. Endet ein Gefecht an der Zeitgrenze ohne Entscheidung, zieht niemand
+  ab, und im System ruhen die Waffen für einige Wochen.
+- **Folgen.** Verluste heben die Kriegsmüdigkeit im Verhältnis zum verlorenen Anteil an
+  der ganzen Flotte, und mit ihr steigen Anleihezinsen und Unruhe in den Regionen. Eine
+  schwere Niederlage drückt die Kurse aller Betriebe der Gemeinschaft. Was verschossen und
+  beschädigt wurde, kauft der Staat zu Hause am Markt nach. Im System bleibt ein
+  Trümmerfeld, das über die Jahre verblasst.
+- **Werften.** Ein fertiges Schiff bleibt im Dock, solange feindliche Flotten im System
+  stehen und keine eigene es aufnehmen kann.
+
 ## Stand
 
 | Meilenstein | Inhalt | Stand |
@@ -168,11 +238,10 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | offen |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie; offen: Militär-KI, Forschung im Gefecht, Oberfläche |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
 Bereits in Meilenstein 1 enthalten, weil spätere Stufen darauf bauen: Gemeinschaften mit
-Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände. Flotten und
-Gefechte sind bis Meilenstein 4 grob aufgelöst (eine Stärkezahl je Flotte).
+Planetenbesitz, Koloniegründung, Befehlsprotokoll mit Wiedergabe, Spielstände.

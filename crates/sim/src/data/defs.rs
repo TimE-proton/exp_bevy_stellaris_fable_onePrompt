@@ -431,7 +431,6 @@ pub struct LogisticsBalance {
 pub struct FleetBalance {
     pub start_strength: f32,
     pub speed: f32,
-    pub daily_damage: f32,
 }
 
 fn one_f32() -> f32 {

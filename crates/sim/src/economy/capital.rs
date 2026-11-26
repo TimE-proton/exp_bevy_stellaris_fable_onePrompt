@@ -431,7 +431,8 @@ pub fn state_reserve(
 
 /// Der Staat zahlt `budget` an die Haushalte seiner Welten, verteilt nach Bevölkerung:
 /// Leistungen, Gehälter, Sold. Gezahlt wird nie mehr, als die Kasse hergibt; die Kasse
-/// sinkt um genau den Betrag, den die Haushalte erhalten. Gibt ihn zurück.
+/// sinkt um genau den Betrag, den die Haushalte erhalten. Gibt ihn zurück; der
+/// Rundungsrest bleibt in der Kasse.
 pub fn pay_households(
     galaxy: &Galaxy,
     economy: &mut Economy,
