@@ -690,6 +690,9 @@ pub struct SiegeStats {
     /// Verlorene Verbände der Belagerer und der Verteidiger.
     pub lost_attackers: f64,
     pub lost_defenders: f64,
+    /// Geplünderte Welten und was dabei in die Staatskassen floss, in Credits.
+    pub sacked: u32,
+    pub looted: f64,
 }
 
 impl SiegeStats {
@@ -868,6 +871,7 @@ impl Sieges {
             stats.prize_kept,
             stats.lost_attackers,
             stats.lost_defenders,
+            stats.looted,
         ]
         .into_iter()
         .any(|value| !sound(value))

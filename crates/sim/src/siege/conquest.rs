@@ -9,7 +9,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::TICKS_PER_DAY;
 use crate::data::{GameData, SiegeBalance};
 use crate::diplomacy::Diplomacy;
-use crate::economy::Economy;
+use crate::economy::{Economy, Money, pay, to_credits};
 use crate::finance::{Finance, Region, Stage, ownership_of_region};
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
@@ -96,6 +96,50 @@ pub fn mirror_region(
     };
 }
 
+/// Was eine Plünderung eingebracht hat, in Tausendstel Credits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Loot {
+    total: Money,
+    /// Der Teil davon aus den Kassen der Firmen: Er schmälert, was ihren Eignern gehört.
+    firms: Money,
+}
+
+/// Plündert eine eroberte Welt: Der Anteil `sack_share` der Kassen ihrer Haushalte, ihrer
+/// Firmen und ihrer Elite geht an die Staatskasse des Eroberers. Geld wird nur verschoben.
+fn sack(
+    balance: &SiegeBalance,
+    economy: &mut Economy,
+    finance: &mut Finance,
+    planet: PlanetId,
+    to: PolityId,
+) -> Loot {
+    let share = |cash: Money| (cash.max(0) as f64 * balance.sack_share.clamp(0.0, 1.0)) as Money;
+    let Economy {
+        planets,
+        treasuries,
+        ..
+    } = economy;
+    let (Some(local), Some(treasury)) = (
+        planets.get_mut(planet.index()),
+        treasuries.get_mut(to.index()),
+    ) else {
+        return Loot::default();
+    };
+    let mut loot = Loot::default();
+    let taken = share(local.households);
+    loot.total += pay(&mut local.households, treasury, taken);
+    for firm in &mut local.firms {
+        let taken = share(firm.cash);
+        loot.firms += pay(&mut firm.cash, treasury, taken);
+    }
+    loot.total += loot.firms;
+    if let Some(elite) = finance.elites.get_mut(planet.index()) {
+        let taken = share(*elite);
+        loot.total += pay(elite, treasury, taken);
+    }
+    loot
+}
+
 /// Vollzieht die Eroberung einer gewöhnlichen Welt.
 fn conquer(
     data: &GameData,
@@ -114,14 +158,11 @@ fn conquer(
     let balance = &data.balance.siege;
     let day = tick / TICKS_PER_DAY;
     let (planet, to) = (conquest.planet, conquest.to);
-    // Vor dem Wechsel gelesen: Vorbesitz des Eroberers, die Betriebe der Welt, die Beute.
+    // Vor dem Wechsel gelesen: Vorbesitz des Eroberers und Dritter, die Betriebe der Welt,
+    // die Beute.
     let capitals: Vec<Option<PlanetId>> = polities.list.iter().map(|p| p.capital).collect();
-    let stake = ownership_of_region(finance, galaxy, logistics, &capitals, planet)
-        .foreign
-        .get(&to)
-        .copied()
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
+    let foreign = ownership_of_region(finance, galaxy, logistics, &capitals, planet).foreign;
+    let stake = foreign.get(&to).copied().unwrap_or(0.0).clamp(0.0, 1.0);
     let issuers = local_issuers(finance, galaxy, logistics, polities, planet);
     let prize_kept = prize(data, galaxy, economy, logistics, planet);
     let defense = sieges.defense(planet);
@@ -144,7 +185,29 @@ fn conquer(
     // Die Schonfrist junger Kolonien schützt auch die Ruinen einer eroberten Welt davor,
     // sofort abgewickelt zu werden.
     economy.planets[planet.index()].founded_day = day;
-    // Plünderung (`Conquest::sack`) ist noch nicht eingebaut; sie gehört an diese Stelle.
+    // Plünderung, wenn befohlen: nicht nach einer Übergabe, nicht bei einer Befreiung.
+    let sacked = conquest.sack && conquest.outcome != Outcome::Capitulated && !liberated;
+    let loot = if sacked {
+        sack(balance, economy, finance, planet, to)
+    } else {
+        Loot::default()
+    };
+    if sacked {
+        for id in &issuers {
+            if let Some(issuer) = finance.issuers.get_mut(id) {
+                issuer.shock = (issuer.shock * balance.sack_shock).max(SHOCK_FLOOR);
+            }
+        }
+        // Dritte, deren Betriebe geplündert wurden, merken es sich.
+        for (polity, share) in &foreign {
+            let credits = to_credits(loot.firms) * share.clamp(0.0, 1.0);
+            if *polity != to && credits > 0.0 {
+                *sieges.grievances.entry((to, *polity)).or_default() += credits;
+            }
+        }
+        sieges.stats.sacked += 1;
+        sieges.stats.looted += to_credits(loot.total);
+    }
 
     // Der Datensatz endet; die Truppe am Boden wird zur Garnison der Welt.
     let Some(siege) = close(sieges, finance, planet, conquest.outcome, day) else {
@@ -164,6 +227,11 @@ fn conquer(
     };
     defense.posture = Posture::Forward;
     defense.hold_fire = false;
+    if sacked {
+        // Die Plünderung zählt zu den Kriegsschäden, die der Eroberer verantwortet.
+        defense.scar = (defense.scar + balance.sack_scar).min(1.0);
+        defense.scar_by = Some(to);
+    }
     if liberated {
         defense.occupation = 0.0;
         defense.occupied_from = None;
@@ -222,6 +290,20 @@ fn conquer(
         Some(target.system),
         text,
     );
+    if sacked {
+        chronicle.push(
+            tick,
+            ChronicleKind::War,
+            Some(to),
+            Some(target.system),
+            format!(
+                "{} plündert {}: {:.0} Credits aus den Kassen der Welt gehen an den Staat.",
+                polities.get(to).name,
+                target.name,
+                to_credits(loot.total)
+            ),
+        );
+    }
 }
 
 /// Tagesabschluss: vollzieht die fälligen Besitzwechsel in der Reihenfolge ihrer Urteile.
@@ -449,6 +531,169 @@ mod tests {
             .iter()
             .any(|entry| entry.text.contains("kehrt zu"));
         assert!(told, "die Chronik nennt die Rückkehr");
+    }
+
+    /// Befiehlt der laufenden Belagerung die Plünderung nach dem Fall.
+    fn order_sack(scene: &mut Scene) {
+        let planet = scene.planet;
+        let orders = crate::siege::SiegeOrders {
+            sack: true,
+            ..Default::default()
+        };
+        crate::siege::set_siege_orders(
+            &scene.state.galaxy,
+            &mut scene.state.sieges,
+            ME,
+            planet,
+            orders,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_sacked_world_pays_the_conqueror_and_third_parties_remember() {
+        let mut scene = Scene::colony();
+        let balance = scene.data.balance.siege.clone();
+        let planet = scene.planet;
+        let third = PolityId(2);
+        // Eine dritte Gemeinschaft hält die Anteile der Elite der Kolonie, und die Elite
+        // hat einen Teil des Geldes der Haushalte in ihrer Kasse.
+        let firms = local_issuers(
+            &scene.state.finance,
+            &scene.state.galaxy,
+            &scene.state.logistics,
+            &scene.state.polities,
+            planet,
+        );
+        for id in &firms {
+            let issuer = scene.state.finance.issuers.get_mut(id).unwrap();
+            if let Some(shares) = issuer.holdings.remove(&HolderId::Elite(planet)) {
+                issuer.holdings.insert(HolderId::State(third), shares);
+            }
+        }
+        let households = scene.state.economy.planet(planet).households;
+        assert!(households > 1000);
+        scene.state.economy.planets[planet.index()].households -= households / 4;
+        scene.state.finance.elites[planet.index()] += households / 4;
+        embark(&mut scene, FleetId(0), 5.0);
+        scene.day();
+        let stake = scene.siege().stakes.get(&third).copied().unwrap_or(0.0);
+        assert!(stake > 0.05 && stake < 0.5, "Anteil der Dritten: {stake}");
+        order_sack(&mut scene);
+
+        let money = scene.money();
+        let treasury = scene.state.economy.treasury(ME);
+        let local = scene.state.economy.planet(planet).clone();
+        let elite = scene.state.finance.elites[planet.index()];
+        let firm_cash: Money = local.firms.iter().map(|firm| firm.cash).sum();
+        assert!(local.households > 0 && elite > 0 && firm_cash > 0);
+        let shock = scene.state.finance.issuers[&firms[0]].shock;
+        until_it_falls(&mut scene, ME);
+
+        // Der Anteil sack_share jeder Kasse der Welt liegt jetzt in der Staatskasse des
+        // Eroberers: auf das Tausendstel, und kein Geld ist entstanden oder vergangen.
+        let part = |cash: Money| (cash as f64 * balance.sack_share) as Money;
+        let state = &scene.state;
+        let now = state.economy.planet(planet);
+        assert_eq!(now.households, local.households - part(local.households));
+        let mut from_firms = 0;
+        for (firm, before) in now.firms.iter().zip(&local.firms) {
+            assert_eq!(firm.cash, before.cash - part(before.cash));
+            from_firms += part(before.cash);
+        }
+        assert_eq!(state.finance.elites[planet.index()], elite - part(elite));
+        let loot = part(local.households) + from_firms + part(elite);
+        assert!(loot > 0 && from_firms > 0);
+        assert_eq!(state.economy.treasury(ME), treasury + loot);
+        assert_eq!(scene.money(), money);
+        let stats = &state.sieges.stats;
+        assert_eq!(stats.sacked, 1);
+        assert!((stats.looted - to_credits(loot)).abs() < 1e-9);
+        // Die Plünderung zählt als Kriegsschaden des Eroberers und drückt die Kurse über
+        // den Schreck der Eroberung hinaus.
+        let defense = state.sieges.defense(planet);
+        assert_eq!(defense.scar, balance.sack_scar);
+        assert_eq!(defense.scar_by, Some(ME));
+        let region = state.finance.region(planet);
+        assert_eq!(region.war_damage, balance.sack_scar);
+        // Der Zusammenhalt am Tag der Eroberung rechnet mit den Schäden davor; die der
+        // Plünderung lasten danach als Kriegsschäden auf ihm.
+        assert_eq!(region.cohesion, balance.conquest_base);
+        for id in &firms {
+            let now = state.finance.issuers[id].shock;
+            let expected = shock * balance.conquest_shock * balance.sack_shock;
+            assert!((now - expected).abs() < 1e-12);
+        }
+        // Die Dritte merkt sich, was aus den Kassen ihrer Betriebe genommen wurde. Kein
+        // Schuss fiel: Sonst steht nichts in ihrem Vermerk.
+        let grievance = state.sieges.grievances[&(ME, third)];
+        assert!((grievance - to_credits(from_firms) * stake).abs() < 1e-9);
+        assert_eq!(state.sieges.grievances.len(), 1);
+        let told = state
+            .chronicle
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("plündert"));
+        assert!(told, "die Chronik nennt die Plünderung");
+        assert_eq!(state.sieges.find_anomaly(state.galaxy.planets.len()), None);
+    }
+
+    #[test]
+    fn neither_a_handed_over_nor_a_liberated_world_is_sacked() {
+        // Übergabe: Auch ein Urteil, das die Plünderung nennt, plündert nicht.
+        let mut scene = Scene::colony();
+        let planet = scene.planet;
+        embark(&mut scene, FleetId(0), 5.0);
+        scene.day();
+        let money = scene.money();
+        let treasury = scene.state.economy.treasury(ME);
+        let needed = occupation_force(
+            scene.state.galaxy.planet(planet).population,
+            &scene.data.balance.siege,
+        );
+        scene.state.sieges.active.get_mut(&planet).unwrap().army = needed;
+        scene.state.sieges.pending.push(Conquest {
+            planet,
+            to: ME,
+            outcome: Outcome::Capitulated,
+            sack: true,
+        });
+        scene.day();
+        assert_eq!(scene.state.galaxy.planet(planet).owner, Some(ME));
+        assert_eq!(scene.state.economy.treasury(ME), treasury);
+        assert_eq!(scene.money(), money);
+        assert_eq!(scene.state.sieges.stats.sacked, 0);
+        assert_eq!(scene.state.sieges.defense(planet).scar, 0.0);
+
+        // Befreiung: Wer eine eigene Welt zurückholt, plündert sie nicht, auch auf Befehl.
+        let mut scene = Scene::colony();
+        let planet = scene.planet;
+        embark(&mut scene, FleetId(0), 5.0);
+        until_it_falls(&mut scene, ME);
+        let home = scene.state.polities.get(ME).capital.unwrap();
+        scene.place(0, scene.state.galaxy.planet(home).system);
+        scene.place(1, scene.system);
+        scene.state.sieges.assign.insert(FleetId(1), planet);
+        embark(&mut scene, FleetId(1), 5.0);
+        scene.day();
+        let orders = crate::siege::SiegeOrders {
+            sack: true,
+            ..Default::default()
+        };
+        crate::siege::set_siege_orders(
+            &scene.state.galaxy,
+            &mut scene.state.sieges,
+            FOE,
+            planet,
+            orders,
+        )
+        .unwrap();
+        let treasury = scene.state.economy.treasury(FOE);
+        until_it_falls(&mut scene, FOE);
+        assert_eq!(scene.state.economy.treasury(FOE), treasury);
+        assert_eq!(scene.state.sieges.stats.sacked, 0);
+        assert_eq!(scene.state.sieges.defense(planet).scar, 0.0);
+        assert_eq!(scene.state.sieges.stats.conquests(), 2);
     }
 
     #[test]

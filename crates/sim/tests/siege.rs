@@ -1272,6 +1272,121 @@ fn a_landing_storms_a_colony_as_the_forecast_says() {
     assert!(told, "die Chronik nennt die Eroberung");
 }
 
+// --- Plünderung ---------------------------------------------------------------------
+
+/// Kassen einer Welt in Tausendstel Credits: Haushalte, Firmen, Elite.
+fn purses(sim: &Headless, planet: PlanetId) -> [i64; 3] {
+    let local = sim.world().resource::<Economy>().planet(planet);
+    let firms = local.firms.iter().map(|firm| firm.cash).sum();
+    [local.households, firms, finance(sim).elites[planet.index()]]
+}
+
+fn treasury(sim: &Headless, polity: PolityId) -> i64 {
+    sim.world().resource::<Economy>().treasury(polity)
+}
+
+/// Sturm auf die nächstgelegene Kolonie mit allen regulären Verbänden der Heimatwelt, bis
+/// sie fällt; mit oder ohne Befehl zur Plünderung. `Campaign::day` prüft an jedem Tag
+/// Invarianten und Geldsumme: beim Einkauf des Nachschubs, bei der Landung, im Bodenkrieg
+/// und am Tag der Eroberung.
+fn storm_until_the_fall(sack: bool) -> Campaign {
+    let troops = data().balance.siege.home_start.regulars;
+    let mut campaign = Campaign::against_a_colony_with(troops, 21);
+    assert!(campaign.supply_aboard() > 0.0);
+    assert_eq!(money_drift(campaign.sim.world()), Some(0));
+    campaign.begin();
+    campaign.day();
+    campaign.order(SiegeOrders {
+        fire: Fire::Support,
+        assault: true,
+        focus: 0,
+        sack,
+    });
+    campaign.land(troops);
+    let mut days = 1;
+    while owner(&campaign.sim, campaign.planet) == Some(campaign.defender) {
+        campaign.day();
+        days += 1;
+        assert!(days < 120, "der Sturm endet nie");
+    }
+    assert_eq!(
+        owner(&campaign.sim, campaign.planet),
+        Some(campaign.attacker)
+    );
+    campaign
+}
+
+#[test]
+fn landing_sack_and_conquest_only_move_money() {
+    let balance = &data().balance.siege;
+    // Zwillinge: derselbe Sturm, einmal mit und einmal ohne Plünderung. Bis zum Tag des
+    // Falls verlaufen beide Partien gleich; an seinem Ende unterscheidet sie nur, was die
+    // Plünderung bewegt hat.
+    let mut sacked = storm_until_the_fall(true);
+    let spared = storm_until_the_fall(false);
+    let (attacker, planet) = (sacked.attacker, sacked.planet);
+    assert_eq!((attacker, planet), (spared.attacker, spared.planet));
+    assert_eq!(sacked.sim.clock(), spared.sim.clock());
+    let stats = sieges(&sacked.sim).stats.clone();
+    assert_eq!((stats.conquests(), stats.sacked), (1, 1));
+    assert_eq!(sieges(&spared.sim).stats.sacked, 0);
+    assert!(stats.lost_attackers > 0.0 && stats.lost_defenders > 0.0);
+    assert_eq!(
+        stats.lost_attackers,
+        sieges(&spared.sim).stats.lost_attackers
+    );
+
+    // Jede Kasse der Welt hat den Anteil sack_share verloren, auf das Tausendstel, und
+    // genau die Summe davon liegt in der Staatskasse des Eroberers.
+    let (taken, left) = (purses(&sacked.sim, planet), purses(&spared.sim, planet));
+    let mut loot = 0;
+    for (after, before) in taken.into_iter().zip(left) {
+        let part = (before as f64 * balance.sack_share) as i64;
+        assert!(part > 0, "jede Kasse der Kolonie hat Geld");
+        assert_eq!(after, before - part);
+        loot += part;
+    }
+    assert_eq!(
+        treasury(&sacked.sim, attacker),
+        treasury(&spared.sim, attacker) + loot
+    );
+    let credits = sim::economy::to_credits;
+    assert!((stats.looted - credits(loot)).abs() < 1e-9);
+    println!(
+        "geplündert {:.0} Credits; Kassen der verschonten Welt: Haushalte {:.0}, Firmen {:.0}, \
+         Elite {:.0}",
+        stats.looted,
+        credits(left[0]),
+        credits(left[1]),
+        credits(left[2])
+    );
+    // Die Plünderung zählt als Kriegsschaden über den des Bodenkriegs hinaus, drückt die
+    // Kurse und steht in der Chronik.
+    let scar = sacked.defense().scar;
+    assert!((scar - spared.defense().scar - balance.sack_scar).abs() < 1e-12);
+    assert_eq!(sacked.defense().scar_by, Some(attacker));
+    assert_eq!(finance(&sacked.sim).region(planet).war_damage, scar);
+    let firm = *finance(&sacked.sim)
+        .issuers
+        .keys()
+        .find(|id| matches!(id, IssuerId::Firm { planet: seat, .. } if *seat == planet))
+        .unwrap();
+    let shock = |sim: &Headless| finance(sim).issuers[&firm].shock;
+    assert!((shock(&sacked.sim) - shock(&spared.sim) * balance.sack_shock).abs() < 1e-12);
+    let told = |sim: &Headless| {
+        sim.world()
+            .resource::<sim::chronicle::Chronicle>()
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("plündert"))
+    };
+    assert!(told(&sacked.sim) && !told(&spared.sim));
+    // Auch danach stimmt die Geldsumme an jedem Tag.
+    for _ in 0..60 {
+        sacked.day();
+    }
+}
+
 // --- Übergabe -----------------------------------------------------------------------
 
 #[test]
