@@ -3354,6 +3354,62 @@ fn a_stalemate_has_no_winner_and_does_not_start_over() {
     );
 }
 
+#[test]
+fn opponents_who_disengage_abroad_do_not_meet_again_next_door() {
+    let (a, b) = (PolityId(0), PolityId(1));
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    let regroup = data().balance.military.regroup_days;
+    let mut sim = with_player(61);
+    // Zwei einzelne Korvetten marschieren im Frieden aus demselben System in ein freies
+    // Nachbarsystem: Beide kamen also von dort, und beide wichen ohne Weiteres dorthin
+    // zurück.
+    let (field, rear) = free_neighbors(&sim);
+    for id in [ours, theirs] {
+        rebuild_fleet(&mut sim, id, &[("dolch", 1)]);
+        place(&mut sim, id, rear);
+    }
+    for (polity, fleet) in [(a, ours), (b, theirs)] {
+        sim.issue(polity, SimCommand::MoveFleet { fleet, to: field });
+    }
+    sail(&mut sim, ours, field);
+    sail(&mut sim, theirs, field);
+    assert_eq!(fleet(&sim, ours).came_from, Some(rear));
+    assert_eq!(fleet(&sim, theirs).came_from, Some(rear));
+    assert_eq!(battles(&sim).next_id, 0);
+
+    // Krieg: Die beiden können einander nichts anhaben, das Gefecht endet im Patt.
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.run_days(1);
+    let report = fight_out(&mut sim, field);
+    assert_eq!(
+        report.outcome,
+        BattleOutcome::Stalemate,
+        "Szenario neu wählen: Zwei einzelne Korvetten sollten im Patt enden"
+    );
+    assert_aftermath(&sim, &report);
+    // Niemand ist hier zu Hause, beide weichen aus, aber nicht in dasselbe System: Die
+    // erste geht zurück, woher sie kam, die zweite nimmt einen anderen Weg oder bleibt.
+    assert_eq!(fleet(&sim, ours).route, vec![rear]);
+    assert_ne!(fleet(&sim, theirs).route, vec![rear]);
+    assert!(fleet(&sim, ours).is_regrouping() && fleet(&sim, theirs).is_regrouping());
+
+    // Auch nach der Sammelfrist stehen sie einander nicht wieder gegenüber: Es bleibt bei
+    // dem einen Gefecht.
+    sim.run_days(4 * regroup);
+    assert_eq!(battles(&sim).next_id, 1);
+    assert!(battles(&sim).active.is_empty());
+    let (first, second) = (fleet(&sim, ours), fleet(&sim, theirs));
+    assert!(first.is_ready() && second.is_ready());
+    assert_ne!(first.system, second.system);
+    assert_eq!(
+        first.ships.len() + second.ships.len(),
+        2,
+        "niemand hat etwas verloren"
+    );
+    assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
 // --- 15. Mehr als zwei Parteien, Abspaltung, Erlöschen ---------------------------------------
 
 /// Nach einem Gefecht steht keine Flotte mehr darin. Entschieden: Wer das Feld hält,

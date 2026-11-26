@@ -14,6 +14,8 @@
 //! - Ohne Entscheidung (Patt oder Zeitgrenze): Niemand hat gewonnen, alle lösen sich
 //!   voneinander. Wer im eigenen System steht, bleibt dort; alle anderen weichen aus und
 //!   sammeln sich. So beginnt dasselbe Gefecht nicht am nächsten Morgen von vorn.
+//! - Gegner aus demselben Gefecht weichen nie in dasselbe System aus: Sonst stünden sie
+//!   sich nach der Sammelfrist dort wieder gegenüber.
 //!
 //! Technik: Die Aufschläge einer Partei (Waffenschaden, Reichweite, Schilde, Panzerung,
 //! Rumpf, Fahrt) stammen aus der Forschung ihrer Gemeinschaft zum Zeitpunkt des Eintritts
@@ -666,32 +668,36 @@ fn holds_field(results: &[ShipResult], side: usize) -> bool {
 
 /// Wohin eine Flotte ausweicht, die das Feld räumt: dorthin, woher sie kam, wenn das ein
 /// Nachbarsystem ist; sonst in ein Nachbarsystem der eigenen Gemeinschaft; sonst in eines
-/// ohne feindliche Flotten; sonst in das mit der kleinsten Nummer. `None` nur, wenn das
-/// System keine Nachbarn hat.
+/// ohne feindliche Flotten; sonst in das mit der kleinsten Nummer. Die Systeme in `avoid`
+/// kommen nicht in Frage: Dorthin weichen schon Gegner aus demselben Gefecht aus. `None`,
+/// wenn kein Nachbarsystem bleibt; dann sammelt sich die Flotte, wo sie steht.
 pub fn retreat_target(
     galaxy: &Galaxy,
     fleets: &Fleets,
     diplomacy: &Diplomacy,
     fleet: &Fleet,
+    avoid: &[SystemId],
 ) -> Option<SystemId> {
-    let neighbors = galaxy.neighbors(fleet.system);
-    let adjacent = |system: SystemId| neighbors.iter().any(|neighbor| neighbor.system == system);
-    if let Some(origin) = fleet.came_from.filter(|origin| adjacent(*origin)) {
+    let neighbors: Vec<SystemId> = galaxy
+        .neighbors(fleet.system)
+        .iter()
+        .map(|neighbor| neighbor.system)
+        .filter(|system| !avoid.contains(system))
+        .collect();
+    if let Some(origin) = fleet.came_from.filter(|origin| neighbors.contains(origin)) {
         return Some(origin);
     }
     let own = neighbors
         .iter()
-        .find(|neighbor| galaxy.system_owner(neighbor.system) == Some(fleet.owner));
+        .find(|system| galaxy.system_owner(**system) == Some(fleet.owner));
     let quiet = || {
-        neighbors.iter().find(|neighbor| {
+        neighbors.iter().find(|system| {
             !fleets
-                .docked_in(neighbor.system)
+                .docked_in(**system)
                 .any(|other| diplomacy.at_war(other.owner, fleet.owner))
         })
     };
-    own.or_else(quiet)
-        .or(neighbors.first())
-        .map(|neighbor| neighbor.system)
+    own.or_else(quiet).or(neighbors.first()).copied()
 }
 
 /// Schließt ein beendetes Gefecht ab: Rückgabe an die Flotten, Abzug derer, die das
@@ -737,6 +743,8 @@ fn conclude(
     let mut sides: Vec<SideReport> = Vec::with_capacity(parties);
     let mut fates: Vec<String> = Vec::new();
     let mut debris = 0.0f32;
+    // Wohin die Parteien ausweichen, die das System räumen.
+    let mut withdrawn: Vec<(usize, SystemId)> = Vec::new();
     for (side, combatant) in battle.combatants.iter().enumerate() {
         let held = holds_field(&results, side);
         // Für diese Partei ohne Entscheidung: im Patt gelöst, oder an der Zeitgrenze noch
@@ -809,13 +817,23 @@ fn conclude(
                 (None, true) => "löst sich ohne Verluste und bleibt im eigenen System".into(),
             }
         } else {
-            // Wer das System räumt, sammelt sich.
-            let target = retreat_target(galaxy, fleets, diplomacy, &fleets.list[index]);
+            // Wer das System räumt, sammelt sich. Gegner aus demselben Gefecht weichen nie
+            // in dasselbe System aus: Sie stünden einander sonst nach der Sammelfrist
+            // wieder gegenüber, und ein Patt wiederholte sich ohne Ende. Die Partei mit
+            // der kleineren Nummer wählt zuerst; bleibt keiner anderen ein Ausweg, sammelt
+            // sie sich, wo sie steht.
+            let avoid: Vec<SystemId> = withdrawn
+                .iter()
+                .filter(|(other, _)| battle.is_hostile(side as u16, *other as u16))
+                .map(|(_, target)| *target)
+                .collect();
+            let target = retreat_target(galaxy, fleets, diplomacy, &fleets.list[index], &avoid);
             let fleet = &mut fleets.list[index];
             fleet.regroup_until = Some(day + balance.regroup_days);
             if let Some(target) = target {
                 fleet.route = vec![target];
                 fleet.progress = 0.0;
+                withdrawn.push((side, target));
             }
             let place = match target {
                 Some(target) => format!("weicht nach {} aus", galaxy.system(target).name),
@@ -1523,7 +1541,7 @@ mod tests {
             .collect();
         fleets.list[0].system = place;
         let target = |galaxy: &Galaxy, fleets: &Fleets| {
-            retreat_target(galaxy, fleets, &diplomacy, &fleets.list[0])
+            retreat_target(galaxy, fleets, &diplomacy, &fleets.list[0], &[])
         };
 
         // Ohne Herkunft, ohne eigenes Gebiet, ohne Feinde: das Nachbarsystem mit der
@@ -1557,6 +1575,17 @@ mod tests {
             assert_eq!(enemy.index(), polities.list.len() + index);
         }
         assert_eq!(target(&galaxy, &fleets), Some(neighbors[0]));
+
+        // Wohin schon ein Gegner aus demselben Gefecht ausweicht, dorthin geht die Flotte
+        // nicht, auch nicht, wenn sie von dort kam; bleibt kein Nachbar, bleibt sie.
+        let avoiding = |fleets: &Fleets, avoid: &[SystemId]| {
+            retreat_target(&galaxy, fleets, &diplomacy, &fleets.list[0], avoid)
+        };
+        assert_eq!(avoiding(&fleets, &neighbors[..1]), Some(neighbors[1]));
+        fleets.list[0].came_from = Some(neighbors[1]);
+        assert_eq!(avoiding(&fleets, &[]), Some(neighbors[1]));
+        assert_eq!(avoiding(&fleets, &neighbors[1..2]), Some(neighbors[0]));
+        assert_eq!(avoiding(&fleets, &neighbors), None);
     }
 
     /// Was `conclude` aus einem von Hand beendeten Gefecht macht.
@@ -1805,9 +1834,9 @@ mod tests {
             .iter()
             .find(|candidate| {
                 galaxy.system_owner(candidate.id).is_none()
-                    && !galaxy.neighbors(candidate.id).is_empty()
+                    && galaxy.neighbors(candidate.id).len() >= 2
             })
-            .expect("ein freies System")
+            .expect("ein freies System mit zwei Nachbarn")
             .id;
         let mut abroad = fleets.clone();
         abroad.list[0].system = nowhere;
@@ -1817,6 +1846,92 @@ mod tests {
         let settled = settle(&data, &galaxy, &polities, &abroad, &diplomacy, &neutral);
         assert_eq!(settled.report().outcome, BattleOutcome::Stalemate);
         assert!(settled.fleets.list[..2].iter().all(Fleet::is_regrouping));
+    }
+
+    #[test]
+    fn opponents_never_fall_back_into_the_same_system() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        // Ein freies System mit möglichst wenigen Nachbarn und eine Flotte mehr, als es
+        // Auswege gibt; alle liegen miteinander im Krieg.
+        let field = galaxy
+            .systems
+            .iter()
+            .filter(|system| {
+                galaxy.system_owner(system.id).is_none() && !galaxy.neighbors(system.id).is_empty()
+            })
+            .min_by_key(|system| (galaxy.neighbors(system.id).len(), system.id))
+            .expect("ein freies System mit Nachbarn")
+            .id;
+        let exits: Vec<SystemId> = galaxy
+            .neighbors(field)
+            .iter()
+            .map(|neighbor| neighbor.system)
+            .collect();
+        let count = exits.len() + 1;
+        assert!(
+            count <= polities.list.len(),
+            "zu viele Auswege für diese Probe"
+        );
+        let mut diplomacy = Diplomacy::default();
+        for a in 0..count as u32 {
+            for b in (a + 1)..count as u32 {
+                diplomacy.wars.insert((PolityId(a), PolityId(b)));
+            }
+        }
+        let mut battle = Battle::new(BattleId(0), field, 1);
+        for index in 0..count {
+            fleets.list[index].system = field;
+            // Alle kamen aus demselben Nachbarsystem: Dorthin wollten sie alle zurück.
+            fleets.list[index].came_from = Some(exits[0]);
+            join(
+                &data,
+                &Finance::default(),
+                &no_research(),
+                &diplomacy,
+                &mut fleets,
+                &mut battle,
+                index,
+            );
+        }
+        // Patt: Alle lösen sich, niemand ist hier zu Hause.
+        for side in 0..count {
+            battle.order_retreat(side);
+            battle.combatants[side].stalemate = true;
+        }
+        for ship in &mut battle.ships {
+            ship.status = ShipStatus::Escaped;
+        }
+        battle.finished = true;
+        let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &battle);
+        assert_eq!(settled.report().outcome, BattleOutcome::Stalemate);
+        let after = &settled.fleets.list[..count];
+        assert!(after.iter().all(Fleet::is_regrouping));
+        // Die erste Partei weicht aus, woher sie kam; jede weitere in ein System, das noch
+        // kein Gegner gewählt hat.
+        assert_eq!(after[0].route, vec![exits[0]]);
+        let mut chosen: Vec<SystemId> = after
+            .iter()
+            .filter_map(|fleet| fleet.route.first().copied())
+            .collect();
+        assert_eq!(chosen.len(), exits.len(), "jeder Ausweg genau einmal");
+        chosen.sort();
+        chosen.dedup();
+        assert_eq!(chosen.len(), exits.len(), "kein Ausweg doppelt");
+        // Für die letzte bleibt keiner: Sie sammelt sich, wo sie steht.
+        let stuck = &after[count - 1];
+        assert!(stuck.route.is_empty() && stuck.system == field);
+        assert!(
+            settled.text().contains("sammelt sich"),
+            "{}",
+            settled.text()
+        );
+
+        // Wer nicht miteinander im Krieg liegt, darf denselben Weg nehmen.
+        let mut friends = battle.clone();
+        friends.set_hostile(0, 1, false);
+        let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &friends);
+        assert_eq!(settled.fleets.list[0].route, vec![exits[0]]);
+        assert_eq!(settled.fleets.list[1].route, vec![exits[0]]);
     }
 
     #[test]

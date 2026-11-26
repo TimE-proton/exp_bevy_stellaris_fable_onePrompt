@@ -259,7 +259,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   entkommen sind, weicht in ein Nachbarsystem aus (woher er kam, sonst eigenes Gebiet,
   sonst wo kein Feind steht) und sammelt sich dort: So lange beginnt die Flotte kein
   Gefecht, wird nicht angegriffen und zählt weder für Blockade noch für Kaperfahrt oder
-  Geleitschutz.
+  Geleitschutz. Gegner aus demselben Gefecht weichen nie in dasselbe System aus.
 - **Ohne Entscheidung.** Kommt keine Seite gegen die andere an, lösen sich alle im Patt
   voneinander; ebenso endet ein Gefecht an der Zeitgrenze des Rechners. Dann hat niemand
   gewonnen und niemand eine Niederlage erlitten. Wer im eigenen System steht, bleibt
