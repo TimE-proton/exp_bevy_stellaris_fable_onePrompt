@@ -81,7 +81,16 @@ fn the_manual_names_what_the_research_and_fleet_windows_offer() {
     }
 
     let fleet_part = section("### Flotten");
-    for label in [fleets::TITLE, fleets::MARCH, fleets::RETREAT] {
+    for label in [
+        fleets::TITLE,
+        fleets::MARCH,
+        fleets::RETREAT,
+        fleets::SPLIT,
+        fleets::SHOW_ON_MAP,
+        fleets::ORDER,
+        fleets::CANCEL,
+        crate::battle_view::campaign::WATCH,
+    ] {
         assert!(
             fleet_part.contains(&format!("„{label}“")),
             "„{label}“ fehlt"

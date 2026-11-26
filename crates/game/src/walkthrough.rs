@@ -1,7 +1,7 @@
-//! Ein Spieler klickt sich durch das ganze Spiel: Hauptmenü, Partie mit Forschungsfenster,
-//! Gefechtsübung und zurück. Anders als die Tests der einzelnen Teile schickt dieser keine
-//! Bitten an die Systeme, sondern klickt wie ein Mensch auf die Knöpfe, die gerade
-//! gezeichnet sind. So fällt auf, wenn ein Knopf nichts auslöst, ein Wechsel das Spiel
+//! Ein Spieler klickt sich durch das ganze Spiel: Hauptmenü, Partie mit Forschung,
+//! Haushalt und Flotten, Gefechtsübung und zurück. Anders als die Tests der einzelnen
+//! Teile schickt dieser keine Bitten an die Systeme, sondern klickt wie ein Mensch auf
+//! die Knöpfe, die gerade gezeichnet sind. So fällt auf, wenn ein Knopf nichts auslöst, ein Wechsel das Spiel
 //! beendet oder ein Klick auf eine Leiste in die Szene dahinter durchschlägt.
 
 use crate::battle_view::feed::BattleFeed;
@@ -84,6 +84,47 @@ fn visit_the_technology_window(game: &mut TestGame) {
     assert_eq!(game.resource::<Selection>().system, selected);
 }
 
+/// Der Spieler sieht in den Haushalt, bestellt im Flottenfenster ein Schiff, streicht
+/// den Auftrag wieder und schließt beide Fenster. Kein Klick erreicht die Karte dahinter.
+fn visit_the_state_and_fleet_windows(game: &mut TestGame) {
+    use crate::ui::{budget, fleets};
+    use sim::fleet::Fleets;
+
+    let selected = game.resource::<Selection>().system;
+    game.click_on("Staat");
+    assert!(game.window_rect("Staatsfinanzen").is_some());
+    assert!(game.text(budget::HEADING).is_some());
+    game.click_on("Staat");
+    game.frames(10);
+    assert!(game.window_rect("Staatsfinanzen").is_none());
+
+    game.click_on(fleets::TITLE);
+    assert!(game.window_rect(fleets::TITLE).is_some());
+    assert!(game.button(fleets::SHOW_ON_MAP).is_some());
+    game.click_on(fleets::TAB_YARDS);
+    let player = game.resource::<SimConfig>().player.expect("Spieler");
+    let data = game.resource::<sim::GameData>();
+    let design = data.design_index("dolch").expect("Entwurf");
+    let name = data.designs[design as usize].name.clone();
+    game.click_on(&format!("{}: {name}", fleets::ORDER));
+    game.frames(6);
+    let order = {
+        let fleets = game.resource::<Fleets>();
+        let orders: Vec<_> = fleets.orders_of(player).collect();
+        assert_eq!(orders.len(), 1, "der Auftrag steht in der Werft");
+        assert_eq!(orders[0].design, design);
+        orders[0].id
+    };
+    game.click_on(&format!("{}: Nr. {order}", fleets::CANCEL));
+    game.frames(6);
+    assert_eq!(game.resource::<Fleets>().orders_of(player).count(), 0);
+    game.click_on(fleets::TAB_FLEETS);
+    game.click_on(fleets::TITLE);
+    game.frames(10);
+    assert!(game.window_rect(fleets::TITLE).is_none());
+    assert_eq!(game.resource::<Selection>().system, selected);
+}
+
 #[test]
 fn a_player_clicks_from_campaign_to_practice_and_back_again() {
     let mut game = TestGame::start("");
@@ -99,6 +140,7 @@ fn a_player_clicks_from_campaign_to_practice_and_back_again() {
         game.frames(12);
         assert!(game.resource::<SimClock>().tick > 0, "die Zeit läuft");
         visit_the_technology_window(&mut game);
+        visit_the_state_and_fleet_windows(&mut game);
         assert_eq!(game.button("Zum Hauptmenü"), None, "das Menü ist noch zu");
         game.key(KeyCode::Escape);
         game.click_on("Zum Hauptmenü");

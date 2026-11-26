@@ -1,7 +1,7 @@
 //! Oberfläche (egui). Die Fenster sind reine Funktionen über dem Simulationszustand:
 //! Sie lesen, zeichnen und geben Aktionen zurück. Erst das System unten wendet sie an.
 
-mod budget;
+pub(crate) mod budget;
 mod economy;
 mod finance;
 pub(crate) mod fleets;

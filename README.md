@@ -128,7 +128,7 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
 | Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt"), Besitz (Zusammenhalt, Eigentümer) |
-| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staatsfinanzen, Forschung, Flotten |
+| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staat (Finanzen und Haushalt), Forschung, Flotten (Schiffe, Werften, Kosten) |
 | F1 | Hilfe |
 | Esc | Menü |
 
@@ -160,8 +160,9 @@ sie voraussetzen.
 
 Über dem Baum stehen Etat und Ziel. Der Etat ist der Anteil der laufenden Staatseinnahmen,
 der monatlich in die Forschung geht: am Regler einstellen und mit „Etat festsetzen“
-bestätigen; er gilt ab dem nächsten Monatsersten. Gezahlt wird nur aus dem, was die
-Staatskasse über ihrer Rücklage hält; Sold und Einkäufe der Flotte gehen vor. Zu Beginn
+bestätigen; er gilt ab dem nächsten Monatsersten. Im Haushalt steht die Forschung hinter
+Flotte, Beschaffung und Kontoren und greift die Rücklage nicht an: Reicht das Geld nicht,
+wird sie zuerst gekürzt. Zu Beginn
 wählt eine Automatik das Ziel und prüft es jeden Monat. Ein selbst gesetztes Ziel gilt bis
 zu seinem Abschluss; danach ruht die Forschung, bis ein neues gewählt ist oder „Automatik
 einschalten“ die Wahl zurückgibt. Unter dem Baum steht die Summe der Wirkungen aller
@@ -174,24 +175,74 @@ eigenen Einblick möglich ist, etwa 0–4. In der Leiste daneben sind volle Käs
 Zahl ist genau bekannt. Der Einblick wächst durch Besitz an den Betrieben der anderen und
 durch Gefechte gegen sie; was Gefechte an Einblick bringen, verblasst ohne neue wieder.
 
+### Staat und Haushalt
+
+„Staat“ in der Kopfleiste öffnet die Staatsfinanzen. Oben stehen Kasse, Einnahmen des
+Vormonats, Schulden und Zins, darunter der **Haushalt**: der letzte abgeschlossene Monat
+und die Summe der bis zu zwölf letzten Monate. Die Tafel nennt die laufenden Einnahmen,
+dann jeden Anspruch in seiner Rangfolge (Schuldendienst, Grundleistungen, Flotte,
+Beschaffung, Kontore, Forschung) mit dem Verlangten, dem Bezahlten und dem, was offen
+blieb (rot), den Rest der Einnahmen, und was in Rücklage und Ausschüttung ging. Offen
+bleibt ein Anspruch, wenn das Geld fehlte oder der Markt die Ware nicht hergab. Darunter
+stehen der Soldrückstand der Flotte und unter „Rangfolge und Kürzungen“, wer die Rücklage
+angreifen darf und was eine Kürzung für Forschung, Werften und Besatzungen heißt.
+Steuersatz, Rücklage und Anleihen werden im selben Fenster festgesetzt.
+
 ### Flotten
 
-„Flotten“ in der Kopfleiste öffnet die Liste der eigenen Flotten: Ort und Zustand, Schiffe
-je Klasse, Stärke, Munition und Treibstoff. Je Flotte lassen sich der Auftrag (Wache,
-Blockade, Kaperfahrt, Geleitschutz) und für Gefechte Aufstellung und Doktrin wählen. Liegen
-fremde Flotten im gewählten System, nennt das Fenster auch sie.
+„Flotten“ in der Kopfleiste öffnet das Flottenfenster mit zwei Reitern.
+
+**Flotten und Schiffe.** Die Liste nennt je eigener Flotte Ort und Zustand, Schiffe je
+Klasse, Stärke, Munition und Treibstoff, den Auftrag (Wache, Blockade, Kaperfahrt,
+Geleitschutz) sowie Aufstellung und Doktrin. Ein Klick auf den Namen zeigt darunter die
+Flotte mit jedem Schiff: Klasse, Entwurf, Rumpf, Module, Bordjäger, Munition, Treibstoff;
+beschädigte Schiffe sind markiert. Dort werden Auftrag, Aufstellung und Doktrin gewählt,
+und dort wird umgegliedert: „Vereinigen mit …“ gibt die Schiffe an eine andere eigene
+Flotte im selben System; ein Klick auf Schiffsnummern wählt Schiffe, „Abteilen“ stellt
+mit ihnen eine neue Flotte auf. „Auf der Karte zeigen“ führt die Karte zur Flotte. Ein
+gesperrter Knopf nennt den Grund, mit dem die Simulation den Befehl ablehnen würde,
+daneben oder im Schwebetext. Liegen fremde Flotten im gewählten System, nennt das Fenster
+auch sie.
 
 | Zustand | Was die Flotte annimmt |
 |---|---|
 | einsatzbereit, auf dem Marsch | „Marsch zum Ziel“ schickt sie in das System, das auf der Karte gewählt ist |
-| im Gefecht | Keinen Marsch. „Rückzug“ lässt die Schiffe das Feld verlassen und ist nicht umkehrbar; neue Aufstellung und Doktrin gelten sofort |
+| im Gefecht | Keinen Marsch. „Rückzug“ lässt die Schiffe das Feld verlassen und ist nicht umkehrbar; neue Aufstellung und Doktrin gelten sofort. „Gefecht ansehen“ öffnet die Schlachtansicht |
 | sammelt sich bis … | Nach dem Abzug aus einem Gefecht keinen Marschbefehl, bis die Frist abläuft; einen Abzug führt die Flotte zu Ende |
+
+**Werften und Kosten.** Oben steht, was die Flotte kostet: die Zeilen Flotte (Sold und
+Ersatzteile) und Beschaffung (Werften, Nachschub, Instandsetzung) des Haushalts. Darunter
+jede eigene Werft mit Bauplätzen und Aufträgen: Fortschritt, Stand und, wenn ein Auftrag
+wartet, der Grund (kein Bauplatz, ein Bauteil fehlt am Markt, dem Staat fehlt das Geld).
+„Streichen“ nimmt einen Auftrag zurück; Verbautes wird nicht erstattet. Die Liste der
+Entwürfe nennt Klasse, Bauwert, Bauzeit, Unterhalt je Monat und Bauteile; „Bestellen“
+gibt ein Schiff bei der gewählten Werft in Auftrag, die Knöpfe der Klassen überlassen der
+Werft die Wahl des besten beherrschten Entwurfs. Entwürfe, deren Technologie fehlt, sind
+gesperrt und nennen sie. Unter der Liste steht, was ein weiteres Schiff des gewählten
+Entwurfs die Flotte im Monat mehr kostet.
 
 Auf der Karte sind Flotten Dreiecke in der Farbe ihrer Gemeinschaft. Ein roter Ring heißt:
 im Gefecht; ein offener gelber Bogen: sammelt sich. Eine Flotte auf dem Marsch rückt jeden
 Tag um die Strecke vor, die Antriebstechnik und Treibstoff hergeben. Mit leerem Tank
 schleppt sie sich nur noch voran; dann sperrt sie kein System, kapert nicht und gibt kein
 Geleit.
+
+### Gefechte der Partie ansehen
+
+Beginnt ein Gefecht mit eigenen Schiffen, meldet es ein Hinweis am oberen Rand und die
+Chronik. „Gefecht ansehen“ öffnet es in der 3D-Schlachtansicht: an der Marke des Systems
+auf der Karte, im Flottenfenster und am Eintrag der Chronik. Fremde Gefechte lassen sich
+ansehen, wo eine eigene Flotte liegt oder eine eigene Welt ist.
+
+Gezeigt wird das Gefecht der Simulation, nicht eine Kopie mit eigenem Verlauf. Es läuft
+mit der Zeit der Partie: Pause und Geschwindigkeit gelten für beide, und ein Kalendertag
+sind zwei Sekunden Gefechtszeit (die Kopfleiste nennt Datum und Verhältnis). Die Tafel
+der eigenen Flotte ändert Formation und Doktrin und befiehlt den Rückzug; die Befehle
+gehen an die Simulation und gelten mit ihrem nächsten Takt. „Verlassen“ führt jederzeit
+zurück zur Karte, das Gefecht läuft weiter. Endet es bei offener Ansicht, zeigt „Ergebnis
+des Gefechts“ den Ausgang, die Verluste je Flotte, wer das Feld hält und wohin die
+anderen ausweichen; „Zur Karte“ schließt die Ansicht. Einen Neustart gibt es nur in der
+Gefechtsübung.
 
 ### Gefechtsübung
 
@@ -535,7 +586,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche. Oberfläche: Forschungsfenster, Flotten mit Zustand, Rückzug und stehenden Befehlen; offen: Militär-KI, Haushalt, Bauliste und Umgliedern im Flottenfenster, Gefechte der Partie in der 3D-Ansicht |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche. Oberfläche: Forschungsfenster, Haushalt, Flottenfenster mit Schiffen, Umgliedern, Werften und Kosten, Gefechte der Partie in der 3D-Ansicht; offen: Militär-KI |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
