@@ -263,6 +263,22 @@ fn main() -> ExitCode {
                 mean(|r| r.battles as f64),
                 mean(|r| r.ships_lost as f64)
             );
+            let endings: Vec<String> = runs
+                .iter()
+                .filter_map(|run| ending_text(run).map(|text| format!("Seed {}: {text}", run.seed)))
+                .collect();
+            if endings.is_empty() {
+                println!("Enden: Keine Partie endete in der Laufzeit.");
+            } else {
+                println!(
+                    "Enden: {} von {} Partien endeten in der Laufzeit.",
+                    endings.len(),
+                    runs.len()
+                );
+                for ending in &endings {
+                    println!("  {ending}");
+                }
+            }
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -272,12 +288,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,ending,ending_year\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{},{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -298,7 +314,12 @@ fn main() -> ExitCode {
                             polity.strength,
                             polity.arrears,
                             run.battles,
-                            polity.ships_lost
+                            polity.ships_lost,
+                            // Ende der Partie und Jahr; leer, wenn sie nicht endete.
+                            run.outcome
+                                .map_or("", |outcome| outcome.ending.label()),
+                            run.outcome
+                                .map_or(String::new(), |outcome| outcome.year().to_string())
                         ));
                     }
                 }
@@ -657,4 +678,28 @@ fn print_summary(summary: &RunSummary) {
             100.0 * polity.arrears
         );
     }
+    match ending_text(summary) {
+        Some(text) => println!("Ende: {text}"),
+        None => println!("Ende: Die Partie ist in der Laufzeit nicht zu Ende gegangen."),
+    }
+}
+
+/// Ausgang einer Partie in einem Satz: Ende, Jahr, Überlebende, die beiden Summen. `None`,
+/// wenn sie in der Laufzeit nicht endete.
+fn ending_text(summary: &RunSummary) -> Option<String> {
+    let outcome = summary.outcome?;
+    let survivor = outcome
+        .survivor
+        .and_then(|survivor| summary.polities.get(survivor.index()))
+        .map_or_else(
+            || "ohne Überlebende".to_string(),
+            |polity| format!("es bleibt {}", polity.name),
+        );
+    Some(format!(
+        "{} im Jahr {}, {survivor}; beigetreten {:.0} Mio., genommen {:.0} Mio.",
+        outcome.ending.label(),
+        outcome.year(),
+        outcome.joined,
+        outcome.forced
+    ))
 }
