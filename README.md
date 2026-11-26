@@ -84,6 +84,76 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | F1 | Hilfe |
 | Esc | Menü |
 
+Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
+siehe unten.
+
+### Gefechtsübung
+
+„Gefechtsübung“ im Hauptmenü stellt zwei Flotten gegeneinander und zeigt ihr Gefecht in der
+3D-Schlachtansicht. Die Übung braucht keine Partie und verändert keine; der Spieler führt
+den blauen Verband.
+
+| Im Aufstellungsdialog | Bedeutung |
+|---|---|
+| Vorlagen | „Geplänkel“, „Linienschlacht“, „Träger gegen Schlachtschiffe“ und „Großgefecht“ (rund 200 Schiffe je Seite) füllen beide Flottenlisten |
+| Flottenliste je Verband | `entwurf:anzahl`, mit Kommas getrennt, etwa `speer:4,waechter:6`. Die Entwürfe nennt der Dialog, darunter `wespe` (Jäger), `dolch` (Korvette), `waechter` (Fregatte), `speer` (Kreuzer), `bastion` (Schlachtschiff) und `horst` (Träger, bringt Bordjäger mit). Je Verband höchstens 1000 Schiffe, Bordjäger mitgezählt, und von jedem genannten Entwurf mindestens eines. Unter dem Feld steht, was die Liste ergibt oder warum sie nicht gilt |
+| Formation | Linie, Keil, Schirm oder Zange |
+| Doktrin | offensiv, ausgewogen oder defensiv |
+| Seed | Gleiche Aufstellung und gleicher Seed ergeben denselben Verlauf |
+
+Die Übung beginnt angehalten bei 00:00: erst umsehen, dann mit der Leertaste oder „Weiter“
+die Zeit laufen lassen. Am Ende zeigt die Bilanz Sieger und Verluste; „Neu starten“ stellt
+dasselbe Gefecht noch einmal an den Anfang, „Feld ansehen“ blendet die Bilanz aus.
+
+Ohne Hauptmenü, von der Kommandozeile:
+
+```bash
+cargo run -- --practice --fleet-a bastion:2,speer:6 --fleet-b horst:2,waechter:8 --seed 9
+```
+
+| Option | Wirkung |
+|---|---|
+| `--practice` | Sofort eine Gefechtsübung starten |
+| `--fleet-a LISTE`, `--fleet-b LISTE` | Flotte des blauen und des roten Verbands; ohne Angabe die Vorlage „Linienschlacht“ |
+| `--seed N` | Wählt den Verlauf der Übung (ohne Angabe 1) |
+| `--lineup` | Schaustellung statt Gefecht: je ein Schiff jeder Klasse nebeneinander, die Zeit steht |
+| `--selftest [N]` | Die Übung läuft von allein, höchstens N Frames (ohne Angabe 240), dann beendet sich das Programm. Es endet mit einem Fehler, wenn dabei nichts vom Gefecht im Sichtfeld der Kamera lag oder ein verlangtes Foto nicht entstand |
+| `--screenshot DATEI` | Im Selbsttest Fotos speichern. Aus `bild.png` werden `bild_1.png` (Übersicht), `bild_2.png` (Nahaufnahme), `bild_3.png` (Trümmerfeld) und, wenn das Gefecht zu Ende kam, `bild_4.png` (Bilanz); die Schaustellung liefert vier Fotos der Klassen |
+
+### Schlachtansicht
+
+| Eingabe | Wirkung |
+|---|---|
+| W A S D | Kamera vor, zurück, seitwärts |
+| E / Q | Kamera steigen / sinken |
+| Rechte Maustaste halten | Umsehen |
+| M | Umsehen ein- und ausschalten, ohne die Maustaste zu halten |
+| Umschalt links | schneller fliegen |
+| Mausrad | Fluggeschwindigkeit ändern |
+| Ziffernblock 7 / 1 / 3 | Blick von oben / von vorn / von der Seite (mit Strg: Gegenseite) |
+| U | Übersicht: alle Schiffe auf dem Feld im Blick |
+| G | Zum Schwerpunkt des Gefechts |
+| Linksklick | Schiff wählen (ins Leere: Auswahl aufheben) |
+| F | Gewähltes Schiff heranholen (ohne Auswahl: Gefechtsschwerpunkt) |
+| V | Gewähltes Schiff verfolgen |
+| T | Taktische Einblendung: Flottenanker, Reichweiten, Ziellinie |
+| N | Namen an nahen Schiffen |
+| Leertaste, 1 – 6, + / − | Pause und Geschwindigkeit wie in der Partie |
+| Esc | Gefechtsübung verlassen (in der Partie: Menü) |
+| F1 | Hilfe |
+
+Die Kopfleiste zeigt Gefechtszeit und Geschwindigkeit; rechts stehen „Übersicht“, „Gefecht“,
+„Taktik“, „Namen“, „Hilfe“ und „Verlassen“, nach dem Ende des Gefechts auch „Bilanz“. Die
+Tafel des eigenen Verbands (links) ändert während des Gefechts Formation und Doktrin und
+befiehlt den Rückzug; ein befohlener Rückzug lässt sich nicht zurücknehmen. Ein Klick auf
+ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition, Treibstoff,
+Moral, Ziel und allen Modulen; „Heranholen“ und „Verfolgen“ führen die Kamera zu ihm.
+Klicks, Züge und Mausrad auf Leisten und Tafeln wirken nicht auf die Szene dahinter.
+
+Kleine Markierungen stehen für Schiffe, die aus der Ferne kaum zu sehen sind: Dreieck = Jäger
+und Korvette, Raute = Fregatte, Pfeil = Kreuzer, Sechseck = Schlachtschiff, Rechteck = Träger.
+Hohl = auf dem Rückzug, grau = treibt, Kreuz = Wrack.
+
 ## Aufbau
 
 ```

@@ -5,6 +5,8 @@ mod battle_view;
 mod history;
 mod map;
 mod pointer;
+#[cfg(test)]
+mod readme;
 mod selftest;
 mod session;
 mod state;
