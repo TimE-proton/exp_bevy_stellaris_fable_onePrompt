@@ -8,14 +8,31 @@
 //! ([`Battle::results`]): verloren, entkommen oder noch auf dem Feld, dazu Schäden,
 //! verbrauchte Vorräte und heimgekehrte Bordjäger.
 //!
-//! Wie ein Gefecht ausgeht, entscheidet, wer bleibt:
-//! - Entschieden: Wer am Ende noch Schiffe auf dem Feld hat, bleibt im System. Wessen
-//!   Schiffe alle entkommen sind, weicht in ein Nachbarsystem aus und sammelt sich.
+//! Wie ein Gefecht ausgeht, entscheidet, wer bleibt. Gefragt wird je Seite, nicht je
+//! Flotte: Zur Seite einer Partei gehören alle, mit denen sie nicht im Krieg liegt.
+//! - Wer am Ende noch Schiffe auf dem Feld hat, bleibt im System und ist einsatzbereit.
+//! - Wessen Schiffe das Feld geräumt haben, während ein Gegner es hält, wurde geschlagen:
+//!   Die Flotte weicht aus und sammelt sich.
+//! - Wessen Schiffe das Feld geräumt haben, während die eigene Seite es hält (eine
+//!   Schwesterflotte, ein Mitstreiter gegen denselben Gegner), bleibt im System und
+//!   sammelt sich dort, hinter den eigenen Linien.
 //! - Ohne Entscheidung (Patt oder Zeitgrenze): Niemand hat gewonnen, alle lösen sich
 //!   voneinander. Wer im eigenen System steht, bleibt dort; alle anderen weichen aus und
 //!   sammeln sich. So beginnt dasselbe Gefecht nicht am nächsten Morgen von vorn.
-//! - Gegner aus demselben Gefecht weichen nie in dasselbe System aus: Sonst stünden sie
-//!   sich nach der Sammelfrist dort wieder gegenüber.
+//! - Gegner aus demselben Gefecht weichen nie in dasselbe System aus, notfalls über
+//!   mehrere Sprünge: Sonst stünden sie sich nach der Sammelfrist dort wieder gegenüber.
+//!
+//! Wer sich sammelt, ist aus dem Spiel genommen, bis die Frist abläuft: Die Flotte
+//! beginnt kein Gefecht und wird nicht angegriffen, zählt nicht für Blockade, Kaperfahrt,
+//! Geleit oder die Verteidigung eines Orbits, und sie nimmt keinen Marschbefehl an. Der
+//! Schutz ist an den Abzug gebunden, nicht an die Flotte: Dieselben Gegner stehen
+//! einander frühestens nach Ablauf der Sammelfrist wieder gegenüber, und nur, wenn dann
+//! eine Seite auf die andere marschiert oder neben ihr gewartet hat.
+//!
+//! Solange ein Gefecht läuft, stehen seine Folgen jeden Morgen in den Flotten
+//! ([`muster_battles`]): Zerstörte Schiffe sind fort, die übrigen tragen ihre Schäden. Wer
+//! keinen Gegner mehr auf dem Feld hat (etwa nach einem Friedensschluss) oder kein eigenes
+//! Schiff mehr, scheidet am selben Morgen aus, auch wenn andere weiterkämpfen.
 //!
 //! Technik: Die Aufschläge einer Partei (Waffenschaden, Reichweite, Schilde, Panzerung,
 //! Rumpf, Fahrt) stammen aus der Forschung ihrer Gemeinschaft zum Zeitpunkt des Eintritts
@@ -28,7 +45,7 @@
 
 use super::{Fleet, Fleets, material_value};
 use crate::battle::{
-    Battle, CombatModifiers, CombatantSetup, Doctrine, Fate, Formation, ShipResult,
+    Battle, CombatModifiers, CombatantSetup, Doctrine, Fate, Formation, ShipResult, ShipStatus,
 };
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
@@ -43,7 +60,7 @@ use crate::rng::{Domain, Rng};
 use crate::tech::Research;
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Unter diesem Bauwert in Credits gilt ein Trümmerfeld als verweht.
 const DEBRIS_FLOOR: f32 = 1.0;
@@ -72,6 +89,37 @@ pub struct SideReport {
     /// Die Partei hat sich im Patt gelöst: Weder sie noch ihre Gegner kamen lange durch
     /// die Schilde der anderen, alle zogen gemeinsam ab.
     pub stalemate: bool,
+    /// Takt, in dem die Partei das Gefecht vorzeitig verlassen hat, während andere
+    /// weiterkämpften; `None`, wenn sie bis zum Ende dabei war. `held_field` sagt dann, ob
+    /// sie beim Ausscheiden noch auf dem Feld stand (kein Gegner mehr) oder es geräumt hatte.
+    #[serde(default)]
+    pub left_early: Option<u64>,
+}
+
+/// Warum eine Partei ein laufendes Gefecht vorzeitig verlassen hat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Departure {
+    /// Kein Gegner mehr auf dem Feld, etwa nach einem Friedensschluss: Die Flotte bleibt im
+    /// System und ist einsatzbereit.
+    NoOpponent,
+    /// Kein eigenes Schiff mehr auf dem Feld: entkommen oder verloren.
+    LeftField,
+}
+
+/// Eine Partei, die ein laufendes Gefecht vorzeitig verlassen hat. Im Rechner bleibt sie
+/// als Partei stehen, mit ihrer Bilanz und ohne Schiffe auf dem Feld; ihre Flotte ist
+/// frei.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Departed {
+    pub battle: BattleId,
+    /// Stelle in [`Battle::combatants`].
+    pub side: u16,
+    pub fleet: Option<FleetId>,
+    pub tick: u64,
+    pub cause: Departure,
+    /// Wohin die Flotte ausgewichen ist; `None`, wenn sie im System blieb oder nicht mehr
+    /// besteht.
+    pub destination: Option<SystemId>,
 }
 
 /// Wie ein Gefecht ausging.
@@ -163,6 +211,25 @@ pub struct Battles {
     /// Verlorene Schiffe je Gemeinschaft über die ganze Partie, ohne Bordjäger. Lesen mit
     /// [`Battles::ships_lost_by`].
     pub ships_lost: Vec<u32>,
+    /// Parteien laufender Gefechte, die vorzeitig ausgeschieden sind, in der Reihenfolge
+    /// ihres Ausscheidens. Mit dem Ende des Gefechts fallen sie heraus.
+    #[serde(default)]
+    pub departed: Vec<Departed>,
+}
+
+/// Ist die Partei aus dem Gefecht ausgeschieden?
+fn has_departed(departed: &[Departed], battle: BattleId, side: usize) -> bool {
+    departed
+        .iter()
+        .any(|entry| entry.battle == battle && entry.side as usize == side)
+}
+
+/// Stelle der Partei, als die eine Flotte in einem Gefecht steht. War die Flotte schon
+/// einmal dabei, ist ausgeschieden und später wieder eingetreten, zählt der jüngste Eintrag.
+fn side_of_fleet(departed: &[Departed], battle: &Battle, fleet: FleetId) -> Option<usize> {
+    (0..battle.combatants.len()).rev().find(|side| {
+        battle.combatants[*side].fleet == Some(fleet) && !has_departed(departed, battle.id, *side)
+    })
 }
 
 impl Battles {
@@ -175,15 +242,24 @@ impl Battles {
     }
 
     /// Das Gefecht, in dem eine Flotte steht, und ihre Partei darin (Stelle in
-    /// [`Battle::combatants`]).
+    /// [`Battle::combatants`]). Wer ausgeschieden ist, steht in keinem Gefecht mehr.
     pub fn of_fleet(&self, fleet: FleetId) -> Option<(&Battle, usize)> {
         self.active.iter().find_map(|battle| {
-            battle
-                .combatants
-                .iter()
-                .position(|combatant| combatant.fleet == Some(fleet))
-                .map(|side| (battle, side))
+            side_of_fleet(&self.departed, battle, fleet).map(|side| (battle, side))
         })
+    }
+
+    /// Ist die Partei (Stelle in [`Battle::combatants`]) aus dem laufenden Gefecht
+    /// ausgeschieden?
+    pub fn has_departed(&self, battle: BattleId, side: usize) -> bool {
+        has_departed(&self.departed, battle, side)
+    }
+
+    /// Kämpft die Flotte gerade: Steht sie in einem Gefecht und hat dort noch Schiffe, die
+    /// weder fliehen noch treiben?
+    pub fn is_fighting(&self, fleet: FleetId) -> bool {
+        self.of_fleet(fleet)
+            .is_some_and(|(battle, side)| battle.is_fighting(side))
     }
 
     pub fn get(&self, id: BattleId) -> Option<&Battle> {
@@ -214,13 +290,12 @@ impl Battles {
     }
 
     fn side_mut(&mut self, fleet: FleetId) -> Option<(&mut Battle, usize)> {
-        self.active.iter_mut().find_map(|battle| {
-            battle
-                .combatants
-                .iter()
-                .position(|combatant| combatant.fleet == Some(fleet))
-                .map(|side| (battle, side))
-        })
+        let Battles {
+            active, departed, ..
+        } = self;
+        active
+            .iter_mut()
+            .find_map(|battle| side_of_fleet(departed, battle, fleet).map(|side| (battle, side)))
     }
 
     /// Prüft, dass Gefechte und Flotten zueinander passen. Gibt die erste Auffälligkeit
@@ -248,12 +323,25 @@ impl Battles {
                     battle.id
                 ));
             }
-            for combatant in &battle.combatants {
+            for (side, combatant) in battle.combatants.iter().enumerate() {
                 let Some(fleet) = combatant.fleet.and_then(|id| fleets.get(id)) else {
                     return Some(format!("Gefecht {}: Partei ohne Flotte", battle.id));
                 };
-                // Eine Flotte, die es nicht mehr gibt, bleibt als Partei stehen, bis das
-                // Gefecht endet.
+                // Wer ausgeschieden ist, bleibt als Partei stehen, bis das Gefecht endet;
+                // seine Flotte ist frei. Ebenso eine Flotte, die es nicht mehr gibt.
+                if self.has_departed(battle.id, side) {
+                    if battle
+                        .ships
+                        .iter()
+                        .any(|ship| ship.side as usize == side && ship.status.in_play())
+                    {
+                        return Some(format!(
+                            "Gefecht {}: ausgeschiedene Partei steht noch auf dem Feld",
+                            battle.id
+                        ));
+                    }
+                    continue;
+                }
                 if fleet.alive && (fleet.battle != Some(battle.id) || fleet.system != battle.system)
                 {
                     return Some(format!(
@@ -283,6 +371,15 @@ impl Battles {
             if !fleet.alive && (fleet.battle.is_some() || fleet.regroup_until.is_some()) {
                 return Some(format!("{}: aufgelöst, aber noch im Einsatz", fleet.name));
             }
+        }
+        if let Some(entry) = self.departed.iter().find(|entry| {
+            self.get(entry.battle)
+                .is_none_or(|battle| entry.side as usize >= battle.combatants.len())
+        }) {
+            return Some(format!(
+                "Gefecht {}: ausgeschiedene Partei ohne laufendes Gefecht",
+                entry.battle
+            ));
         }
         if self.reports.len() > Self::REPORTS {
             return Some("mehr Gefechtsbilanzen als vorgesehen".into());
@@ -449,9 +546,255 @@ fn muster(fleets: &Fleets, members: &[usize]) -> Vec<String> {
         .collect()
 }
 
-/// Tagesbeginn: Sammelfristen laufen ab, Trümmer verblassen, laufende Gefechte folgen der
-/// Kriegslage, Verstärkungen greifen ein, und wo sich einsatzbereite Flotten verfeindeter
-/// Gemeinschaften gegenüberstehen, beginnt ein Gefecht.
+/// Stelle der Flotte, die als Partei in einem Gefecht steht, in [`Fleets::list`]: nur,
+/// solange es die Flotte noch gibt und sie von diesem Gefecht weiß.
+fn attached(fleets: &Fleets, battle: &Battle, side: usize) -> Option<usize> {
+    battle.combatants[side]
+        .fleet
+        .map(FleetId::index)
+        .filter(|index| {
+            fleets
+                .list
+                .get(*index)
+                .is_some_and(|fleet| fleet.alive && fleet.battle == Some(battle.id))
+        })
+}
+
+/// Zählt verlorene Schiffe einer Gemeinschaft (ohne Bordjäger).
+fn count_lost(ships_lost: &mut Vec<u32>, owner: PolityId, lost: u32) {
+    if lost == 0 {
+        return;
+    }
+    if ships_lost.len() <= owner.index() {
+        ships_lost.resize(owner.index() + 1, 0);
+    }
+    ships_lost[owner.index()] += lost;
+}
+
+/// Tagesbeginn, vor Marsch, Sold und Einkauf: Die laufenden Gefechte folgen der Kriegslage,
+/// ihre bisherigen Folgen stehen in den Flotten, und wer keinen Gegner oder kein eigenes
+/// Schiff mehr auf dem Feld hat, scheidet aus.
+///
+/// - Wer gegen wen kämpft, folgt der Kriegslage: Ein Friedensschluss nimmt zwei Parteien
+///   die Feindschaft, eine neue Kriegserklärung unter Anwesenden weitet das Gefecht aus.
+/// - Zerstörte Schiffe sind ab jetzt fort, die übrigen tragen Rumpf, Module, Vorräte und
+///   Bordjäger, wie der Rechner sie führt. Sold, Stärke und Schiffszahlen rechnen so nie
+///   mit Wracks.
+/// - Solange andere weiterkämpfen, scheidet aus, wer kein eigenes Schiff mehr auf dem Feld
+///   hat oder keinen Gegner mehr. Kämpft ohnehin kein Paar von Gegnern mehr, beendet der
+///   Rechner das Gefecht selbst, und [`advance_battles`] schließt es ab.
+pub fn muster_battles(
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    battles: &mut Battles,
+    diplomacy: &Diplomacy,
+    chronicle: &mut Chronicle,
+    data: &GameData,
+    tick: u64,
+) {
+    if battles.active.is_empty() {
+        return;
+    }
+    let Battles {
+        active,
+        departed,
+        ships_lost,
+        ..
+    } = battles;
+    for battle in active.iter_mut() {
+        let parties = battle.combatants.len();
+        for a in 0..parties {
+            for b in (a + 1)..parties {
+                let hostile =
+                    diplomacy.at_war(battle.combatants[a].owner, battle.combatants[b].owner);
+                battle.set_hostile(a, b, hostile);
+            }
+        }
+
+        // Zwischenstand in die Flotten: Was zerstört ist, ist fort. Ein treibendes Schiff
+        // bleibt, bis sein Los am Ende feststeht.
+        let results = battle.results(data);
+        let destroyed: BTreeSet<ShipId> = battle
+            .ships
+            .iter()
+            .filter(|ship| ship.status == ShipStatus::Destroyed)
+            .filter_map(|ship| ship.source)
+            .collect();
+        for side in 0..parties {
+            if has_departed(departed, battle.id, side) {
+                continue;
+            }
+            let Some(index) = attached(fleets, battle, side) else {
+                continue;
+            };
+            let lost = write_back(&results, side, &mut fleets.list[index], Some(&destroyed));
+            count_lost(ships_lost, battle.combatants[side].owner, lost);
+        }
+
+        // Wer scheidet aus? Maßgeblich ist die Lage zu Tagesbeginn.
+        let live: Vec<bool> = (0..parties)
+            .map(|side| !has_departed(departed, battle.id, side))
+            .collect();
+        let fighting: Vec<bool> = (0..parties)
+            .map(|side| live[side] && battle.is_fighting(side))
+            .collect();
+        let acting: Vec<bool> = (0..parties)
+            .map(|side| live[side] && on_field(battle, side))
+            .collect();
+        let contested = (0..parties).any(|a| {
+            (0..parties).any(|b| battle.is_hostile(a as u16, b as u16) && fighting[a] && acting[b])
+        });
+        if !contested {
+            continue;
+        }
+        // Noch auf dem Feld: kämpfend, fliehend oder treibend. Für die eigene Partei zählen
+        // nur Schiffe der Flotte; Bordjäger ohne ihren Träger sind keine.
+        let in_play = |battle: &Battle, side: usize, own_only: bool| {
+            battle.ships.iter().any(|ship| {
+                ship.side as usize == side
+                    && ship.status.in_play()
+                    && (!own_only || ship.source.is_some())
+            })
+        };
+        for side in 0..parties {
+            if !live[side] {
+                continue;
+            }
+            let cause = if !in_play(battle, side, true) {
+                Departure::LeftField
+            } else if !(0..parties).any(|other| {
+                live[other]
+                    && battle.is_hostile(side as u16, other as u16)
+                    && in_play(battle, other, false)
+            }) {
+                Departure::NoOpponent
+            } else {
+                continue;
+            };
+            depart(
+                battle, side, cause, &fighting, &acting, galaxy, fleets, departed, diplomacy,
+                chronicle, data, tick,
+            );
+        }
+    }
+    // Stärken nachführen; eine Flotte ohne Schiffe besteht nicht mehr.
+    fleets.refresh(data);
+}
+
+/// Eine Partei scheidet aus einem laufenden Gefecht aus. Ihre Flotte ist frei; im Rechner
+/// bleibt die Partei mit ihrer Bilanz stehen, aber ohne Schiffe auf dem Feld.
+///
+/// Ohne Gegner bleibt die Flotte im System und ist einsatzbereit. Hat sie das Feld
+/// geräumt, sammelt sie sich: im System, solange dort noch jemand für ihre Seite gegen
+/// ihre Gegner kämpft, sonst in einem System, in das kein Gegner aus diesem Gefecht
+/// ausgewichen ist.
+fn depart(
+    battle: &mut Battle,
+    side: usize,
+    cause: Departure,
+    fighting: &[bool],
+    acting: &[bool],
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    departed: &mut Vec<Departed>,
+    diplomacy: &Diplomacy,
+    chronicle: &mut Chronicle,
+    data: &GameData,
+    tick: u64,
+) {
+    let until = tick / TICKS_PER_DAY + data.balance.military.regroup_days;
+    let parties = battle.combatants.len();
+    let system = battle.system;
+    // Was von der Partei noch auf dem Feld steht, verlässt es: ihre Schiffe, wenn sie
+    // keinen Gegner mehr hat, sonst nur noch Bordjäger in der Luft.
+    for ship in battle
+        .ships
+        .iter_mut()
+        .filter(|ship| ship.side as usize == side && ship.status.in_play())
+    {
+        ship.status = ShipStatus::Escaped;
+        ship.target = None;
+        battle.combatants[side].escaped[ship.class.index()] += 1;
+    }
+    let combatant = &battle.combatants[side];
+    let owner = combatant.owner;
+    let losses = class_counts(&combatant.lost);
+    let lost = |rest: &str| match &losses {
+        Some(losses) => format!("verliert {losses} und {rest}"),
+        None => rest.to_string(),
+    };
+    let index = attached(fleets, battle, side);
+    let name = combatant
+        .fleet
+        .and_then(|id| fleets.get(id))
+        .map_or_else(|| "aufgelöste Flotte".into(), |fleet| fleet.name.clone());
+    let mut destination = None;
+    let fate = match index {
+        None => lost("besteht nicht mehr"),
+        Some(index) => {
+            let fleet = &mut fleets.list[index];
+            fleet.battle = None;
+            fleet.in_battle = false;
+            if fleet.ships.is_empty() {
+                lost("besteht nicht mehr")
+            } else if cause == Departure::NoOpponent {
+                "hat keinen Gegner mehr auf dem Feld und scheidet aus dem Gefecht aus".into()
+            } else {
+                // Wird für ihre Seite noch gekämpft: von jemandem, mit dem sie nicht im Krieg
+                // liegt, gegen einen ihrer Gegner?
+                let backed = (0..parties).any(|friend| {
+                    friend != side
+                        && fighting[friend]
+                        && !battle.is_hostile(side as u16, friend as u16)
+                        && (0..parties).any(|foe| {
+                            acting[foe]
+                                && battle.is_hostile(side as u16, foe as u16)
+                                && battle.is_hostile(friend as u16, foe as u16)
+                        })
+                });
+                if backed {
+                    fleet.regroup_until = Some(until);
+                    lost("räumt das Feld; sie sammelt sich hinter den eigenen Linien")
+                } else {
+                    let avoid: Vec<SystemId> = departed
+                        .iter()
+                        .filter(|entry| {
+                            entry.battle == battle.id && battle.is_hostile(side as u16, entry.side)
+                        })
+                        .filter_map(|entry| entry.destination)
+                        .collect();
+                    destination = withdraw(galaxy, fleets, diplomacy, index, &avoid, until);
+                    match destination {
+                        Some(target) => lost(&format!(
+                            "räumt das Feld; sie weicht nach {} aus",
+                            galaxy.system(target).name
+                        )),
+                        None => lost("räumt das Feld; sie sammelt sich"),
+                    }
+                }
+            }
+        }
+    };
+    chronicle.push(
+        tick,
+        ChronicleKind::War,
+        Some(owner),
+        Some(system),
+        format!("Gefecht bei {}: {name} {fate}.", galaxy.system(system).name),
+    );
+    departed.push(Departed {
+        battle: battle.id,
+        side: side as u16,
+        fleet: battle.combatants[side].fleet,
+        tick,
+        cause,
+        destination,
+    });
+}
+
+/// Tagesbeginn: Sammelfristen laufen ab, Trümmer verblassen, Verstärkungen greifen ein, und
+/// wo sich einsatzbereite Flotten verfeindeter Gemeinschaften gegenüberstehen, beginnt ein
+/// Gefecht. Dass laufende Gefechte der Kriegslage folgen, besorgt [`muster_battles`].
 pub fn open_battles(
     galaxy: &Galaxy,
     fleets: &mut Fleets,
@@ -480,18 +823,6 @@ pub fn open_battles(
             .retain(|debris| debris.amount >= DEBRIS_FLOOR);
     }
 
-    // Wer gegen wen kämpft, folgt der Kriegslage: Ein Friedensschluss beendet das Gefecht,
-    // eine neue Kriegserklärung unter Anwesenden weitet es aus.
-    for battle in &mut battles.active {
-        for a in 0..battle.combatants.len() {
-            for b in (a + 1)..battle.combatants.len() {
-                let hostile =
-                    diplomacy.at_war(battle.combatants[a].owner, battle.combatants[b].owner);
-                battle.set_hostile(a, b, hostile);
-            }
-        }
-    }
-
     // Einsatzbereite Flotten je System, in Nummernfolge.
     let mut present: BTreeMap<SystemId, Vec<usize>> = BTreeMap::new();
     for (index, fleet) in fleets.list.iter().enumerate() {
@@ -507,13 +838,20 @@ pub fn open_battles(
             .position(|battle| battle.system == system)
         {
             // Verstärkung: wer mit einer Partei im Krieg liegt, die noch auf dem Feld steht.
+            // Wer in diesem Gefecht das Feld schon geräumt hat, kehrt nicht von selbst
+            // zurück, auch wenn seine Sammelfrist inzwischen abgelaufen ist.
             let battle = &mut battles.active[position];
             for index in here {
                 let owner = fleets.list[index].owner;
+                let gave_way = battles.departed.iter().any(|entry| {
+                    entry.battle == battle.id
+                        && entry.fleet == Some(fleets.list[index].id)
+                        && entry.cause == Departure::LeftField
+                });
                 let has_enemy = (0..battle.combatants.len()).any(|side| {
                     diplomacy.at_war(owner, battle.combatants[side].owner) && on_field(battle, side)
                 });
-                if !has_enemy {
+                if gave_way || !has_enemy {
                     continue;
                 }
                 join(data, finance, research, diplomacy, fleets, battle, index);
@@ -627,7 +965,16 @@ pub fn advance_battles(
 /// Module, Munition und Treibstoff, wie das Gefecht sie zurückließ, und die Bordjäger, die
 /// der Rechner auf die Träger verteilt hat. Ein Schiff, das nicht im Gefecht stand, bleibt,
 /// wie es ist. Gibt die Zahl der verlorenen Schiffe zurück (ohne Bordjäger).
-fn write_back(results: &[ShipResult], side: usize, fleet: &mut Fleet) -> u32 {
+///
+/// `settled` nennt die Schiffe, deren Verlust schon feststeht. Am Ende des Gefechts sind
+/// das alle verlorenen (`None`); solange es läuft, nur die zerstörten: Ein treibendes
+/// Schiff kann noch geborgen werden und bleibt bis dahin, wie es zuletzt war.
+fn write_back(
+    results: &[ShipResult],
+    side: usize,
+    fleet: &mut Fleet,
+    settled: Option<&BTreeSet<ShipId>>,
+) -> u32 {
     let outcomes: BTreeMap<ShipId, &ShipResult> = results
         .iter()
         .filter(|result| result.side as usize == side)
@@ -639,6 +986,9 @@ fn write_back(results: &[ShipResult], side: usize, fleet: &mut Fleet) -> u32 {
             return true;
         };
         if result.fate == Fate::Lost {
+            if settled.is_some_and(|settled| !settled.contains(&ship.id)) {
+                return true;
+            }
             lost += 1;
             return false;
         }
@@ -670,7 +1020,7 @@ fn holds_field(results: &[ShipResult], side: usize) -> bool {
 /// Nachbarsystem ist; sonst in ein Nachbarsystem der eigenen Gemeinschaft; sonst in eines
 /// ohne feindliche Flotten; sonst in das mit der kleinsten Nummer. Die Systeme in `avoid`
 /// kommen nicht in Frage: Dorthin weichen schon Gegner aus demselben Gefecht aus. `None`,
-/// wenn kein Nachbarsystem bleibt; dann sammelt sich die Flotte, wo sie steht.
+/// wenn kein Nachbarsystem bleibt; dann führt [`withdrawal_route`] weiter.
 pub fn retreat_target(
     galaxy: &Galaxy,
     fleets: &Fleets,
@@ -700,6 +1050,85 @@ pub fn retreat_target(
     own.or_else(quiet).or(neighbors.first()).copied()
 }
 
+/// Weg, auf dem eine Flotte das System räumt: in das Nachbarsystem nach
+/// [`retreat_target`]. Weichen schon in jedes Nachbarsystem Gegner aus demselben Gefecht
+/// aus (`avoid`), führt der Weg weiter: in das nächste System (nach Sprüngen, dann in der
+/// Reihenfolge der Suche), das noch keiner von ihnen gewählt hat, notfalls durch ihre
+/// Systeme hindurch. Leer nur, wenn es in der ganzen Galaxie kein solches System gibt; dann
+/// sammelt sich die Flotte, wo sie steht.
+pub fn withdrawal_route(
+    galaxy: &Galaxy,
+    fleets: &Fleets,
+    diplomacy: &Diplomacy,
+    fleet: &Fleet,
+    avoid: &[SystemId],
+) -> Vec<SystemId> {
+    if let Some(target) = retreat_target(galaxy, fleets, diplomacy, fleet, avoid) {
+        return vec![target];
+    }
+    let start = fleet.system;
+    let mut previous: Vec<Option<SystemId>> = vec![None; galaxy.systems.len()];
+    let mut seen = vec![false; galaxy.systems.len()];
+    let mut queue = VecDeque::new();
+    seen[start.index()] = true;
+    queue.push_back(start);
+    while let Some(current) = queue.pop_front() {
+        for neighbor in galaxy.neighbors(current) {
+            let next = neighbor.system;
+            if seen[next.index()] {
+                continue;
+            }
+            seen[next.index()] = true;
+            previous[next.index()] = Some(current);
+            if !avoid.contains(&next) {
+                let mut route = vec![next];
+                let mut cursor = next;
+                while let Some(before) = previous[cursor.index()].filter(|before| *before != start)
+                {
+                    route.push(before);
+                    cursor = before;
+                }
+                route.reverse();
+                return route;
+            }
+            queue.push_back(next);
+        }
+    }
+    Vec::new()
+}
+
+/// Lässt eine Flotte das System räumen und sich bis zum Tag `until` sammeln. Gibt das Ziel
+/// zurück; `None`, wenn kein System bleibt und sie sich an Ort und Stelle sammelt.
+fn withdraw(
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    diplomacy: &Diplomacy,
+    index: usize,
+    avoid: &[SystemId],
+    until: u64,
+) -> Option<SystemId> {
+    let route = withdrawal_route(galaxy, fleets, diplomacy, &fleets.list[index], avoid);
+    let fleet = &mut fleets.list[index];
+    fleet.regroup_until = Some(until);
+    let target = route.last().copied();
+    if !route.is_empty() {
+        fleet.route = route;
+        fleet.progress = 0.0;
+    }
+    target
+}
+
+/// Was aus einer Flotte wird, wenn ihr Gefecht endet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Aftermath {
+    /// Bleibt im System und ist einsatzbereit.
+    Stays,
+    /// Bleibt im System, das die eigene Seite hält, und sammelt sich dort.
+    Rallies,
+    /// Räumt das System und sammelt sich.
+    Leaves,
+}
+
 /// Schließt ein beendetes Gefecht ab: Rückgabe an die Flotten, Abzug derer, die das
 /// System räumen, Bilanz, Trümmer, Kriegsmüdigkeit, Kursschock, Einblick in die Technik
 /// des Gegners, Chronik.
@@ -718,47 +1147,53 @@ fn conclude(
     tick: u64,
 ) {
     let balance = &data.balance.military;
-    let day = tick / TICKS_PER_DAY;
+    let until = tick / TICKS_PER_DAY + balance.regroup_days;
     let system = battle.system;
     let system_name = &galaxy.system(system).name;
     let home = galaxy.system_owner(system);
     let parties = battle.combatants.len();
     // Was aus jedem Schiff geworden ist, sagt der Rechner.
     let results = battle.results(data);
+    // Wer vorzeitig ausgeschieden ist, steht nicht mehr auf dem Feld.
+    let left: Vec<Option<Departed>> = (0..parties)
+        .map(|side| {
+            battles
+                .departed
+                .iter()
+                .find(|entry| entry.battle == battle.id && entry.side as usize == side)
+                .cloned()
+        })
+        .collect();
+    let holding: Vec<bool> = (0..parties)
+        .map(|side| left[side].is_none() && holds_field(&results, side))
+        .collect();
+    // Je Seite gefragt: Hält ein Gegner das Feld, oder jemand, mit dem die Partei nicht im
+    // Krieg liegt?
+    let foe_holds = |side: usize| {
+        (0..parties).any(|other| holding[other] && battle.is_hostile(side as u16, other as u16))
+    };
+    let friend_holds = |side: usize| {
+        (0..parties).any(|other| {
+            other != side && holding[other] && !battle.is_hostile(side as u16, other as u16)
+        })
+    };
 
-    // Bauwert der gesamten Flotte jeder beteiligten Gemeinschaft vor der Rückgabe: Daran
-    // misst sich, wie schwer ein Verlust wiegt.
     let mut tally: BTreeMap<PolityId, OwnerTally> = BTreeMap::new();
-    for combatant in &battle.combatants {
-        tally.entry(combatant.owner).or_insert_with(|| OwnerTally {
-            navy: fleets
-                .of(combatant.owner)
-                .flat_map(|fleet| fleet.ships.iter())
-                .map(|ship| material_value(data, ship))
-                .sum(),
-            ..Default::default()
-        });
-    }
-
     let mut sides: Vec<SideReport> = Vec::with_capacity(parties);
     let mut fates: Vec<String> = Vec::new();
     let mut debris = 0.0f32;
-    // Wohin die Parteien ausweichen, die das System räumen.
-    let mut withdrawn: Vec<(usize, SystemId)> = Vec::new();
-    let holding: Vec<bool> = (0..parties)
-        .map(|side| holds_field(&results, side))
+    // Wohin die Parteien ausweichen, die das System räumen; die schon früher ausgewichen
+    // sind, eingeschlossen.
+    let mut withdrawn: Vec<(usize, SystemId)> = left
+        .iter()
+        .enumerate()
+        .filter_map(|(side, entry)| Some((side, entry.as_ref()?.destination?)))
         .collect();
     for (side, combatant) in battle.combatants.iter().enumerate() {
         let held = holding[side];
-        // Für diese Partei ohne Entscheidung: an der Zeitgrenze noch auf dem Feld, oder
-        // im Patt gelöst, ohne dass danach ein Gegner (etwa eine Verstärkung) das Feld
-        // behauptet hätte. Wer sonst das Feld räumt, wurde geschlagen.
-        let foe_holds = (0..parties)
-            .any(|other| holding[other] && battle.is_hostile(side as u16, other as u16));
-        let drawn = (battle.timed_out && held) || (combatant.stalemate && !foe_holds);
         // Die Bilanz führt der Rechner: Verluste samt den Bordjägern, die mit ihrem Träger
         // untergingen oder keinen Hangar mehr fanden; im Bauwert zählt jeder Jäger einmal.
-        let report = SideReport {
+        let mut report = SideReport {
             owner: combatant.owner,
             fleet: combatant.fleet,
             fleet_name: combatant
@@ -773,102 +1208,171 @@ fn conclude(
             held_field: held,
             retreated: combatant.retreating,
             stalemate: combatant.stalemate,
+            left_early: None,
         };
-        let owner = tally.get_mut(&combatant.owner).expect("eben angelegt");
-        owner.held |= held;
-        owner.drawn |= drawn;
+        let owner = tally.entry(combatant.owner).or_default();
         owner.lost += report.lost_value as f64;
         debris += report.lost_value;
-        let attached = combatant.fleet.map(FleetId::index).filter(|index| {
-            fleets
-                .list
-                .get(*index)
-                .is_some_and(|fleet| fleet.alive && fleet.battle == Some(battle.id))
-        });
-        let Some(index) = attached else {
+        if let Some(entry) = &left[side] {
+            // Schon früher ausgeschieden: Die Flotte ist längst frei, es bleibt die Bilanz.
+            report.held_field = entry.cause == Departure::NoOpponent;
+            report.left_early = Some(entry.tick);
+            owner.beaten |= entry.cause == Departure::LeftField && foe_holds(side);
+            sides.push(report);
+            continue;
+        }
+        owner.held |= held;
+        owner.beaten |= !held && foe_holds(side);
+        let Some(index) = attached(fleets, battle, side) else {
             // Die Flotte gibt es nicht mehr: Es bleibt bei der Bilanz.
             fates.push(format!("{} besteht nicht mehr.", report.fleet_name));
             sides.push(report);
             continue;
         };
-        let ships_lost = write_back(&results, side, &mut fleets.list[index]);
-        if battles.ships_lost.len() <= combatant.owner.index() {
-            battles.ships_lost.resize(combatant.owner.index() + 1, 0);
-        }
-        battles.ships_lost[combatant.owner.index()] += ships_lost;
+        let ships_lost = write_back(&results, side, &mut fleets.list[index], None);
+        count_lost(&mut battles.ships_lost, combatant.owner, ships_lost);
 
         let fleet = &mut fleets.list[index];
         fleet.battle = None;
         fleet.in_battle = false;
         let losses = class_counts(&report.lost);
-        // Entschieden: Wer das Feld hält, bleibt. Ohne Entscheidung lösen sich alle
-        // voneinander, und nur wer im eigenen System steht, bleibt dort.
-        let stays = if drawn {
-            home == Some(combatant.owner)
+        let at_home = home == Some(combatant.owner);
+        let aftermath = if battle.timed_out && held {
+            // An der Zeitgrenze noch auf dem Feld: ohne Entscheidung. Es bleibt nur, wer im
+            // eigenen System steht.
+            if at_home {
+                Aftermath::Stays
+            } else {
+                Aftermath::Leaves
+            }
+        } else if held {
+            Aftermath::Stays
+        } else if foe_holds(side) {
+            // Das Feld einem Gegner überlassen: geschlagen.
+            Aftermath::Leaves
+        } else if friend_holds(side) {
+            Aftermath::Rallies
+        } else if combatant.stalemate && at_home {
+            // Im Patt gelöst, und niemand hält das Feld: Wer zu Hause ist, bleibt.
+            Aftermath::Stays
         } else {
-            held
+            Aftermath::Leaves
         };
         let fate = if fleet.ships.is_empty() {
             match &losses {
                 Some(losses) => format!("verliert {losses} und besteht nicht mehr"),
                 None => "besteht nicht mehr".into(),
             }
-        } else if stays {
-            match (&losses, combatant.stalemate) {
-                (Some(losses), false) => format!("verliert {losses}"),
-                (None, false) => "bleibt ohne Verluste".into(),
-                (Some(losses), true) => {
-                    format!("verliert {losses}, löst sich und bleibt im eigenen System")
-                }
-                (None, true) => "löst sich ohne Verluste und bleibt im eigenen System".into(),
-            }
         } else {
-            // Wer das System räumt, sammelt sich. Gegner aus demselben Gefecht weichen nie
-            // in dasselbe System aus: Sie stünden einander sonst nach der Sammelfrist
-            // wieder gegenüber, und ein Patt wiederholte sich ohne Ende. Die Partei mit
-            // der kleineren Nummer wählt zuerst; bleibt keiner anderen ein Ausweg, sammelt
-            // sie sich, wo sie steht.
-            let avoid: Vec<SystemId> = withdrawn
-                .iter()
-                .filter(|(other, _)| battle.is_hostile(side as u16, *other as u16))
-                .map(|(_, target)| *target)
-                .collect();
-            let target = retreat_target(galaxy, fleets, diplomacy, &fleets.list[index], &avoid);
-            let fleet = &mut fleets.list[index];
-            fleet.regroup_until = Some(day + balance.regroup_days);
-            if let Some(target) = target {
-                fleet.route = vec![target];
-                fleet.progress = 0.0;
-                withdrawn.push((side, target));
-            }
-            let place = match target {
-                Some(target) => format!("weicht nach {} aus", galaxy.system(target).name),
-                None => "sammelt sich".into(),
-            };
-            match &losses {
-                Some(losses) => format!("verliert {losses} und {place}"),
-                None => format!("{place}, ohne Verluste"),
+            match aftermath {
+                Aftermath::Stays => match (&losses, combatant.stalemate) {
+                    (Some(losses), false) => format!("verliert {losses}"),
+                    (None, false) => "bleibt ohne Verluste".into(),
+                    (Some(losses), true) => {
+                        format!("verliert {losses}, löst sich und bleibt im eigenen System")
+                    }
+                    (None, true) => "löst sich ohne Verluste und bleibt im eigenen System".into(),
+                },
+                Aftermath::Rallies => {
+                    // Die eigene Seite hält das Feld: Die Flotte muss das System nicht
+                    // räumen, ist aber aus dem Spiel, bis sie sich gesammelt hat.
+                    fleet.regroup_until = Some(until);
+                    match &losses {
+                        Some(losses) => {
+                            format!("verliert {losses} und sammelt sich hinter den eigenen Linien")
+                        }
+                        None => "sammelt sich ohne Verluste hinter den eigenen Linien".into(),
+                    }
+                }
+                Aftermath::Leaves => {
+                    // Wer das System räumt, sammelt sich. Gegner aus demselben Gefecht
+                    // weichen nie in dasselbe System aus: Sie stünden einander sonst nach
+                    // der Sammelfrist wieder gegenüber, und ein Patt wiederholte sich ohne
+                    // Ende. Die Partei mit der kleineren Nummer wählt zuerst; den anderen
+                    // bleibt notfalls ein weiterer Weg.
+                    let avoid: Vec<SystemId> = withdrawn
+                        .iter()
+                        .filter(|(other, _)| battle.is_hostile(side as u16, *other as u16))
+                        .map(|(_, target)| *target)
+                        .collect();
+                    let target = withdraw(galaxy, fleets, diplomacy, index, &avoid, until);
+                    if let Some(target) = target {
+                        withdrawn.push((side, target));
+                    }
+                    let place = match target {
+                        Some(target) => format!("weicht nach {} aus", galaxy.system(target).name),
+                        None => "sammelt sich".into(),
+                    };
+                    match &losses {
+                        Some(losses) => format!("verliert {losses} und {place}"),
+                        None => format!("{place}, ohne Verluste"),
+                    }
+                }
             }
         };
         fates.push(format!("{} {fate}.", report.fleet_name));
         sides.push(report);
     }
 
-    // Verluste machen kriegsmüde, im Verhältnis zum Anteil an der ganzen Flotte; eine
-    // schwere Niederlage erschüttert dazu die Kurse. Eine Niederlage ist es nur, wenn das
-    // Gefecht gegen die Gemeinschaft entschieden wurde: Keine ihrer Flotten hielt das
-    // Feld, und keine hat sich bloß im Patt oder an der Zeitgrenze gelöst.
-    let mut shaken: Vec<PolityId> = Vec::new();
-    for (polity, owner) in &tally {
-        if owner.lost <= 0.0 || owner.navy <= 0.0 {
+    // Wer früher das Feld geräumt und sich hinter den eigenen Linien gesammelt hat, räumt
+    // jetzt das System, wenn am Ende doch ein Gegner das Feld hält.
+    for (side, entry) in left.iter().enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+        if entry.cause != Departure::LeftField || entry.destination.is_some() || !foe_holds(side) {
             continue;
         }
-        let share = (owner.lost / owner.navy).clamp(0.0, 1.0);
+        let rallying = entry.fleet.map(FleetId::index).filter(|index| {
+            fleets.list.get(*index).is_some_and(|fleet| {
+                fleet.alive
+                    && !fleet.in_battle
+                    && fleet.system == system
+                    && fleet.route.is_empty()
+                    && fleet.is_regrouping()
+            })
+        });
+        let Some(index) = rallying else {
+            continue;
+        };
+        let avoid: Vec<SystemId> = withdrawn
+            .iter()
+            .filter(|(other, _)| battle.is_hostile(side as u16, *other as u16))
+            .map(|(_, target)| *target)
+            .collect();
+        if let Some(target) = withdraw(galaxy, fleets, diplomacy, index, &avoid, until) {
+            withdrawn.push((side, target));
+            fates.push(format!(
+                "{} sammelte sich im System und weicht nun nach {} aus.",
+                fleets.list[index].name,
+                galaxy.system(target).name
+            ));
+        }
+    }
+
+    // Verluste machen kriegsmüde, im Verhältnis zum Anteil an der ganzen Flotte; eine
+    // schwere Niederlage erschüttert dazu die Kurse. Eine Niederlage ist es nur, wenn das
+    // Gefecht gegen die Gemeinschaft entschieden wurde: Eine ihrer Flotten hat das Feld
+    // einem Gegner überlassen, und keine hält es.
+    let mut shaken: Vec<PolityId> = Vec::new();
+    for (polity, owner) in &tally {
+        if owner.lost <= 0.0 {
+            continue;
+        }
+        // Die Flotte der Gemeinschaft, wie sie in das Gefecht ging: was sie jetzt noch
+        // hat, und was sie darin verlor.
+        let navy = owner.lost
+            + fleets
+                .of(*polity)
+                .flat_map(|fleet| fleet.ships.iter())
+                .map(|ship| material_value(data, ship))
+                .sum::<f64>();
+        let share = (owner.lost / navy).clamp(0.0, 1.0);
         if let Some(state) = finance.polities.get_mut(polity.index()) {
             state.war_weariness =
                 (state.war_weariness + balance.weariness_per_navy_lost * share).clamp(0.0, 100.0);
         }
-        if !owner.held && !owner.drawn && share >= balance.heavy_defeat_share {
+        if owner.beaten && !owner.held && share >= balance.heavy_defeat_share {
             crate::finance::shares::shock_polity(
                 finance,
                 galaxy,
@@ -929,9 +1433,12 @@ fn conclude(
         BattleOutcome::TimedOut
     } else if at_peace {
         BattleOutcome::CalledOff
-    } else if sides.iter().any(|side| side.held_field) {
+    } else if holding.iter().any(|held| *held) {
         BattleOutcome::Decided
-    } else if sides.iter().any(|side| side.stalemate) {
+    } else if sides
+        .iter()
+        .any(|side| side.stalemate && side.left_early.is_none())
+    {
         BattleOutcome::Stalemate
     } else {
         BattleOutcome::Abandoned
@@ -945,7 +1452,13 @@ fn conclude(
         outcome,
         sides,
     };
-    let holders: Vec<&SideReport> = report.sides.iter().filter(|side| side.held_field).collect();
+    let holders: Vec<&SideReport> = report
+        .sides
+        .iter()
+        .zip(&holding)
+        .filter(|(_, held)| **held)
+        .map(|(side, _)| side)
+        .collect();
     let duration = match report.days() {
         1 => "einem Tag".to_string(),
         days => format!("{days} Tagen"),
@@ -995,6 +1508,7 @@ fn conclude(
             ),
         );
     }
+    battles.departed.retain(|entry| entry.battle != battle.id);
     if battles.reports.len() >= Battles::REPORTS {
         battles.reports.remove(0);
     }
@@ -1004,13 +1518,12 @@ fn conclude(
 /// Bilanz einer Gemeinschaft über alle ihre Flotten in einem Gefecht.
 #[derive(Clone, Copy, Debug, Default)]
 struct OwnerTally {
-    /// Bauwert ihrer gesamten Flotte vor der Rückgabe, in Credits.
-    navy: f64,
+    /// Bauwert dessen, was sie in dem Gefecht verlor, in Credits.
     lost: f64,
-    /// Mindestens eine ihrer Flotten hielt das Feld.
+    /// Mindestens eine ihrer Flotten hielt am Ende das Feld.
     held: bool,
-    /// Mindestens eine ihrer Flotten löste sich ohne Entscheidung (Patt oder Zeitgrenze).
-    drawn: bool,
+    /// Mindestens eine ihrer Flotten hat das Feld einem Gegner überlassen.
+    beaten: bool,
 }
 
 /// Reicht geänderte Befehle einer Flotte an das Gefecht weiter, in dem sie steht.
@@ -1298,7 +1811,7 @@ mod tests {
         let results = battle.results(&data);
         assert!(holds_field(&results, 0) && holds_field(&results, 1));
         let mut holding = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 0, &mut holding), 1);
+        assert_eq!(write_back(&results, 0, &mut holding, None), 1);
         let cruiser = data.designs[before[0].design as usize].stats.value;
         assert!((value - value_of(&holding) - cruiser).abs() < 1e-6);
         let ids: Vec<ShipId> = holding.ships.iter().map(|ship| ship.id).collect();
@@ -1315,7 +1828,7 @@ mod tests {
         assert_eq!(holding.ships[2], before[3]);
         // Die Rückgabe an die andere Partei rührt diese Flotte nicht an.
         let mut other = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 1, &mut other), 0);
+        assert_eq!(write_back(&results, 1, &mut other, None), 0);
         assert_eq!(other.ships, before);
 
         // Kämpft die Partei nicht mehr, der Gegner aber schon, ist das treibende Schiff
@@ -1324,7 +1837,7 @@ mod tests {
         let results = battle.results(&data);
         assert!(!holds_field(&results, 0) && holds_field(&results, 1));
         let mut routed = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 0, &mut routed), 2);
+        assert_eq!(write_back(&results, 0, &mut routed, None), 2);
         assert!(routed.ships.iter().all(|ship| ship.id != before[2].id));
         assert_eq!(routed.ships.len(), before.len() - 2);
 
@@ -1334,7 +1847,7 @@ mod tests {
         let results = battle.results(&data);
         assert!(holds_field(&results, 0) && !holds_field(&results, 1));
         let mut last = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 0, &mut last), 1);
+        assert_eq!(write_back(&results, 0, &mut last, None), 1);
         assert!(last.ships.iter().any(|ship| ship.id == before[2].id));
     }
 
@@ -1372,7 +1885,7 @@ mod tests {
         assert!(holds_field(&results, 0) && holds_field(&results, 2));
         assert!(!holds_field(&results, 1));
         let mut rescued = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 0, &mut rescued), 0);
+        assert_eq!(write_back(&results, 0, &mut rescued, None), 0);
         assert!(rescued.ship(adrift).is_some());
 
         // Steht dagegen der Gegner noch, während die eigene Seite nicht mehr kämpft, ist
@@ -1386,7 +1899,7 @@ mod tests {
         let results = battle.results(&data);
         assert!(!holds_field(&results, 0));
         let mut abandoned = fleets.list[0].clone();
-        assert_eq!(write_back(&results, 0, &mut abandoned), 1);
+        assert_eq!(write_back(&results, 0, &mut abandoned, None), 1);
         assert!(abandoned.ship(adrift).is_none());
     }
 
@@ -1418,7 +1931,7 @@ mod tests {
         let results = battle.results(&data);
         assert!(!holds_field(&results, 1) && holds_field(&results, 0));
         let mut gone = fleets.list[1].clone();
-        assert_eq!(write_back(&results, 1, &mut gone) as usize, ships);
+        assert_eq!(write_back(&results, 1, &mut gone, None) as usize, ships);
         assert!(gone.ships.is_empty());
     }
 
@@ -1475,7 +1988,7 @@ mod tests {
         // Geht kein Träger verloren, kehren alle Jäger heim: so viele, wie gestartet sind.
         let whole = battle.clone();
         let mut fleet = fleets.list[0].clone();
-        assert_eq!(write_back(&whole.results(&data), 0, &mut fleet), 0);
+        assert_eq!(write_back(&whole.results(&data), 0, &mut fleet, None), 0);
         assert_eq!(
             on_board(&fleet, first) + on_board(&fleet, second),
             2 * stats.fighters - missing
@@ -1490,7 +2003,7 @@ mod tests {
             .unwrap();
         thinned.ships[downed].status = ShipStatus::Destroyed;
         let mut fleet = fleets.list[0].clone();
-        assert_eq!(write_back(&thinned.results(&data), 0, &mut fleet), 0);
+        assert_eq!(write_back(&thinned.results(&data), 0, &mut fleet, None), 0);
         assert_eq!(
             on_board(&fleet, first) + on_board(&fleet, second),
             2 * stats.fighters - missing - 1
@@ -1506,7 +2019,7 @@ mod tests {
         let homeless = battle.combatants[0].lost[ShipClass::Fighter.index()] - lost_before;
         assert_eq!(homeless, stats.fighters - missing);
         let mut fleet = fleets.list[0].clone();
-        assert_eq!(write_back(&battle.results(&data), 0, &mut fleet), 1);
+        assert_eq!(write_back(&battle.results(&data), 0, &mut fleet, None), 1);
         assert!(fleet.ship(first).is_none());
         // Der zweite Träger ist voll: die eigenen Jäger und so viele Heimatlose, wie Platz
         // war. Mehr als sein Hangar fasst, kommt nicht an Bord.
@@ -1630,10 +2143,32 @@ mod tests {
         diplomacy: &Diplomacy,
         battle: &Battle,
     ) -> Settled {
+        settle_after(
+            data,
+            galaxy,
+            polities,
+            fleets,
+            diplomacy,
+            battle,
+            Vec::new(),
+        )
+    }
+
+    /// Wie [`settle`], für ein Gefecht, aus dem schon Parteien ausgeschieden sind.
+    fn settle_after(
+        data: &GameData,
+        galaxy: &Galaxy,
+        polities: &Polities,
+        fleets: &Fleets,
+        diplomacy: &Diplomacy,
+        battle: &Battle,
+        departed: Vec<Departed>,
+    ) -> Settled {
         let mut settled = Settled {
             fleets: fleets.clone(),
             battles: Battles {
                 next_id: 1,
+                departed,
                 ..Default::default()
             },
             research: Research::default(),
@@ -1967,21 +2502,41 @@ mod tests {
         let after = &settled.fleets.list[..count];
         assert!(after.iter().all(Fleet::is_regrouping));
         // Die erste Partei weicht aus, woher sie kam; jede weitere in ein System, das noch
-        // kein Gegner gewählt hat.
+        // kein Gegner gewählt hat. Alle räumen das Feld, und keine zwei haben dasselbe Ziel.
         assert_eq!(after[0].route, vec![exits[0]]);
         let mut chosen: Vec<SystemId> = after
             .iter()
-            .filter_map(|fleet| fleet.route.first().copied())
+            .map(|fleet| *fleet.route.last().expect("jede Flotte räumt das System"))
             .collect();
-        assert_eq!(chosen.len(), exits.len(), "jeder Ausweg genau einmal");
+        assert!(!chosen.contains(&field));
         chosen.sort();
         chosen.dedup();
-        assert_eq!(chosen.len(), exits.len(), "kein Ausweg doppelt");
-        // Für die letzte bleibt keiner: Sie sammelt sich, wo sie steht.
-        let stuck = &after[count - 1];
-        assert!(stuck.route.is_empty() && stuck.system == field);
+        assert_eq!(chosen.len(), count, "kein Ziel doppelt");
+        // Jeder Nachbar ist vergeben, bevor die letzte wählt: Ihr Weg führt durch eines der
+        // Nachbarsysteme hindurch in das nächste freie dahinter.
+        for fleet in &after[..exits.len()] {
+            assert_eq!(fleet.route.len(), 1);
+            assert!(exits.contains(&fleet.route[0]));
+        }
+        let last = &after[count - 1];
+        assert_eq!(last.route.len(), 2, "{:?}", last.route);
+        assert!(exits.contains(&last.route[0]) && !exits.contains(&last.route[1]));
         assert!(
-            settled.text().contains("sammelt sich"),
+            galaxy.lane_between(last.route[0], last.route[1]).is_some(),
+            "der Weg folgt den Routen"
+        );
+        assert_eq!(
+            withdrawal_route(&galaxy, &fleets, &diplomacy, &fleets.list[0], &exits),
+            last.route,
+            "derselbe Weg, wenn alle Nachbarn vergeben sind"
+        );
+        // Nur wenn es in der ganzen Galaxie kein freies System gäbe, bliebe eine Flotte.
+        let everywhere: Vec<SystemId> = galaxy.systems.iter().map(|system| system.id).collect();
+        assert!(
+            withdrawal_route(&galaxy, &fleets, &diplomacy, &fleets.list[0], &everywhere).is_empty()
+        );
+        assert!(
+            !settled.text().contains("sammelt sich"),
             "{}",
             settled.text()
         );
@@ -1992,6 +2547,428 @@ mod tests {
         let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &friends);
         assert_eq!(settled.fleets.list[0].route, vec![exits[0]]);
         assert_eq!(settled.fleets.list[1].route, vec![exits[0]]);
+    }
+
+    /// Drei Startflotten im Heimatsystem der ersten, als Parteien eines Gefechts, das noch
+    /// keinen Schritt gerechnet hat. Wer wem feind ist, sagt die Kriegslage.
+    fn melee(
+        data: &GameData,
+        fleets: &mut Fleets,
+        diplomacy: &Diplomacy,
+        members: &[usize],
+    ) -> Battles {
+        let system = fleets.list[members[0]].system;
+        let mut battle = Battle::new(BattleId(0), system, 1);
+        for index in members {
+            fleets.list[*index].system = system;
+            join(
+                data,
+                &Finance::default(),
+                &no_research(),
+                diplomacy,
+                fleets,
+                &mut battle,
+                *index,
+            );
+        }
+        Battles {
+            active: vec![battle],
+            next_id: 1,
+            ..Default::default()
+        }
+    }
+
+    fn muster_at(
+        data: &GameData,
+        galaxy: &Galaxy,
+        fleets: &mut Fleets,
+        battles: &mut Battles,
+        diplomacy: &Diplomacy,
+        tick: u64,
+    ) -> Chronicle {
+        let mut chronicle = Chronicle::default();
+        muster_battles(
+            galaxy,
+            fleets,
+            battles,
+            diplomacy,
+            &mut chronicle,
+            data,
+            tick,
+        );
+        assert_eq!(battles.find_anomaly(fleets), None);
+        assert_eq!(fleets.find_anomaly(data), None);
+        chronicle
+    }
+
+    #[test]
+    fn what_a_running_battle_has_cost_shows_in_the_fleet_each_morning() {
+        let (data, galaxy, _, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let mut battles = melee(&data, &mut fleets, &diplomacy, &[0, 1]);
+        let before = fleets.list[0].clone();
+        let pay = crate::fleet::monthly_upkeep(&data, &fleets, PolityId(0));
+        let strength = before.strength;
+        let battle = &mut battles.active[0];
+        // Ein Schiff ist zerstört, eines treibt, eines ist angeschlagen.
+        let (wreck, adrift, hurt) = (
+            place(battle, before.ships[0].id),
+            place(battle, before.ships[1].id),
+            place(battle, before.ships[2].id),
+        );
+        battle.ships[wreck].status = ShipStatus::Destroyed;
+        battle.ships[adrift].status = ShipStatus::Disabled;
+        battle.ships[adrift].hull *= 0.5;
+        battle.ships[hurt].hull *= 0.25;
+        battle.ships[hurt].ammo *= 0.5;
+
+        muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 400);
+        let now = &fleets.list[0];
+        // Das Wrack ist fort: aus der Flotte, aus dem Sold, aus der Stärke.
+        assert!(now.ship(before.ships[0].id).is_none());
+        assert_eq!(now.ships.len(), before.ships.len() - 1);
+        assert_eq!(battles.ships_lost_by(PolityId(0)), 1);
+        let cruiser = data.designs[before.ships[0].design as usize].stats.value;
+        let paid = crate::fleet::monthly_upkeep(&data, &fleets, PolityId(0));
+        assert_eq!(
+            pay - paid,
+            crate::economy::to_money(cruiser * data.balance.military.upkeep_per_month)
+        );
+        assert!(now.strength < strength);
+        // Die Überlebenden tragen ihren Zustand; das treibende Schiff ist noch dabei.
+        let damaged = now.ship(before.ships[2].id).unwrap();
+        assert!((damaged.hull - 0.25).abs() < 1e-6 && (damaged.ammo - 0.5).abs() < 1e-6);
+        assert!((now.ship(before.ships[1].id).unwrap().hull - 0.5).abs() < 1e-6);
+        // Die Flotte steht weiter im Gefecht, und die andere ist unberührt.
+        assert!(now.in_battle && battles.of_fleet(now.id).is_some());
+        assert!(battles.departed.is_empty());
+        assert_eq!(fleets.list[1].ships.len(), before.ships.len());
+
+        // Ein zweiter Morgen zählt nichts doppelt, und am Ende bleibt es bei dem einen
+        // Verlust, solange das treibende Schiff geborgen wird.
+        muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 420);
+        assert_eq!(battles.ships_lost_by(PolityId(0)), 1);
+        assert_eq!(fleets.list[0].ships.len(), before.ships.len() - 1);
+
+        // Kämpft die eigene Seite nicht mehr, der Gegner aber schon, steht das Los des
+        // treibenden Schiffs erst am Ende fest: Bis dahin bleibt es in der Flotte.
+        set_active(&mut battles.active[0], 0, ShipStatus::Routing);
+        muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 440);
+        assert!(fleets.list[0].ship(before.ships[1].id).is_some());
+        assert_eq!(battles.ships_lost_by(PolityId(0)), 1);
+    }
+
+    #[test]
+    fn a_party_without_an_opponent_leaves_while_the_others_fight_on() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        // 0 und 2 führen Krieg gegen 1, aber nicht gegeneinander.
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        diplomacy.wars.insert((PolityId(1), PolityId(2)));
+        let mut battles = melee(&data, &mut fleets, &diplomacy, &[0, 1, 2]);
+        let chronicle = muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 400);
+        assert!(battles.departed.is_empty() && chronicle.entries.is_empty());
+
+        // 0 schließt Frieden mit 1. Am nächsten Morgen hat die Flotte keinen Gegner mehr
+        // und scheidet aus; 1 und 2 kämpfen weiter.
+        diplomacy.wars.remove(&(PolityId(0), PolityId(1)));
+        let chronicle = muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 420);
+        assert_eq!(battles.departed.len(), 1);
+        let entry = battles.departed[0].clone();
+        assert_eq!(
+            (entry.side, entry.fleet, entry.cause, entry.destination),
+            (0, Some(FleetId(0)), Departure::NoOpponent, None)
+        );
+        assert!(battles.has_departed(BattleId(0), 0) && !battles.has_departed(BattleId(0), 1));
+        assert!(
+            chronicle.entries[0].text.contains("keinen Gegner mehr"),
+            "{}",
+            chronicle.entries[0].text
+        );
+        let free = &fleets.list[0];
+        assert!(free.is_ready() && !free.in_battle && free.battle.is_none());
+        assert!(free.route.is_empty() && free.ships.len() == fleets.list[1].ships.len());
+        assert!(battles.of_fleet(FleetId(0)).is_none());
+        assert!(battles.of_fleet(FleetId(1)).is_some() && battles.of_fleet(FleetId(2)).is_some());
+        let battle = &battles.active[0];
+        assert_eq!(
+            battle.combatants.len(),
+            3,
+            "die Partei bleibt für die Bilanz"
+        );
+        assert!(
+            battle
+                .ships
+                .iter()
+                .filter(|ship| ship.side == 0)
+                .all(|ship| ship.status == ShipStatus::Escaped)
+        );
+        assert!(battle.is_fighting(1) && battle.is_fighting(2));
+        // Die Flotte marschiert wieder, wohin sie will, und wird nicht erneut aufgenommen.
+        let exit = galaxy.neighbors(free.system)[0].system;
+        let mut gone = fleets.clone();
+        crate::fleet::order_move(&galaxy, &mut gone, PolityId(0), FleetId(0), exit).unwrap();
+        let chronicle = muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, 440);
+        assert!(battles.departed.len() == 1 && chronicle.entries.is_empty());
+
+        // Am Ende steht sie in der Bilanz als früh ausgeschieden; mit ihr geschieht nichts.
+        let mut battle = battles.active[0].clone();
+        set_active(&mut battle, 1, ShipStatus::Escaped);
+        battle.finished = true;
+        let settled = settle_after(
+            &data,
+            &galaxy,
+            &polities,
+            &fleets,
+            &diplomacy,
+            &battle,
+            battles.departed.clone(),
+        );
+        let report = settled.report();
+        assert_eq!(report.outcome, BattleOutcome::Decided);
+        assert_eq!(report.sides[0].left_early, Some(420));
+        assert!(
+            report.sides[0].held_field,
+            "sie stand bis zuletzt auf dem Feld"
+        );
+        assert_eq!(report.sides[1].left_early, None);
+        assert!(report.sides[2].held_field && !report.sides[1].held_field);
+        assert!(settled.fleets.list[0].is_ready() && settled.fleets.list[0].route.is_empty());
+        assert!(settled.battles.departed.is_empty());
+        assert!(
+            settled.text().contains("hält das Feld") && !settled.text().contains("halten"),
+            "{}",
+            settled.text()
+        );
+
+        // Schließen dagegen in einem Gefecht zu zweit beide Frieden, scheidet niemand
+        // einzeln aus: Das Gefecht endet als Ganzes.
+        let (_, _, _, mut pair) = setup();
+        let mut war = Diplomacy::default();
+        war.wars.insert((PolityId(3), PolityId(4)));
+        let mut duel = melee(&data, &mut pair, &war, &[3, 4]);
+        let chronicle = muster_at(
+            &data,
+            &galaxy,
+            &mut pair,
+            &mut duel,
+            &Diplomacy::default(),
+            400,
+        );
+        assert!(duel.departed.is_empty() && chronicle.entries.is_empty());
+        assert!(!duel.active[0].is_hostile(0, 1));
+        assert!(pair.list[3].in_battle && pair.list[4].in_battle);
+    }
+
+    #[test]
+    fn a_fleet_with_no_ship_left_on_the_field_leaves_at_once() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        let balance = &data.balance.military;
+        // 0 und 2 führen Krieg gegen 1, aber nicht gegeneinander. Gekämpft wird im
+        // Heimatsystem von 1.
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        diplomacy.wars.insert((PolityId(1), PolityId(2)));
+        let mut battles = melee(&data, &mut fleets, &diplomacy, &[1, 0, 2]);
+        let system = fleets.list[1].system;
+        let ships = fleets.list[0].ships.len();
+        // Die Flotte von 0 verliert ein Schiff, die übrigen entkommen.
+        {
+            let battle = &mut battles.active[0];
+            let wreck = place(battle, fleets.list[0].ships[0].id);
+            battle.ships[wreck].status = ShipStatus::Destroyed;
+            set_active(battle, 1, ShipStatus::Escaped);
+            battle.combatants[1].lost_value = battle.combatants[1].initial_value * 0.5;
+        }
+        let tick = 400;
+        let chronicle = muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, tick);
+        // Sie ist frei, sobald der Tag beginnt. Weil 2 gegen denselben Gegner weiterkämpft,
+        // räumt sie das System nicht, sondern sammelt sich hinter dessen Linien.
+        let entry = battles.departed[0].clone();
+        assert_eq!(
+            (entry.side, entry.cause, entry.destination),
+            (1, Departure::LeftField, None)
+        );
+        let rallying = fleets.list[0].clone();
+        assert!(!rallying.in_battle && rallying.battle.is_none());
+        assert_eq!(rallying.ships.len(), ships - 1);
+        assert_eq!(
+            rallying.regroup_until,
+            Some(tick / TICKS_PER_DAY + balance.regroup_days)
+        );
+        assert!(rallying.route.is_empty() && rallying.system == system);
+        assert!(
+            chronicle.entries[0]
+                .text
+                .contains("hinter den eigenen Linien"),
+            "{}",
+            chronicle.entries[0].text
+        );
+        assert!(fleets.list[1].in_battle && fleets.list[2].in_battle);
+
+        // Hält am Ende die eigene Seite das Feld, bleibt es dabei, und es war keine
+        // Niederlage, wie schwer die Verluste auch wiegen.
+        let mut won = battles.active[0].clone();
+        set_active(&mut won, 0, ShipStatus::Escaped);
+        won.finished = true;
+        let settled = settle_after(
+            &data,
+            &galaxy,
+            &polities,
+            &fleets,
+            &diplomacy,
+            &won,
+            battles.departed.clone(),
+        );
+        assert_eq!(settled.report().outcome, BattleOutcome::Decided);
+        let side = &settled.report().sides[1];
+        assert_eq!(side.left_early, Some(tick));
+        assert!(!side.held_field);
+        assert_eq!(settled.fleets.list[0].route, rallying.route);
+        assert_eq!(settled.fleets.list[0].regroup_until, rallying.regroup_until);
+        assert!(!settled.shaken());
+        assert!(settled.fleets.list[1].is_regrouping(), "der Gegner räumt");
+
+        // Hält am Ende doch der Gegner das Feld, räumt auch sie das System: in ein anderes
+        // als die Mitstreiterin nur dann nicht, wenn sie einander nicht feind sind.
+        let mut lost = battles.active[0].clone();
+        set_active(&mut lost, 2, ShipStatus::Escaped);
+        lost.finished = true;
+        let settled = settle_after(
+            &data,
+            &galaxy,
+            &polities,
+            &fleets,
+            &diplomacy,
+            &lost,
+            battles.departed.clone(),
+        );
+        assert!(settled.report().sides[0].held_field);
+        let driven = &settled.fleets.list[0];
+        assert_eq!(driven.route.len(), 1, "{}", settled.text());
+        assert_eq!(
+            driven.regroup_until,
+            Some(END_TICK / TICKS_PER_DAY + balance.regroup_days)
+        );
+        assert!(
+            settled.text().contains("weicht nun nach"),
+            "{}",
+            settled.text()
+        );
+        assert!(
+            settled.shaken(),
+            "das Feld einem Gegner überlassen: geschlagen"
+        );
+        assert!(settled.fleets.list[2].is_regrouping());
+
+        // Kämpft niemand mehr gegen ihre Gegner, weicht sie sofort aus: Dass anderswo auf
+        // dem Feld noch zwei andere kämpfen, hilft ihr nicht.
+        let (_, _, _, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        diplomacy.wars.insert((PolityId(2), PolityId(3)));
+        let mut battles = melee(&data, &mut fleets, &diplomacy, &[1, 0, 2, 3]);
+        set_active(&mut battles.active[0], 1, ShipStatus::Escaped);
+        let chronicle = muster_at(&data, &galaxy, &mut fleets, &mut battles, &diplomacy, tick);
+        // Beide Parteien des ersten Paars scheiden aus: die eine ohne Schiff auf dem Feld,
+        // die andere ohne Gegner.
+        assert_eq!(battles.departed.len(), 2);
+        let beaten = &fleets.list[0];
+        assert!(beaten.is_regrouping() && beaten.route.len() == 1 && !beaten.in_battle);
+        assert_eq!(
+            battles
+                .departed
+                .iter()
+                .find(|entry| entry.fleet == Some(FleetId(0)))
+                .unwrap()
+                .destination,
+            beaten.route.last().copied()
+        );
+        let winner = &fleets.list[1];
+        assert!(winner.is_ready() && winner.route.is_empty() && !winner.in_battle);
+        assert!(fleets.list[2].in_battle && fleets.list[3].in_battle);
+        assert!(
+            chronicle
+                .entries
+                .iter()
+                .any(|entry| entry.text.contains("weicht nach")),
+        );
+    }
+
+    #[test]
+    fn whose_side_holds_the_field_need_not_leave_the_system() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        let balance = &data.balance.military;
+        // Gemeinschaft 0 kämpft mit zwei Flotten gegen 1, in dessen Heimatsystem.
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let part: Vec<ShipId> = fleets.list[0].ships[..3]
+            .iter()
+            .map(|ship| ship.id)
+            .collect();
+        let sister = crate::fleet::split_fleet(
+            &data,
+            &polities,
+            &mut fleets,
+            PolityId(0),
+            FleetId(0),
+            &part,
+        )
+        .unwrap();
+        let battles = melee(&data, &mut fleets, &diplomacy, &[1, 0, sister.index()]);
+        let mut battle = battles.active[0].clone();
+        assert!(
+            !battle.is_hostile(1, 2),
+            "Schwesterflotten sind einander nie feind"
+        );
+        // Die erste Flotte hat das Feld geräumt und dabei schwer verloren, die Schwester
+        // schlägt den Gegner im selben Augenblick.
+        set_active(&mut battle, 1, ShipStatus::Escaped);
+        set_active(&mut battle, 0, ShipStatus::Escaped);
+        battle.combatants[1].lost_value = battle.combatants[1].initial_value * 0.9;
+        battle.finished = true;
+        let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &battle);
+        let report = settled.report();
+        assert_eq!(report.outcome, BattleOutcome::Decided);
+        assert!(report.sides[2].held_field && !report.sides[1].held_field);
+        // Wer das Feld hält, entscheidet sich je Seite: Die Flotte bleibt im System und
+        // sammelt sich hinter den eigenen Linien. Geschlagen wurde die Gemeinschaft nicht.
+        let rallying = &settled.fleets.list[0];
+        assert!(rallying.route.is_empty() && rallying.system == battle.system);
+        assert_eq!(
+            rallying.regroup_until,
+            Some(END_TICK / TICKS_PER_DAY + balance.regroup_days)
+        );
+        assert!(
+            settled.text().contains("hinter den eigenen Linien"),
+            "{}",
+            settled.text()
+        );
+        assert!(!settled.shaken());
+        assert!(settled.fleets.list[sister.index()].is_ready());
+        // Der Gegner hat das Feld einem Feind überlassen und räumt sein eigenes System.
+        assert!(settled.fleets.list[1].is_regrouping());
+        assert_eq!(settled.fleets.list[1].route.len(), 1);
+
+        // Hält dagegen der Gegner das Feld, räumen beide Schwestern das System, und beide
+        // dürfen denselben Weg nehmen.
+        let mut lost = battles.active[0].clone();
+        for side in [1, 2] {
+            set_active(&mut lost, side, ShipStatus::Escaped);
+            lost.combatants[side as usize].lost_value =
+                lost.combatants[side as usize].initial_value * 0.9;
+        }
+        lost.finished = true;
+        let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &lost);
+        let (first, second) = (
+            &settled.fleets.list[0],
+            &settled.fleets.list[sister.index()],
+        );
+        assert!(first.is_regrouping() && second.is_regrouping());
+        assert_eq!(first.route.len(), 1);
+        assert_eq!(first.route, second.route);
+        assert!(settled.shaken());
     }
 
     #[test]
@@ -2242,7 +3219,7 @@ mod tests {
             hull: 0.4,
             ..Ship::fresh(&data, late, cruiser)
         });
-        assert_eq!(write_back(&battle.results(&data), 0, &mut fleet), 0);
+        assert_eq!(write_back(&battle.results(&data), 0, &mut fleet, None), 0);
         assert_eq!(fleet.ship(late).unwrap().hull, 0.4);
         assert_eq!(fleet.ships.len(), fleets.list[0].ships.len() + 1);
     }

@@ -299,16 +299,17 @@ pub fn advance_yards(
             let order = &fleets.orders[index];
             (order.polity, galaxy.planet(order.planet).system)
         };
-        // Zur Flotte mit der kleinsten Nummer, die im System liegt und nicht kämpft.
+        // Zur Flotte mit der kleinsten Nummer, die einsatzbereit im System liegt. Eine
+        // Flotte, die kämpft oder sich sammelt, nimmt kein Schiff auf: Es stünde sonst
+        // unter dem Schutz ihrer Sammelfrist.
         let host = fleets
             .list
             .iter()
             .find(|fleet| {
-                fleet.alive
+                fleet.is_ready()
                     && fleet.owner == polity
                     && fleet.system == system
                     && fleet.route.is_empty()
-                    && !fleet.in_battle
             })
             .map(|fleet| fleet.id);
         let contested = fleets

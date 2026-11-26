@@ -1,6 +1,6 @@
 use super::{
-    Battles, Fleets, advance_battles, advance_yards, move_fleets, open_battles, pay_upkeep,
-    repair_fleets, resupply_fleets, update_blockades,
+    Battles, Fleets, advance_battles, advance_yards, move_fleets, muster_battles, open_battles,
+    pay_upkeep, repair_fleets, resupply_fleets, update_blockades,
 };
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
@@ -26,10 +26,13 @@ impl Plugin for FleetPlugin {
         app.add_systems(
             sim_schedule(),
             (
-                // Erst der Marsch, dann der Sold (er geht dem Einkauf vor), dann Nachschub,
+                // Zuerst der Stand der laufenden Gefechte: Was sie gekostet haben, steht in
+                // den Flotten, bevor marschiert, bezahlt und eingekauft wird. Dann der
+                // Marsch, dann der Sold (er geht dem Einkauf vor), dann Nachschub,
                 // Instandsetzung und Werften aus derselben Staatskasse. Die Forschung folgt
                 // erst danach (`SimSet::Research`) und bekommt, was über der Rücklage bleibt.
                 (
+                    muster.run_if(day_start),
                     movement.run_if(day_start),
                     upkeep.run_if(month_start),
                     service.run_if(day_start),
@@ -41,6 +44,26 @@ impl Plugin for FleetPlugin {
             ),
         );
     }
+}
+
+fn muster(
+    data: Res<GameData>,
+    clock: Res<SimClock>,
+    galaxy: Res<Galaxy>,
+    diplomacy: Res<Diplomacy>,
+    mut fleets: ResMut<Fleets>,
+    mut battles: ResMut<Battles>,
+    mut chronicle: ResMut<Chronicle>,
+) {
+    muster_battles(
+        &galaxy,
+        &mut fleets,
+        &mut battles,
+        &diplomacy,
+        &mut chronicle,
+        &data,
+        clock.tick,
+    );
 }
 
 fn movement(
@@ -149,6 +172,6 @@ fn combat(
         clock.tick,
     );
     if day_start {
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
+        update_blockades(&galaxy, &mut fleets, &diplomacy, &battles);
     }
 }

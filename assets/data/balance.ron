@@ -253,11 +253,14 @@
         // Kriegsmüdigkeit (battle.morale_per_weariness) und um diesen Abzug bei vollem
         // Soldrückstand.
         morale_per_arrears: 30.0,
-        // Wer das Feld nicht hält, weicht in ein Nachbarsystem aus und sammelt sich so
-        // viele Tage, der Marsch dorthin eingerechnet. Solange beginnt die Flotte kein
-        // Gefecht, tritt keinem bei und zählt nicht für Blockade, Kaperfahrt und Geleit.
-        // Dasselbe gilt nach einem Gefecht ohne Entscheidung (Patt oder Zeitgrenze) für
-        // alle, die nicht im eigenen System stehen: Dort bleibt nur, wer zu Hause ist.
+        // Wer das Feld einem Gegner überlässt, weicht aus und sammelt sich so viele Tage,
+        // der Marsch eingerechnet. Solange beginnt die Flotte kein Gefecht, tritt keinem
+        // bei, wird nicht angegriffen, zählt nicht für Blockade, Kaperfahrt, Geleit und
+        // Orbitverteidigung und nimmt keinen Marschbefehl an. Dasselbe gilt nach einem
+        // Gefecht ohne Entscheidung (Patt oder Zeitgrenze) für alle, die nicht im eigenen
+        // System stehen, und für eine Flotte, die das Feld geräumt hat und hinter den
+        // Linien ihrer Seite im System bleibt. Frühestens nach dieser Frist stehen
+        // dieselben Gegner einander wieder gegenüber.
         regroup_days: 30,
         // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
         // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.

@@ -249,22 +249,42 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 - **Verlauf.** Gerechnet wird im taktischen Rechner (`sim::battle`), ein Schritt je Takt,
   zwei Sekunden Gefechtszeit je Kalendertag. Ein Gefecht zweier Startflotten dauert rund
   sieben Wochen. Solange es läuft, nimmt eine Flotte keinen Marschbefehl an; neue
-  Aufstellung und Doktrin gelten sofort, und der Rückzug lässt sich befehlen. Ein
-  Friedensschluss beendet das Gefecht.
+  Aufstellung und Doktrin gelten sofort, und der Rückzug lässt sich befehlen. Jeden Morgen
+  steht in den Flotten, was das Gefecht bisher gekostet hat: Zerstörte Schiffe sind fort
+  (auch aus Sold und Stärke), die übrigen tragen ihre Schäden.
+- **Ausscheiden.** Eine Flotte verlässt ein Gefecht am Morgen, nachdem sie keinen Gegner
+  mehr auf dem Feld hat (etwa nach einem Friedensschluss) oder kein eigenes Schiff mehr,
+  auch wenn andere weiterkämpfen. Ohne Gegner bleibt sie einsatzbereit im System. Führt
+  niemand unter den Beteiligten mehr Krieg, endet das Gefecht als Ganzes.
 - **Ende.** Was aus jedem Schiff geworden ist, sagt der Rechner: verloren (zerstört, oder
   treibend dem Gegner überlassen), entkommen oder noch auf dem Feld. Die Überlebenden
   behalten ihre Schäden und was von Munition und Treibstoff übrig ist; überlebende
-  Bordjäger kehren auf Träger ihrer Flotte zurück, soweit die Hangars reichen. Ist das
-  Gefecht entschieden, bleibt, wer noch Schiffe auf dem Feld hat. Wessen Schiffe alle
-  entkommen sind, weicht in ein Nachbarsystem aus (woher er kam, sonst eigenes Gebiet,
-  sonst wo kein Feind steht) und sammelt sich dort: So lange beginnt die Flotte kein
-  Gefecht, wird nicht angegriffen und zählt weder für Blockade noch für Kaperfahrt oder
-  Geleitschutz. Gegner aus demselben Gefecht weichen nie in dasselbe System aus.
+  Bordjäger kehren auf Träger ihrer Flotte zurück, soweit die Hangars reichen. Wer das
+  Feld hält, entscheidet sich je Seite, nicht je Flotte; zur Seite einer Flotte gehört,
+  wer mit ihr nicht im Krieg liegt. Wer noch Schiffe auf dem Feld hat, bleibt. Wer das
+  Feld einem Gegner überlassen hat, wurde geschlagen und weicht aus: in ein Nachbarsystem
+  (woher er kam, sonst eigenes Gebiet, sonst wo kein Feind steht). Wer das Feld geräumt
+  hat, während die eigene Seite es hält oder noch darum kämpft, bleibt im System und
+  sammelt sich hinter den eigenen Linien; verliert die Seite das Feld doch noch, zieht er
+  mit ab. Gegner aus demselben Gefecht weichen nie in dasselbe System aus, notfalls
+  führt der Weg über mehrere Sprünge.
+- **Sammelfrist.** Wer ausweicht oder hinter den Linien bleibt, sammelt sich
+  `regroup_days` lang und ist so lange aus dem Spiel: Die Flotte beginnt kein Gefecht,
+  wird nicht angegriffen, zählt weder für Blockade noch für Kaperfahrt, Geleitschutz oder
+  die Verteidigung eines Orbits und nimmt keinen Marschbefehl an; ihren Abzug führt sie zu
+  Ende. Teilen entbindet keinen Teil davon, und eine Flotte, die sich sammelt, lässt sich
+  nicht mit einer einsatzbereiten vereinigen. Dieselben Gegner stehen einander deshalb
+  frühestens nach Ablauf der Frist wieder gegenüber, und nur, wenn dann eine Seite auf
+  die andere marschiert oder neben ihr gewartet hat.
 - **Ohne Entscheidung.** Kommt keine Seite gegen die andere an, lösen sich alle im Patt
   voneinander; ebenso endet ein Gefecht an der Zeitgrenze des Rechners. Dann hat niemand
   gewonnen und niemand eine Niederlage erlitten. Wer im eigenen System steht, bleibt
   dort; alle anderen weichen aus und sammeln sich. Dasselbe Gefecht beginnt also nicht
   am nächsten Morgen von vorn.
+- **Blockade und Gefecht.** Ein Gefecht ändert an einer Sperre erst etwas, wenn es
+  entschieden ist. Eine bestehende Sperre hält, solange die Blockadeflotte auf dem Feld
+  kämpft: Ein Entsatz muss sie schlagen, anzukommen und wieder abzudrehen öffnet das
+  System nicht. Ein verteidigter Orbit bleibt offen, solange die Verteidiger kämpfen.
 - **Folgen.** Verluste heben die Kriegsmüdigkeit im Verhältnis zum verlorenen Anteil an
   der ganzen Flotte, und mit ihr steigen Anleihezinsen und Unruhe in den Regionen. Eine
   schwere Niederlage drückt die Kurse aller Betriebe der Gemeinschaft. Was verschossen und
@@ -272,7 +292,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   Trümmerfeld, das über die Jahre verblasst. Die Gegner kennen die Technik des jeweils
   anderen danach besser.
 - **Werften.** Ein fertiges Schiff bleibt im Dock, solange feindliche Flotten im System
-  stehen und keine eigene es aufnehmen kann.
+  stehen und keine eigene, einsatzbereite es aufnehmen kann.
 
 ## Stand
 

@@ -1,6 +1,6 @@
 //! Tagesschritt auf der Karte: Marsch entlang der Routen und die Blockaderegel.
 
-use super::{Fleets, Stance, map_speed};
+use super::{Battles, Fleet, Fleets, Stance, map_speed};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
@@ -74,21 +74,40 @@ pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, research: &Research, da
 
 /// Ein System ist blockiert, wenn eine feindliche Flotte im Blockadeauftrag dort steht
 /// und der Besitzer keine eigene Flotte im Orbit hat: Erst die orbitale Überlegenheit,
-/// dann die Sperre. Wer im Gefecht steht oder sich nach einem Rückzug sammelt, sperrt
-/// nicht; wer sich sammelt, hält auch keinen Orbit.
-pub fn update_blockades(galaxy: &Galaxy, fleets: &mut Fleets, diplomacy: &Diplomacy) {
+/// dann die Sperre. Wer sich nach einem Rückzug sammelt, sperrt nicht und hält keinen
+/// Orbit.
+///
+/// Ein Gefecht ändert daran erst etwas, wenn es entschieden ist. Bis dahin gilt, was vor
+/// ihm galt: Eine bestehende Sperre hält, solange die Blockadeflotte auf dem Feld kämpft,
+/// und fällt erst, wenn sie es räumt. Ein Entsatz muss sie also schlagen; anzukommen und
+/// wieder abzudrehen öffnet das System nicht. Umgekehrt bleibt ein verteidigter Orbit
+/// offen, solange die Verteidiger kämpfen. Wer im Gefecht nur noch flieht oder treibt,
+/// zählt für keine Seite.
+pub fn update_blockades(
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    diplomacy: &Diplomacy,
+    battles: &Battles,
+) {
+    // Steht die Flotte für ihre Aufgabe bereit: einsatzbereit, oder im Gefecht und noch
+    // kämpfend?
+    let stands = |fleet: &Fleet| {
+        !fleet.is_regrouping() && (!fleet.in_battle || battles.is_fighting(fleet.id))
+    };
     let mut blockaded = Vec::new();
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
             continue;
         };
-        let defended = fleets
-            .docked_in(system.id)
-            .any(|fleet| fleet.owner == owner && !fleet.is_regrouping());
+        let was_blockaded = fleets.is_blockaded(system.id);
+        // Wer in eine bestehende Sperre hinein angreift, hebt sie erst mit dem Sieg auf.
+        let defended = fleets.docked_in(system.id).any(|fleet| {
+            fleet.owner == owner && stands(fleet) && !(was_blockaded && fleet.in_battle)
+        });
         let besieged = fleets.docked_in(system.id).any(|fleet| {
-            fleet.is_ready()
-                && fleet.stance == Stance::Blockade
+            fleet.stance == Stance::Blockade
                 && diplomacy.at_war(fleet.owner, owner)
+                && stands(fleet)
         });
         if besieged && !defended {
             blockaded.push(system.id);
@@ -270,7 +289,7 @@ mod tests {
         travel(&galaxy, &mut fleets, &data, FleetId(0));
 
         // Ohne Krieg keine Blockade.
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
+        update_blockades(&galaxy, &mut fleets, &diplomacy, &Battles::default());
         assert!(!fleets.is_blockaded(target));
 
         // Im Krieg verhindert die Heimatflotte die Sperre, solange sie im Orbit steht.
@@ -283,26 +302,62 @@ mod tests {
             PolityId(1),
         )
         .unwrap();
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
+        update_blockades(&galaxy, &mut fleets, &diplomacy, &Battles::default());
         assert!(!fleets.is_blockaded(target));
 
         // Zieht sie ab, steht die Sperre.
         let away = galaxy.neighbors(target)[0].system;
         order_move(&galaxy, &mut fleets, PolityId(1), FleetId(1), away).unwrap();
         travel(&galaxy, &mut fleets, &data, FleetId(1));
-        update_blockades(&galaxy, &mut fleets, &diplomacy);
+        update_blockades(&galaxy, &mut fleets, &diplomacy, &Battles::default());
         assert!(fleets.is_blockaded(target));
     }
 
+    /// Stellt die genannten Flotten als Parteien eines Gefechts in `system` auf; alle sind
+    /// einander feind, wie es die Kriegslage sagt.
+    fn battle_of(
+        data: &GameData,
+        fleets: &mut Fleets,
+        diplomacy: &Diplomacy,
+        system: crate::ids::SystemId,
+        members: &[usize],
+    ) -> Battles {
+        use crate::battle::{Battle, CombatantSetup};
+        let mut battle = Battle::new(crate::ids::BattleId(0), system, 1);
+        for index in members {
+            let fleet = &mut fleets.list[*index];
+            fleet.system = system;
+            let setup = CombatantSetup {
+                fleet: Some(fleet.id),
+                ..CombatantSetup::new(fleet.owner, data)
+            };
+            battle.add_combatant(data, setup, &fleet.specs());
+            fleet.battle = Some(battle.id);
+            fleet.in_battle = true;
+        }
+        for a in 0..members.len() {
+            for b in 0..members.len() {
+                let hostile =
+                    diplomacy.at_war(fleets.list[members[a]].owner, fleets.list[members[b]].owner);
+                battle.set_hostile(a, b, hostile);
+            }
+        }
+        Battles {
+            active: vec![battle],
+            next_id: 1,
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn fleets_in_battle_or_regrouping_neither_blockade_nor_hold_an_orbit() {
+    fn whoever_regroups_neither_blockades_nor_holds_an_orbit() {
         let (_, galaxy, polities, mut fleets) = setup();
         let mut diplomacy = Diplomacy::default();
         diplomacy.wars.insert((PolityId(0), PolityId(1)));
         let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
         let away = galaxy.neighbors(target)[0].system;
         let blockaded = |fleets: &mut Fleets| {
-            update_blockades(&galaxy, fleets, &diplomacy);
+            update_blockades(&galaxy, fleets, &diplomacy, &Battles::default());
             fleets.is_blockaded(target)
         };
         // Der Verteidiger ist fort, der Angreifer liegt im Blockadeauftrag im System.
@@ -310,25 +365,88 @@ mod tests {
         fleets.list[0].system = target;
         fleets.list[0].stance = Stance::Blockade;
         assert!(blockaded(&mut fleets));
-
-        // Steht der Angreifer im Gefecht oder sammelt er sich, ist das System offen.
-        fleets.list[0].in_battle = true;
-        assert!(!blockaded(&mut fleets));
-        fleets.list[0].in_battle = false;
+        // Sammelt er sich, ist das System offen.
         fleets.list[0].regroup_until = Some(40);
         assert!(!blockaded(&mut fleets));
         fleets.list[0].regroup_until = None;
         assert!(blockaded(&mut fleets));
-
-        // Ein Verteidiger im Orbit verhindert die Sperre, auch wenn er gerade kämpft;
-        // einer, der sich nur sammelt, hält den Orbit nicht.
+        // Ein Verteidiger im Orbit verhindert die Sperre; einer, der sich nur sammelt,
+        // hält den Orbit nicht.
         fleets.list[1].system = target;
         assert!(!blockaded(&mut fleets));
-        fleets.list[1].in_battle = true;
-        assert!(!blockaded(&mut fleets));
-        fleets.list[1].in_battle = false;
         fleets.list[1].regroup_until = Some(40);
         assert!(blockaded(&mut fleets));
+    }
+
+    #[test]
+    fn a_battle_changes_a_blockade_only_once_it_is_decided() {
+        use crate::battle::ShipStatus;
+        let (data, galaxy, polities, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
+        let away = galaxy.neighbors(target)[0].system;
+        fleets.list[0].stance = Stance::Blockade;
+        let rout = |battles: &mut Battles, side: u16| {
+            for ship in &mut battles.active[0].ships {
+                if ship.side == side {
+                    ship.status = ShipStatus::Routing;
+                }
+            }
+        };
+
+        // Der Blockierer trifft auf einen verteidigten Orbit: Solange die Verteidiger
+        // kämpfen, bleibt das System offen.
+        let mut open = fleets.clone();
+        let mut battles = battle_of(&data, &mut open, &diplomacy, target, &[1, 0]);
+        update_blockades(&galaxy, &mut open, &diplomacy, &battles);
+        assert!(!open.is_blockaded(target));
+        assert!(battles.is_fighting(open.list[0].id) && battles.is_fighting(open.list[1].id));
+        // Fliehen die Verteidiger, halten sie den Orbit nicht mehr, und die Sperre steht.
+        rout(&mut battles, 0);
+        assert!(!battles.is_fighting(open.list[1].id));
+        update_blockades(&galaxy, &mut open, &diplomacy, &battles);
+        assert!(open.is_blockaded(target));
+
+        // Die Sperre steht schon; die Heimatflotte kehrt zurück und greift an. Anzukommen
+        // öffnet das System nicht: Die Sperre hält, solange der Blockierer kämpft.
+        let mut closed = fleets.clone();
+        closed.list[0].system = target;
+        closed.list[1].system = away;
+        update_blockades(&galaxy, &mut closed, &diplomacy, &Battles::default());
+        assert!(closed.is_blockaded(target));
+        let mut battles = battle_of(&data, &mut closed, &diplomacy, target, &[0, 1]);
+        for _ in 0..3 {
+            update_blockades(&galaxy, &mut closed, &diplomacy, &battles);
+            assert!(closed.is_blockaded(target), "der Entsatz muss erst siegen");
+        }
+        // Dreht der Entsatz wieder ab, ändert sich nichts.
+        let mut turned = battles.clone();
+        rout(&mut turned, 1);
+        update_blockades(&galaxy, &mut closed, &diplomacy, &turned);
+        assert!(closed.is_blockaded(target));
+        // Räumt der Blockierer das Feld, ist das System offen, und am Tag darauf hält die
+        // Heimatflotte den Orbit, auch wenn noch geschossen wird.
+        rout(&mut battles, 0);
+        update_blockades(&galaxy, &mut closed, &diplomacy, &battles);
+        assert!(!closed.is_blockaded(target));
+        update_blockades(&galaxy, &mut closed, &diplomacy, &battles);
+        assert!(!closed.is_blockaded(target));
+
+        // Ein Dritter, der nur mit dem Blockierer im Krieg liegt, greift ihn an: Auch dann
+        // hält die Sperre, bis der Blockierer das Feld räumt.
+        diplomacy.wars.insert((PolityId(0), PolityId(2)));
+        let mut third = fleets.clone();
+        third.list[0].system = target;
+        third.list[1].system = away;
+        update_blockades(&galaxy, &mut third, &diplomacy, &Battles::default());
+        assert!(third.is_blockaded(target));
+        let mut battles = battle_of(&data, &mut third, &diplomacy, target, &[0, 2]);
+        update_blockades(&galaxy, &mut third, &diplomacy, &battles);
+        assert!(third.is_blockaded(target));
+        rout(&mut battles, 0);
+        update_blockades(&galaxy, &mut third, &diplomacy, &battles);
+        assert!(!third.is_blockaded(target));
     }
 
     #[test]

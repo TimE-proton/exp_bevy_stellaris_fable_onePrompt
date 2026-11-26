@@ -30,8 +30,9 @@ mod supply;
 mod yard;
 
 pub use battles::{
-    BattleOutcome, BattleReport, Battles, Debris, SideReport, advance_battles, combat_modifiers,
-    combatant_setup, crew_morale, open_battles, order_retreat, relay_orders, retreat_target,
+    BattleOutcome, BattleReport, Battles, Debris, Departed, Departure, SideReport, advance_battles,
+    combat_modifiers, combatant_setup, crew_morale, muster_battles, open_battles, order_retreat,
+    relay_orders, retreat_target, withdrawal_route,
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
@@ -244,8 +245,9 @@ pub struct Fleet {
     #[serde(default)]
     pub came_from: Option<SystemId>,
     /// Tag, an dem die Flotte nach dem Abzug aus einem Gefecht wieder einsatzbereit ist.
-    /// Bis dahin sammelt sie sich: Sie beginnt kein Gefecht, tritt keinem bei und zählt
-    /// weder für Blockade noch für Kaperfahrt oder Geleitschutz.
+    /// Bis dahin sammelt sie sich: Sie beginnt kein Gefecht, tritt keinem bei, zählt weder
+    /// für Blockade noch für Kaperfahrt oder Geleitschutz und nimmt keinen Marschbefehl
+    /// an. Eine Route, die sie dabei trägt, ist ihr Abzug; den führt sie zu Ende.
     #[serde(default)]
     pub regroup_until: Option<u64>,
 }
@@ -613,6 +615,15 @@ pub fn order_move(
             fleet.name
         ));
     }
+    // Wer sich sammelt, führt seinen Abzug zu Ende und bleibt dann, wo er ist: Der Schutz
+    // der Sammelfrist gilt dem Abzug, nicht einer Flotte, die frei marschiert.
+    if let Some(until) = fleet.regroup_until {
+        return Err(format!(
+            "{} sammelt sich bis zum {} und nimmt so lange keinen Marschbefehl an",
+            fleet.name,
+            crate::clock::Date::from_day(until)
+        ));
+    }
     if !fleet.is_docked() {
         // Unterwegs gilt der neue Befehl ab dem nächsten System.
         let next = fleet.route[0];
@@ -694,17 +705,36 @@ pub fn merge_fleets(
         ready_to_reorganize(target)?;
         target.system
     };
+    let target_regrouping = fleets.list[into.index()].is_regrouping();
     let source = own_fleet(fleets, polity, from)?;
     ready_to_reorganize(source)?;
     if source.system != target_system {
         return Err("beide Flotten müssen im selben System liegen".into());
     }
+    // Die Sammelfrist lässt sich weder abstreifen noch übertragen: Eine Flotte, die sich
+    // sammelt, und eine einsatzbereite bleiben getrennt.
+    if source.is_regrouping() != target_regrouping {
+        let waiting = if target_regrouping {
+            fleets.list[into.index()].name.clone()
+        } else {
+            source.name.clone()
+        };
+        return Err(format!(
+            "{waiting} sammelt sich noch; vereinigen lassen sich nur Flotten, die beide \
+             einsatzbereit sind oder sich beide sammeln"
+        ));
+    }
     let ships = std::mem::take(&mut source.ships);
     let regrouping = source.regroup_until;
+    let route = std::mem::take(&mut source.route);
     let target = &mut fleets.list[into.index()];
     target.ships.extend(ships);
-    // Die Sammelfrist geht mit: Vereinigt ist die Flotte erst bereit, wenn es beide wären.
+    // Sammeln sich beide, gilt die längere Frist, und ein Abzug, der noch aussteht, bleibt
+    // befohlen.
     target.regroup_until = target.regroup_until.max(regrouping);
+    if target.route.is_empty() {
+        target.route = route;
+    }
     fleets.refresh(data);
     Ok(())
 }
@@ -743,6 +773,8 @@ pub fn split_fleet(
         parent.came_from,
         parent.regroup_until,
     );
+    // Im Dock mit einer Route: Der Marsch ist befohlen, aber noch nicht angetreten.
+    let route = parent.route.clone();
     // Die Schiffe behalten ihre Reihenfolge aus der alten Flotte.
     let (taken, kept): (Vec<Ship>, Vec<Ship>) = std::mem::take(&mut parent.ships)
         .into_iter()
@@ -754,9 +786,11 @@ pub fn split_fleet(
     created.stance = stance;
     created.formation = formation;
     created.doctrine = doctrine;
-    // Auch Herkunft und Sammelfrist gehen mit: Teilen macht keine Flotte kampfbereit.
+    // Auch Herkunft, Sammelfrist und der befohlene Weg gehen mit: Teilen macht keine
+    // Flotte kampfbereit und entbindet keinen Teil vom Abzug.
     created.came_from = came_from;
     created.regroup_until = regroup_until;
+    created.route = route;
     fleets.refresh(data);
     Ok(id)
 }
@@ -1081,33 +1115,67 @@ mod tests {
     }
 
     #[test]
-    fn the_regroup_period_survives_splitting_and_merging() {
-        let (data, _, polities, mut fleets) = setup();
+    fn the_regroup_period_can_neither_be_shed_nor_passed_on() {
+        let (data, galaxy, polities, mut fleets) = setup();
         let me = PolityId(0);
+        let home = fleets.list[0].system;
+        let exit = galaxy.neighbors(home)[0].system;
+        // Die Flotte hat ein Gefecht verloren: Sie sammelt sich, ihr Abzug ist befohlen.
         fleets.list[0].regroup_until = Some(50);
         fleets.list[0].came_from = Some(SystemId(3));
+        fleets.list[0].route = vec![exit];
         let part: Vec<ShipId> = fleets.list[0].ships[..2]
             .iter()
             .map(|ship| ship.id)
             .collect();
-        // Teilen macht keine Flotte kampfbereit: Auch der abgelöste Teil sammelt sich noch
-        // und weiß, woher er kam.
+        // Teilen macht keine Flotte kampfbereit und entbindet keinen Teil vom Abzug: Auch
+        // der abgelöste Teil sammelt sich, weiß, woher er kam, und räumt das System.
         let second = split_fleet(&data, &polities, &mut fleets, me, FleetId(0), &part).unwrap();
         let detached = &fleets.list[second.index()];
         assert_eq!(detached.regroup_until, Some(50));
         assert_eq!(detached.came_from, Some(SystemId(3)));
+        assert_eq!(detached.route, vec![exit]);
         assert!(!detached.is_ready() && detached.is_regrouping());
-        // Vereinigen ebenso wenig: Die längere Sammelfrist gilt für die ganze Flotte.
+        assert_eq!(fleets.list[0].route, vec![exit]);
+
+        // Kein Marschbefehl hebt den Abzug auf: weder der Halt im eigenen System noch ein
+        // anderes Ziel.
+        for to in [home, exit, galaxy.neighbors(home).last().unwrap().system] {
+            for fleet in [FleetId(0), second] {
+                let error = order_move(&galaxy, &mut fleets, me, fleet, to).unwrap_err();
+                assert!(error.contains("sammelt sich bis zum"), "{error}");
+                assert_eq!(fleets.list[fleet.index()].route, vec![exit]);
+            }
+        }
+
+        // Sammeln sich beide, lassen sie sich vereinigen: Es gilt die längere Frist, und
+        // der Abzug bleibt befohlen, gleich in welche Richtung vereinigt wird.
         fleets.list[0].regroup_until = Some(20);
+        fleets.list[0].route.clear();
         merge_fleets(&data, &mut fleets, me, second, FleetId(0)).unwrap();
         assert_eq!(fleets.list[0].regroup_until, Some(50));
+        assert_eq!(fleets.list[0].route, vec![exit]);
+        // Die aufgelöste Flotte trägt keine Frist mehr.
+        assert_eq!(fleets.list[second.index()].regroup_until, None);
+
+        // Eine einsatzbereite Flotte nimmt keine auf, die sich sammelt, und umgekehrt:
+        // Sonst wanderte der Schutz der Sammelfrist auf Schiffe, die nie abgezogen sind.
         let third = split_fleet(&data, &polities, &mut fleets, me, FleetId(0), &part).unwrap();
         fleets.list[0].regroup_until = None;
+        fleets.list[0].route.clear();
         assert!(fleets.list[0].is_ready());
+        for (from, into) in [(third, FleetId(0)), (FleetId(0), third)] {
+            let error = merge_fleets(&data, &mut fleets, me, from, into).unwrap_err();
+            assert!(error.contains("sammelt sich noch"), "{error}");
+        }
+        assert!(fleets.list[0].is_ready() && fleets.list[third.index()].is_regrouping());
+        assert_eq!(fleets.list[third.index()].ships.len(), 2);
+        // Ist die Frist abgelaufen, geht beides wieder.
+        fleets.list[third.index()].regroup_until = None;
+        fleets.list[third.index()].route.clear();
         merge_fleets(&data, &mut fleets, me, third, FleetId(0)).unwrap();
-        assert_eq!(fleets.list[0].regroup_until, Some(50));
-        // Die aufgelöste Flotte trägt keine Frist mehr.
-        assert_eq!(fleets.list[third.index()].regroup_until, None);
+        order_move(&galaxy, &mut fleets, me, FleetId(0), exit).unwrap();
+        assert_eq!(fleets.list[0].route, vec![exit]);
         assert_eq!(fleets.find_anomaly(&data), None);
     }
 
