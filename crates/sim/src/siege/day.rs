@@ -628,150 +628,10 @@ pub fn run_day(
     }
 }
 
-/// Von Hand gestellte Lagen für die Tests neben dem Code. Hier werden Tagesschritt und
-/// Eroberung selbst geprüft; durch Befehle gespielte Partien stehen in `tests/siege.rs`.
-#[cfg(test)]
-pub(super) mod testing {
-    use super::*;
-    use crate::siege::resolve_conquests;
-    use crate::state::{SimConfig, SimState};
-
-    pub const ME: PolityId = PolityId(0);
-    pub const FOE: PolityId = PolityId(1);
-
-    /// Eine neue Partie, in der die Flotte der Gemeinschaft 0 im Krieg über einer Welt der
-    /// Gemeinschaft 1 liegt und ihr zugeordnet ist; deren Flotte steht ein System weiter.
-    pub struct Scene {
-        pub data: GameData,
-        pub state: SimState,
-        pub planet: PlanetId,
-        pub system: SystemId,
-        pub day: u64,
-    }
-
-    impl Scene {
-        /// Belagert wird die Hauptwelt der Gemeinschaft 1.
-        pub fn new() -> Self {
-            let data = GameData::load_workspace().unwrap();
-            let mut state = SimState::generate(
-                &data,
-                SimConfig {
-                    seed: 9,
-                    player: None,
-                },
-            );
-            state.galaxy.rebuild_index();
-            let planet = state.polities.get(FOE).capital.unwrap();
-            let system = state.galaxy.planet(planet).system;
-            state.fleets.list[1].system = state.galaxy.neighbors(system)[0].system;
-            state.fleets.list[0].system = system;
-            state.diplomacy.wars.insert((ME, FOE));
-            state.sieges.assign.insert(FleetId(0), planet);
-            Self {
-                data,
-                state,
-                planet,
-                system,
-                day: 0,
-            }
-        }
-
-        /// Belagert wird eine Kolonie, die die Gemeinschaft 1 eben gegründet hat.
-        pub fn colony() -> Self {
-            let mut scene = Self::new();
-            let state = &mut scene.state;
-            let treasury = state.economy.treasury(FOE);
-            let colony = crate::polity::claimable_planets(
-                &state.galaxy,
-                &state.polities,
-                &scene.data.balance.colonization,
-                treasury,
-                FOE,
-                0,
-            )[0];
-            crate::polity::claim_planet(
-                &mut state.galaxy,
-                &mut state.polities,
-                &mut state.economy,
-                &mut state.chronicle,
-                &scene.data,
-                FOE,
-                colony,
-                0,
-            )
-            .unwrap();
-            // Die Firmen der Kolonie gehen an die Börse, wie am Monatsende.
-            let capitals: Vec<_> = state.polities.list.iter().map(|p| p.capital).collect();
-            crate::finance::found_missing_issuers(
-                &scene.data,
-                &state.galaxy,
-                &state.economy,
-                &state.logistics,
-                &capitals,
-                &mut state.finance,
-            );
-            let system = state.galaxy.planet(colony).system;
-            state.fleets.list[0].system = system;
-            // Die Flotte der Gemeinschaft 1 steht weder dort noch im Weg.
-            let elsewhere = state.polities.get(PolityId(2)).capital.unwrap();
-            state.fleets.list[1].system = state.galaxy.planet(elsewhere).system;
-            state.sieges.assign.insert(FleetId(0), colony);
-            scene.planet = colony;
-            scene.system = system;
-            scene
-        }
-
-        /// Rechnet den nächsten Tag: den Tagesschritt und danach die fälligen Besitzwechsel.
-        pub fn day(&mut self) {
-            self.day += 1;
-            let state = &mut self.state;
-            let mut orbit = Orbit::new(&mut state.fleets, &state.research);
-            run_day(
-                &self.data,
-                &mut state.galaxy,
-                &state.polities,
-                &state.diplomacy,
-                &mut state.economy,
-                &mut state.finance,
-                &state.logistics,
-                &mut state.sieges,
-                &mut orbit,
-                &mut state.chronicle,
-                self.day * TICKS_PER_DAY,
-            );
-            resolve_conquests(
-                &self.data,
-                &mut state.galaxy,
-                &state.polities,
-                &state.diplomacy,
-                &mut state.economy,
-                &mut state.finance,
-                &state.logistics,
-                &mut state.sieges,
-                &mut orbit,
-                &mut state.chronicle,
-                self.day * TICKS_PER_DAY,
-            );
-        }
-
-        pub fn siege(&self) -> &Siege {
-            self.state.sieges.siege(self.planet).expect("Belagerung")
-        }
-
-        /// Alles Geld der Partie.
-        pub fn money(&self) -> i64 {
-            self.state.economy.money_in_accounts()
-                + self.state.logistics.money()
-                + self.state.finance.money()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::testing::{FOE, ME, Scene};
     use super::*;
-    use crate::fleet::{Stance, update_blockades};
+    use crate::siege::orbit::testing::{FOE, ME, Scene};
     use crate::siege::{Embarked, Phase, occupation_force};
 
     #[test]
@@ -833,20 +693,14 @@ mod tests {
         assert!(scene.state.economy.treasury(FOE) < treasury);
         assert_eq!(scene.money(), money);
         // Kein Feuer, also weder Rumpfschaden noch Munition; die Flotte verbraucht Treibstoff.
-        let fleet = &scene.state.fleets.list[0];
+        let ships = scene.ships(0);
         assert!(
-            fleet
-                .ships
+            ships
                 .iter()
                 .all(|ship| ship.hull == 1.0 && ship.ammo == 1.0)
         );
         let fuel = 1.0 - balance.station_fuel as f32;
-        assert!(
-            fleet
-                .ships
-                .iter()
-                .all(|ship| (ship.fuel - fuel).abs() < 1e-6)
-        );
+        assert!(ships.iter().all(|ship| (ship.fuel - fuel).abs() < 1e-6));
         assert_eq!(
             scene.state.sieges.find_anomaly(state.galaxy.planets.len()),
             None
@@ -862,8 +716,8 @@ mod tests {
         let militia = scene.state.sieges.defense(scene.planet).militia;
         let depot = scene.state.sieges.defense(scene.planet).depot;
         // Die Flotte des Verteidigers kehrt zurück: keine Orbitalhoheit mehr.
-        let away = scene.state.fleets.list[1].system;
-        scene.state.fleets.list[1].system = scene.system;
+        let away = scene.fleet_system(1);
+        scene.place(1, scene.system);
         scene.day();
         assert!(scene.state.sieges.siege(scene.planet).is_none());
         assert!(!scene.state.finance.region(scene.planet).besieged);
@@ -886,13 +740,13 @@ mod tests {
             .count();
         assert_eq!(lifted, 1);
         // Zieht der Entsatz ab, beginnt die Belagerung von vorn.
-        scene.state.fleets.list[1].system = away;
+        scene.place(1, away);
         scene.day();
         assert_eq!(scene.siege().started_day, 4);
         assert_eq!(scene.state.sieges.stats.begun, 2);
 
         // Verlässt der Belagerer das System, fällt seine Zuordnung, und die Belagerung endet.
-        scene.state.fleets.list[0].system = away;
+        scene.place(0, away);
         scene.day();
         assert!(scene.state.sieges.assign.is_empty());
         assert!(scene.state.sieges.active.is_empty());
@@ -904,20 +758,19 @@ mod tests {
         let mut scene = Scene::new();
         let balance = scene.data.balance.siege.clone();
         scene.state.sieges.defense_mut(scene.planet).stations = 1.0;
-        scene.state.fleets.list[0].stance = Stance::Blockade;
+        scene.order_blockade(0);
         let depot = scene.state.sieges.defense(scene.planet).depot;
         let mut days = 0;
         while scene.state.sieges.defense(scene.planet).stations > 0.0 {
             // Die Flottenebene sperrt das System jeden Tag neu; die Station erhebt Einspruch.
-            let state = &mut scene.state;
-            update_blockades(&state.galaxy, &mut state.fleets, &state.diplomacy);
-            assert!(scene.state.fleets.is_blockaded(scene.system));
+            scene.blockades_of_the_fleet_layer();
+            assert!(scene.blockaded());
             scene.day();
             days += 1;
             assert!(days < 200, "die Station fällt nie");
             let defense = scene.state.sieges.defense(scene.planet);
             if defense.stations > 0.0 {
-                assert!(!scene.state.fleets.is_blockaded(scene.system));
+                assert!(!scene.blockaded());
                 assert_eq!(scene.siege().phase(defense), Phase::Approach);
                 // Nicht eingeschlossen: Die Vorräte bleiben voll.
                 assert_eq!(defense.depot, depot);
@@ -926,22 +779,21 @@ mod tests {
         // Eine Stufe hält etwa station_hp durch die Feuerkraft der Flotte in Tagen aus.
         assert!((10..=40).contains(&days), "{days} Tage");
         // Das Duell kostet Rumpf, die schweren Schiffe am meisten, und Munition.
-        let fleet = &scene.state.fleets.list[0];
-        assert!(fleet.alive && fleet.ships.len() == 6);
-        let (cruiser, corvette) = (&fleet.ships[0], &fleet.ships[5]);
+        let ships = scene.ships(0);
+        assert_eq!(ships.len(), 6);
+        let (cruiser, corvette) = (&ships[0], &ships[5]);
         assert!(cruiser.hull < 0.8 && corvette.hull > cruiser.hull);
         assert!((1.0 - cruiser.hull) >= 4.9 * (1.0 - corvette.hull));
         assert!(cruiser.ammo < 1.0 - 0.5 * days as f32 * balance.ammo[0] as f32);
-        assert_eq!(scene.state.fleets.find_anomaly(&scene.data), None);
+        assert_eq!(scene.fleet_anomaly(), None);
         // Danach ist der Planet eingeschlossen, und die Vorräte beginnen zu schwinden.
         scene.day();
         let defense = scene.state.sieges.defense(scene.planet);
         assert_eq!(scene.siege().phase(defense), Phase::Investment);
         assert!(defense.depot < depot);
-        let state = &mut scene.state;
-        update_blockades(&state.galaxy, &mut state.fleets, &state.diplomacy);
+        scene.blockades_of_the_fleet_layer();
         scene.day();
-        assert!(scene.state.fleets.is_blockaded(scene.system));
+        assert!(scene.blockaded());
     }
 
     #[test]
@@ -991,7 +843,7 @@ mod tests {
         // Solange der Besitzwechsel aussteht, ruht die Belagerung: kein zweites Urteil,
         // kein Verbrauch, und der Tagesbericht nennt den Grund.
         let (army, supply) = (siege.army, siege.army_supply);
-        let fuel = scene.state.fleets.list[0].min_fuel();
+        let fuel = scene.ships(0)[0].fuel;
         scene.day();
         scene.day();
         assert_eq!(scene.state.sieges.pending, vec![due]);
@@ -999,7 +851,7 @@ mod tests {
         assert_eq!((siege.army, siege.army_supply), (army, supply));
         assert!(siege.report.blocked.contains(Blocked::Handover));
         assert_eq!(siege.report.day, scene.day);
-        assert_eq!(scene.state.fleets.list[0].min_fuel(), fuel);
+        assert_eq!(scene.ships(0)[0].fuel, fuel);
         assert_eq!(scene.state.sieges.stats.conquests(), 0);
     }
 
@@ -1008,27 +860,12 @@ mod tests {
         let mut scene = Scene::new();
         scene.day();
         assert!(scene.state.sieges.siege(scene.planet).is_some());
-        let tidy_now = |scene: &mut Scene| {
-            let state = &mut scene.state;
-            let orbit = Orbit::new(&mut state.fleets, &state.research);
-            tidy(
-                &scene.data,
-                &state.galaxy,
-                &state.polities,
-                &state.diplomacy,
-                &mut state.finance,
-                &mut state.sieges,
-                &orbit,
-                &mut state.chronicle,
-                scene.day * TICKS_PER_DAY + 7,
-            );
-        };
         // Solange Krieg herrscht und der Verteidiger die Welt hält, bleibt alles stehen.
-        tidy_now(&mut scene);
+        scene.tidy_at_midday();
         assert!(scene.state.sieges.siege(scene.planet).is_some());
         // Frieden mitten am Tag: Die Belagerung endet im selben Takt.
         scene.state.diplomacy.wars.clear();
-        tidy_now(&mut scene);
+        scene.tidy_at_midday();
         assert!(scene.state.sieges.active.is_empty());
         assert!(!scene.state.finance.region(scene.planet).besieged);
         assert_eq!(scene.state.sieges.stats.lifted, 1);
@@ -1040,7 +877,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.day();
         scene.state.galaxy.planet_mut(scene.planet).owner = Some(PolityId(2));
-        tidy_now(&mut scene);
+        scene.tidy_at_midday();
         assert!(scene.state.sieges.active.is_empty());
         assert_eq!(scene.state.sieges.stats.lifted, 1);
     }

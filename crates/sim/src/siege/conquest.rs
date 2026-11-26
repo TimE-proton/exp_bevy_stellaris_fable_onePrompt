@@ -279,7 +279,7 @@ mod tests {
     use super::*;
     use crate::data::Sector;
     use crate::ids::FleetId;
-    use crate::siege::day::testing::{FOE, ME, Scene};
+    use crate::siege::orbit::testing::{FOE, ME, Scene};
     use crate::siege::{Embarked, occupation_force};
 
     /// Lässt die Belagerung laufen, bis der Planet den Besitzer wechselt, und gibt die
@@ -417,11 +417,10 @@ mod tests {
         until_it_falls(&mut scene, ME);
         assert_eq!(scene.state.sieges.defense(planet).occupied_from, Some(FOE));
         // Der Eroberer zieht ab; die Gemeinschaft 1 kommt mit Truppen zurück.
-        let state = &mut scene.state;
-        let home = state.polities.get(ME).capital.unwrap();
-        state.fleets.list[0].system = state.galaxy.planet(home).system;
-        state.fleets.list[1].system = scene.system;
-        state.sieges.assign.insert(FleetId(1), planet);
+        let home = scene.state.polities.get(ME).capital.unwrap();
+        scene.place(0, scene.state.galaxy.planet(home).system);
+        scene.place(1, scene.system);
+        scene.state.sieges.assign.insert(FleetId(1), planet);
         embark(&mut scene, FleetId(1), 5.0);
         until_it_falls(&mut scene, FOE);
         let defense = scene.state.sieges.defense(planet);

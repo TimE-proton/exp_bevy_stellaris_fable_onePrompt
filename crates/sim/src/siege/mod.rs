@@ -1153,8 +1153,8 @@ mod tests {
     /// fallen der Prüfung auf; ein stimmiger Zustand nicht.
     #[test]
     fn records_out_of_step_with_the_world_are_reported() {
-        let mut scene = day::testing::Scene::colony();
-        let (me, foe) = (day::testing::ME, day::testing::FOE);
+        let mut scene = orbit::testing::Scene::colony();
+        let (me, foe) = (orbit::testing::ME, orbit::testing::FOE);
         scene.state.sieges.embarked.insert(
             FleetId(0),
             Embarked {
@@ -1203,7 +1203,7 @@ mod tests {
         assert_eq!(verdict(&state), Ok(()));
         // Zuordnungen zeigen auf bestehende Flotten, Truppen haben Platz an Bord.
         let mut state = scene.state.clone();
-        state.fleets.list[0].alive = false;
+        orbit::testing::disband(&mut state, 0);
         assert!(verdict(&state).unwrap_err().contains("besteht"));
         let mut state = scene.state.clone();
         state.sieges.assign.clear();

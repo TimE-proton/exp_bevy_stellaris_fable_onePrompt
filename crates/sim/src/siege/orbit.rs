@@ -78,22 +78,28 @@ pub struct Toll {
 }
 
 /// Feuerkraft eines Schiffs gegen Stationen und Boden: die Leistung seiner Waffen ohne
-/// Punktverteidigung, gewichtet mit dem Zustand von Rumpf und Waffe. Waffen, die Munition
-/// verschießen, schweigen mit leerem Magazin.
+/// Punktverteidigung, gewichtet mit dem Zustand des Schiffs, wie ihn die Flottenebene
+/// rechnet (Rumpf, gemindert um ausgefallene Module). Waffen, die Munition verschießen,
+/// schweigen mit leerem Magazin.
 fn firepower(data: &GameData, ship: &Ship) -> f64 {
-    let design = &data.designs[ship.design as usize];
-    let mut power = 0.0;
-    for (slot, mounted) in design.modules.iter().enumerate() {
-        let Some(weapon) = data.modules[mounted.module_id as usize].weapon() else {
-            continue;
-        };
-        if weapon.kind == WeaponKind::PointDefense || (weapon.ammo > 0.0 && ship.ammo <= 0.0) {
-            continue;
-        }
-        let condition = ship.modules.get(slot).copied().unwrap_or(1.0);
-        power += weapon.dps() as f64 * condition as f64;
-    }
-    ship.hull as f64 * power
+    let power: f64 = data.designs[ship.design as usize]
+        .modules
+        .iter()
+        .filter_map(|mounted| data.modules[mounted.module_id as usize].weapon())
+        .filter(|weapon| weapon.kind != WeaponKind::PointDefense)
+        .filter(|weapon| weapon.ammo <= 0.0 || ship.ammo > 0.0)
+        .map(|weapon| weapon.dps() as f64)
+        .sum();
+    ship.condition(data) as f64 * power
+}
+
+/// Fassungsvermögen der Magazine einer Flotte.
+fn magazines_of(data: &GameData, fleet: &Fleet) -> f64 {
+    fleet
+        .ships
+        .iter()
+        .map(|ship| data.designs[ship.design as usize].stats.ammo as f64)
+        .sum()
 }
 
 /// Rumpf, Schild und Panzerung eines Entwurfs unter der Technik seiner Gemeinschaft.
@@ -282,13 +288,15 @@ impl<'a> Orbit<'a> {
         for id in &fleets {
             let fleet = &self.fleets.list[id.index()];
             for ship in &fleet.ships {
-                let capacity = data.designs[ship.design as usize].stats.ammo as f64;
-                rounds += ship.ammo as f64 * capacity;
-                magazines += capacity;
                 squadron.view.firepower += firepower(data, ship);
                 squadron.toughness += balance.gun_weight[class_of(data, ship).index()]
                     * toughness(data, &effects, ship);
             }
+            // Füllung der Magazine, wie die Flotte sie selbst nennt, gewichtet mit dem
+            // Fassungsvermögen.
+            let capacity = magazines_of(data, fleet);
+            rounds += fleet.supply(data).0 as f64 * capacity;
+            magazines += capacity;
             squadron.ships += fleet.ships.len();
             squadron.fuel = squadron.fuel.max(fleet.min_fuel() as f64);
             squadron.berths += berths_of(data, fleet);
@@ -456,6 +464,222 @@ pub(super) fn check(world: &World) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Von Hand gestellte Lagen für die Tests des Moduls. Sie prüfen Tagesschritt und
+/// Eroberung selbst; durch Befehle gespielte Partien stehen in `tests/siege.rs`. Was die
+/// Tests an Flotten stellen und lesen, läuft über diese Hilfen: Auch dort kennt nur diese
+/// Datei die Flottenebene.
+#[cfg(test)]
+pub(super) mod testing {
+    use super::*;
+    use crate::clock::TICKS_PER_DAY;
+    use crate::fleet::Stance;
+    use crate::siege::{Siege, resolve_conquests, run_day, tidy};
+    use crate::state::{SimConfig, SimState};
+
+    pub const ME: PolityId = PolityId(0);
+    pub const FOE: PolityId = PolityId(1);
+
+    /// Ein Schiff, soweit die Tests es prüfen.
+    pub struct ShipState {
+        pub hull: f32,
+        pub ammo: f32,
+        pub fuel: f32,
+    }
+
+    /// Löst eine Flotte auf, ohne dass die Belagerung davon erfährt.
+    pub fn disband(state: &mut SimState, fleet: usize) {
+        state.fleets.list[fleet].alive = false;
+    }
+
+    /// Eine neue Partie, in der die Flotte der Gemeinschaft 0 im Krieg über einer Welt der
+    /// Gemeinschaft 1 liegt und ihr zugeordnet ist; deren Flotte steht ein System weiter.
+    pub struct Scene {
+        pub data: GameData,
+        pub state: SimState,
+        pub planet: PlanetId,
+        pub system: SystemId,
+        pub day: u64,
+    }
+
+    impl Scene {
+        /// Belagert wird die Hauptwelt der Gemeinschaft 1.
+        pub fn new() -> Self {
+            let data = GameData::load_workspace().unwrap();
+            let mut state = SimState::generate(
+                &data,
+                SimConfig {
+                    seed: 9,
+                    player: None,
+                },
+            );
+            state.galaxy.rebuild_index();
+            let planet = state.polities.get(FOE).capital.unwrap();
+            let system = state.galaxy.planet(planet).system;
+            state.fleets.list[1].system = state.galaxy.neighbors(system)[0].system;
+            state.fleets.list[0].system = system;
+            state.diplomacy.wars.insert((ME, FOE));
+            state.sieges.assign.insert(FleetId(0), planet);
+            Self {
+                data,
+                state,
+                planet,
+                system,
+                day: 0,
+            }
+        }
+
+        /// Belagert wird eine Kolonie, die die Gemeinschaft 1 eben gegründet hat.
+        pub fn colony() -> Self {
+            let mut scene = Self::new();
+            let state = &mut scene.state;
+            let treasury = state.economy.treasury(FOE);
+            let colony = crate::polity::claimable_planets(
+                &state.galaxy,
+                &state.polities,
+                &scene.data.balance.colonization,
+                treasury,
+                FOE,
+                0,
+            )[0];
+            crate::polity::claim_planet(
+                &mut state.galaxy,
+                &mut state.polities,
+                &mut state.economy,
+                &mut state.chronicle,
+                &scene.data,
+                FOE,
+                colony,
+                0,
+            )
+            .unwrap();
+            // Die Firmen der Kolonie gehen an die Börse, wie am Monatsende.
+            let capitals: Vec<_> = state.polities.list.iter().map(|p| p.capital).collect();
+            crate::finance::found_missing_issuers(
+                &scene.data,
+                &state.galaxy,
+                &state.economy,
+                &state.logistics,
+                &capitals,
+                &mut state.finance,
+            );
+            let system = state.galaxy.planet(colony).system;
+            state.fleets.list[0].system = system;
+            // Die Flotte der Gemeinschaft 1 steht weder dort noch im Weg.
+            let elsewhere = state.polities.get(PolityId(2)).capital.unwrap();
+            state.fleets.list[1].system = state.galaxy.planet(elsewhere).system;
+            state.sieges.assign.insert(FleetId(0), colony);
+            scene.planet = colony;
+            scene.system = system;
+            scene
+        }
+
+        /// Rechnet den nächsten Tag: den Tagesschritt und danach die fälligen Besitzwechsel.
+        pub fn day(&mut self) {
+            self.day += 1;
+            let state = &mut self.state;
+            let mut orbit = Orbit::new(&mut state.fleets, &state.research);
+            run_day(
+                &self.data,
+                &mut state.galaxy,
+                &state.polities,
+                &state.diplomacy,
+                &mut state.economy,
+                &mut state.finance,
+                &state.logistics,
+                &mut state.sieges,
+                &mut orbit,
+                &mut state.chronicle,
+                self.day * TICKS_PER_DAY,
+            );
+            resolve_conquests(
+                &self.data,
+                &mut state.galaxy,
+                &state.polities,
+                &state.diplomacy,
+                &mut state.economy,
+                &mut state.finance,
+                &state.logistics,
+                &mut state.sieges,
+                &mut orbit,
+                &mut state.chronicle,
+                self.day * TICKS_PER_DAY,
+            );
+        }
+
+        /// Der Schritt, der in jedem Takt läuft, mitten im laufenden Tag.
+        pub fn tidy_at_midday(&mut self) {
+            let state = &mut self.state;
+            let orbit = Orbit::new(&mut state.fleets, &state.research);
+            tidy(
+                &self.data,
+                &state.galaxy,
+                &state.polities,
+                &state.diplomacy,
+                &mut state.finance,
+                &mut state.sieges,
+                &orbit,
+                &mut state.chronicle,
+                self.day * TICKS_PER_DAY + TICKS_PER_DAY / 2,
+            );
+        }
+
+        pub fn siege(&self) -> &Siege {
+            self.state.sieges.siege(self.planet).expect("Belagerung")
+        }
+
+        /// Alles Geld der Partie.
+        pub fn money(&self) -> i64 {
+            self.state.economy.money_in_accounts()
+                + self.state.logistics.money()
+                + self.state.finance.money()
+        }
+
+        /// System, in dem eine Flotte liegt.
+        pub fn fleet_system(&self, fleet: usize) -> SystemId {
+            self.state.fleets.list[fleet].system
+        }
+
+        /// Versetzt eine Flotte in ein System.
+        pub fn place(&mut self, fleet: usize, system: SystemId) {
+            self.state.fleets.list[fleet].system = system;
+        }
+
+        pub fn ships(&self, fleet: usize) -> Vec<ShipState> {
+            self.state.fleets.list[fleet]
+                .ships
+                .iter()
+                .map(|ship| ShipState {
+                    hull: ship.hull,
+                    ammo: ship.ammo,
+                    fuel: ship.fuel,
+                })
+                .collect()
+        }
+
+        /// Gibt einer Flotte den Blockadeauftrag.
+        pub fn order_blockade(&mut self, fleet: usize) {
+            self.state.fleets.list[fleet].stance = Stance::Blockade;
+        }
+
+        /// Bestimmt die Blockaden, wie es die Flottenebene jeden Tag vor der Belagerung
+        /// tut: ohne den Einspruch der Stationen.
+        pub fn blockades_of_the_fleet_layer(&mut self) {
+            let state = &mut self.state;
+            update_blockades(&state.galaxy, &mut state.fleets, &state.diplomacy);
+        }
+
+        /// Ist das System des belagerten Planeten gesperrt?
+        pub fn blockaded(&self) -> bool {
+            self.state.fleets.is_blockaded(self.system)
+        }
+
+        /// Erste Auffälligkeit, die die Flottenebene an ihren Flotten findet.
+        pub fn fleet_anomaly(&self) -> Option<String> {
+            self.state.fleets.find_anomaly(&self.data)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -627,18 +851,16 @@ mod tests {
             ship.ammo = 1.0;
         }
 
-        // Eine zerstörte Waffe feuert nicht: die erste Kanone des Kreuzers.
+        // Ausgefallene Module mindern die Feuerkraft, wie die Flottenebene den Zustand
+        // eines Schiffs rechnet: Sind alle Module des Kreuzers zerstört, bleibt der Anteil
+        // seines Kampfwerts, der am Rumpf hängt.
         let cruiser = scene.design("speer");
-        let slots = &scene.data.designs[cruiser as usize].modules;
-        let gun = slots
-            .iter()
-            .position(|slot| scene.data.modules[slot.module_id as usize].key == "kanone")
-            .unwrap();
-        let mut condition = vec![1.0; slots.len()];
-        condition[gun] = 0.0;
-        scene.fleets.list[0].ships[0].modules = condition;
+        let slots = scene.data.designs[cruiser as usize].modules.len();
+        scene.fleets.list[0].ships[0].modules = vec![0.0; slots];
         let crippled = scene.squadron().view.firepower;
-        assert!((full - crippled - dps(&scene.data, "kanone")).abs() < 1e-3);
+        let weight = scene.data.balance.military.module_weight as f64;
+        assert!(weight > 0.0 && weight < 1.0);
+        assert!((full - crippled - weight * (cruiser_guns + cruiser_laser)).abs() < 1e-3);
     }
 
     #[test]
