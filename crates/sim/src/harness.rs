@@ -638,11 +638,12 @@ impl ScriptedEvent {
     }
 }
 
-/// Kriege, Bestellungen und Flottenprogramme nach Drehbuch. Solange keine KI Krieg führt
-/// und rüstet, lassen sich Gefechte, Blockaden, Verluste, Nachbau und ihre Folgen für
-/// Märkte und Staatskassen nur so in ganzen Partien ansehen und prüfen. Das Drehbuch stellt
-/// gewöhnliche Befehle ein, wie sie auch ein Spieler gäbe; abgelehnte stehen im
-/// Befehlsprotokoll.
+/// Kriege, Bestellungen und Flottenprogramme nach Drehbuch. Ob Krieg herrscht, entscheidet
+/// noch keine KI: Gefechte, Blockaden, Verluste, Nachbau und ihre Folgen für Märkte und
+/// Staatskassen lassen sich nur so in ganzen Partien ansehen und prüfen. Das Drehbuch
+/// stellt gewöhnliche Befehle ein, wie sie auch ein Spieler gäbe; abgelehnte stehen im
+/// Befehlsprotokoll. Rüstung und Flotten führt dabei die KI, es sei denn, das Drehbuch
+/// lässt ihre militärische Führung ruhen ([`ScriptedAct::Mode`]) und führt selbst.
 #[derive(Clone, Debug, Default)]
 pub struct WarScript {
     events: Vec<ScriptedEvent>,

@@ -13,8 +13,9 @@ use sim::ids::PolityId;
 #[derive(Args, Clone, Default)]
 pub struct ScriptArgs {
     /// Krieg nach Drehbuch, beliebig oft: Zu Beginn des Jahres erklärt Gemeinschaft A
-    /// (Nummer ab 0) der Gemeinschaft B den Krieg und schickt ihre Flotten im
-    /// Blockadeauftrag in deren Heimatsystem.
+    /// (Nummer ab 0) der Gemeinschaft B den Krieg. Die Flotten führt die KI; ruht ihre
+    /// militärische Führung (`--ai`), schickt das Drehbuch die Flotten von A im
+    /// Blockadeauftrag in das Heimatsystem von B.
     #[arg(long, value_name = "JAHR:A:B", value_parser = parse_war)]
     pub war: Vec<ScriptedEvent>,
     /// Frieden nach Drehbuch, beliebig oft: Zu Beginn des Jahres schließt A mit B Frieden.

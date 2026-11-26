@@ -45,11 +45,21 @@ cargo headless run --seed 7 --years 30 --war 10:0:1 --war 12:2:1 --peace 20:0:1 
     --navy 11:alle:1 --order 14:1:speer:1,dolch:2@kolonie
 ```
 
-Kriege, Bestellungen und Flottenprogramme nach Drehbuch, solange keine KI Krieg führt und
-rüstet. Jede Angabe beginnt mit dem Jahr und darf beliebig oft stehen:
+Kriege, Bestellungen und Flottenprogramme nach Drehbuch: Ob Krieg herrscht, entscheidet
+noch keine KI; geführt werden die Flotten von ihr. Jede Angabe beginnt mit dem Jahr und
+darf beliebig oft stehen:
 
-- `--war JAHR:A:B`: Gemeinschaft A erklärt B den Krieg und schickt ihre Flotten im
-  Blockadeauftrag in deren Heimatsystem. `--peace JAHR:A:B` schließt Frieden.
+- `--war JAHR:A:B`: Gemeinschaft A erklärt B den Krieg. `--peace JAHR:A:B` schließt
+  Frieden. Rüstung und Flotten führt die KI beider Seiten; ruht ihre militärische
+  Führung (`--ai`), schickt das Drehbuch die Flotten von A im Blockadeauftrag in das
+  Heimatsystem von B.
+- `--preset grenzkrieg`: Gemeinschaft 0 erklärt zu Beginn des Jahres 25 ihrem nächsten
+  Nachbarn den Krieg und schließt zu Beginn des Jahres 45 Frieden. Mit
+  `grenzkrieg-angreifer-ruht` und `grenzkrieg-nachbar-ruht` erhalten die Flotten der einen
+  Seite keine Befehle: der Vergleich einer geführten mit einer untätigen Flotte.
+- `--ai WER:ART`: militärische Führung durch die KI für WER (Nummer ab 0 oder `alle`):
+  `aktiv` (Vorgabe), `flotte-ruht` (rüstet, aber die Flotten bleiben, wo sie sind) oder
+  `ruht` (keine Rüstung, keine Flottenbefehle; für Drehbücher, die alles selbst führen).
 - `--order JAHR:WER:SCHIFFE[@ORT]`: WER (Nummer ab 0 oder `alle`) bestellt die Schiffe bei
   der Werft der Hauptwelt, mit `@kolonie` bei der Kolonie mit den meisten Bauplätzen.
 - `--navy JAHR:WER:FAKTOR`: WER hält seine Marine von da an auf dem FAKTOR-fachen der
@@ -59,7 +69,16 @@ rüstet. Jede Angabe beginnt mit dem Jahr und darf beliebig oft stehen:
 Die Ausgabe zeigt die Chronik, abgelehnte Befehle, die Bilanz jedes Gefechts samt Ausgang
 und je Gemeinschaft Staatskasse, Kriegsmüdigkeit und Zusammenhalt. `sweep`, `hash` und
 `fleets` nehmen dieselben Angaben: So gehen Gefechte, Verluste und Nachbau auch in Sweeps
-und Prüfsummen ein.
+und Prüfsummen ein. Der Sweep nennt dazu gebaute, verlorene und stillgelegte Schiffe,
+Gefechte nach Ausgang, Angriffe, Blockadetage, Monate im Krieg und mit Soldrückstand und
+den Anteil abgelehnter KI-Befehle; die CSV führt dieselben Zahlen je Gemeinschaft.
+
+```bash
+cargo headless battle --matrix --ron --seeds 0..16
+```
+
+Die Kontertabelle `military.counter` für `balance.ron`, abgeleitet aus der Gefechtsmatrix
+(jede Klasse gegen jede bei gleichem Bauwert). Ohne `--ron` die Matrix selbst.
 
 ```bash
 cargo headless fleets --seed 7 --years 20 --order 10:alle:speer:1,dolch:2
@@ -299,12 +318,68 @@ Forschungsetat unter `research`.
 - **Befehle.** Schiffe bestellen (einen bestimmten Entwurf oder eine Klasse, dann wählt die
   Werft den besten Entwurf, den die Gemeinschaft beherrscht) und Aufträge streichen,
   Flotten teilen und vereinigen, Aufstellung und Doktrin als stehende Befehle, Rückzug aus
-  einem laufenden Gefecht.
+  einem laufenden Gefecht, Schiffe stilllegen.
+- **Stilllegen.** Eine Flotte, die im System einer eigenen Werft liegt, kann Schiffe für
+  immer stilllegen (`LayUpShips`). Sie verlassen das Spiel, Sold und Wartung enden. Einen
+  Anteil ihrer Bauteile (`layup_salvage`) verkauft der Staat am Markt des Systems, soweit
+  die Kasse des Kontors reicht; der Rest ist Schrott. Wer seine Flotte nicht mehr
+  bezahlen kann, hat damit neben Steuern und Anleihen einen dritten Weg.
 - **Rangfolge der Ausgaben.** Flotte (Sold und Wartung) und Beschaffung (Werften,
   Nachschub, Instandsetzung) sind zwei Ansprüche des Staatshaushalts; sie gehen
   Forschung, Rücklage und Ausschüttung vor und greifen notfalls die Rücklage an.
 
 Die Stellschrauben stehen in `assets/data/balance.ron` unter `military`.
+
+## Militärische Führung der KI
+
+Ob Krieg oder Frieden herrscht, entscheidet die KI noch nicht (das kommt mit der
+Diplomatie); Kriege erklären der Spieler oder ein Drehbuch. In beidem verhält sie sich
+nach einer Grundhaltung. Befehle erteilt sie nur über `crates/sim/src/ai/levers.rs`, nie
+für die Gemeinschaft des Spielers und nur, wenn sich etwas ändern soll.
+
+- **Was sie weiß.** Von fremden Flotten, was die Karte zeigt: Ort, Marschrichtung, ob sie
+  kämpfen oder sich sammeln, und ihre Schiffe nach Klasse und Bauwert. Zustand und
+  Vorräte kennt sie nur von den eigenen; die Technik des Gegners geht mit der Schätzung
+  ein, die das Spiel anbietet.
+- **Kräfte schätzen.** Die Kontertabelle `military.counter` sagt, wie gut eine Klasse
+  gegen eine andere bei gleichem Bauwert abschneidet; sie stammt aus der Gefechtsmatrix
+  des Rechners. Die Kampfkraft einer Flotte gegen eine bestimmte andere ist ihr Wert je
+  Klasse, gewichtet mit der Tabelle über die Mischung des Gegners; das Verhältnis beider
+  ist die Schätzung, vor einem Treffen wie im laufenden Gefecht.
+- **Rüstung, monatlich.** Sold und Wartung sollen im Frieden `peace_share` der
+  Staatseinnahmen kosten, mehr, wenn eine fremde Flotte nahe den eigenen Systemen die
+  eigene übertrifft, und im Krieg das `war_factor`-Fache, nie über `max_share`. Bestellt
+  wird nur aus gefüllter Rücklage und nur, was in den Rest passt, den der Haushalt der
+  letzten Monate nach allen Ansprüchen ließ (`room_use`). Gewählt wird die Klasse mit der
+  besten Summe gegen die Mischung der bedrohlichsten Gemeinschaft, mit einem Abschlag für
+  das, was die eigene Flotte schon reichlich hat (`mix_weight`); gebaut wird der beste
+  Entwurf, den die Gemeinschaft beherrscht. Wer rüstet, hält `reserve_months` Monate
+  Flottenkosten zusätzlich als Rücklage, weil die Einnahmen stark schwanken.
+- **Wenn der Sold ausbleibt.** Zuerst kürzt die KI ihren Forschungsetat und streicht
+  wartende Aufträge. Bleibt im Frieden in `layup_after_months` der letzten zwölf Monate
+  Sold aus, legt sie Schiffe still: so viel Bauwert, wie zuletzt fehlte, die
+  entbehrlichsten zuerst, nie unter das Rüstungsziel.
+- **Forschung.** Etat der Vorlage, im Krieg höher; gekürzt, solange der Haushalt ihn zwei
+  Monate in Folge nicht trägt. Im Krieg wählt sie das Ziel selbst und zieht vor, was
+  einen neuen Schiffsentwurf freischaltet.
+- **Flotten im Frieden.** Versorgt und instand gesetzt, vereinigt, im Geleitschutz am
+  Warteplatz: dem eigenen Engpasssystem, das der bedrohlichsten Gemeinschaft am nächsten
+  liegt, sonst am Sitz. Neue Schiffe fassen erst Treibstoff und stoßen dann zur Flotte.
+- **Flotten im Krieg.** Verteidigung zuerst: Einem Eindringling im eigenen Gebiet stellt
+  sich die Flotte, wenn das Kräfteverhältnis mindestens `defend_odds` ist; ist er klar
+  überlegen, weicht sie in einen Hafen aus, an dem und neben dem kein Gegner steht. Ab
+  `offensive_odds` greift die Hauptflotte an: Sie sucht die Hauptflotte des Gegners, wenn
+  sie stärker ist, sonst sperrt sie sein volkreichstes System, das vom nächsten eigenen
+  Hafen aus in Reichweite liegt (`offensive_reach`). Sie bricht ab unter
+  `break_off_supply` Vorrat, wenn der Rückweg nicht mehr im Tank ist, oder nach
+  `break_off_loss` Verlust, läuft einen Hafen mit Werft an und kommt wieder, wenn Vorrat
+  und Zustand `ready_supply` erreichen. Im Gefecht befiehlt sie den Rückzug, sobald das
+  Kräfteverhältnis unter `retreat_odds` fällt.
+- **Für spätere Planer.** Flotten in `AiState::reserved` lässt die Grundhaltung in Ruhe;
+  heute trägt niemand etwas ein. Über `Headless::set_military_mode` (und `--ai`) lässt
+  sich die Führung je Gemeinschaft abschalten.
+
+Die Stellschrauben stehen in `assets/data/balance.ron` unter `military.ai`.
 
 ## Technologie
 
@@ -395,7 +470,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche; offen: Militär-KI, Oberfläche |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche, militärische Grundhaltung der KI (Rüstung, Flottenführung in Frieden und Krieg); offen: Oberfläche |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |

@@ -1512,7 +1512,20 @@ fn a_scripted_target_for_an_ai_community_holds_until_done() {
     assert!(sim.research().knows(other, pick));
     assert!(entry.auto);
     assert!(entry.target.is_some());
-    assert!(entry.spent_last_month > 0);
+    // Bezahlt wird die Forschung aus dem, was der Haushalt des Monats ihr lässt: In einem
+    // schwachen Monat unter der Rücklage geht sie leer aus. Binnen eines halben Jahres
+    // fließt wieder Geld in das neue Ziel.
+    let mut paid = entry.spent_last_month > 0;
+    for _ in 0..6 {
+        if paid {
+            break;
+        }
+        sim.run_days(DAYS_PER_MONTH);
+        let entry = sim.research().get(other).unwrap();
+        assert!(entry.auto && entry.target.is_some());
+        paid = entry.spent_last_month > 0;
+    }
+    assert!(paid, "die Forschung am neuen Ziel wird bezahlt");
 }
 
 #[test]
