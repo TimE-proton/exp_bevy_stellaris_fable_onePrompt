@@ -695,7 +695,20 @@ mod tests {
                 break;
             }
             assert_eq!(stats.shots, battle.shots.len());
-            third_side_shots += pools.pools[SHARED + 2 * PER_SIDE + TRACER].items.len();
+            // Was die dritte Partei im Flug hat, liegt in ihren Vorräten, nach Art getrennt.
+            // (Als Schwächste von dreien feuert sie hier ihre Lenkwaffen ab und zieht sich
+            // zurück, bevor ihre Geschütze in Reichweite kommen.)
+            let in_flight = |missile: bool| {
+                battle
+                    .shots
+                    .iter()
+                    .filter(|shot| shot.side == 2 && (shot.kind == WeaponKind::Missile) == missile)
+                    .count()
+            };
+            let pooled = |kind: usize| pools.pools[SHARED + 2 * PER_SIDE + kind].items.len();
+            assert_eq!(pooled(TRACER), in_flight(false));
+            assert_eq!(pooled(MISSILE), in_flight(true));
+            third_side_shots += pooled(TRACER) + pooled(MISSILE);
         }
         assert!(third_side_shots > 0, "die dritte Partei hat geschossen");
 

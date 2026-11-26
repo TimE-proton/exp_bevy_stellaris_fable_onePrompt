@@ -3,9 +3,10 @@
 
 mod economy;
 mod finance;
-mod fleets;
+pub(crate) mod fleets;
 pub(crate) mod format;
 pub(crate) mod panels;
+mod tech;
 #[cfg(test)]
 pub(crate) mod testing;
 
@@ -29,11 +30,12 @@ use sim::command::{CommandQueue, CommandSource};
 use sim::diplomacy::Diplomacy;
 use sim::economy::Economy;
 use sim::finance::Finance;
-use sim::fleet::Fleets;
+use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
 use sim::logistics::Logistics;
 use sim::polity::Polities;
 use sim::state::SimConfig;
+use sim::tech::Research;
 
 /// Reiter der linken Tafel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -43,6 +45,16 @@ pub enum LeftTab {
     Market,
     Production,
     Ownership,
+}
+
+/// Reiter des Forschungsfensters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TechTab {
+    /// Der eigene Baum mit Ziel und Etat.
+    #[default]
+    Own,
+    /// Was über die Forschung der anderen Gemeinschaften bekannt ist.
+    Others,
 }
 
 /// Zustand der Oberfläche selbst (kein Spielzustand).
@@ -57,6 +69,11 @@ pub struct UiState {
     pub flows_open: bool,
     pub chains_open: bool,
     pub fleets_open: bool,
+    pub tech_open: bool,
+    pub tech_tab: TechTab,
+    /// Forschungsetat in Prozent, solange der Spieler am Regler dreht und noch nicht
+    /// festgesetzt hat; sonst zeigt der Regler den geltenden Etat.
+    pub research_percent: Option<f32>,
     /// Güter, deren Preisverlauf im Diagramm gezeigt wird (Index = Gut).
     pub chart_goods: Vec<bool>,
     pub exchange_open: bool,
@@ -73,14 +90,16 @@ pub struct UiState {
 
 impl UiState {
     /// Vergisst, was nur für die Partie galt, die gerade endet oder ersetzt wird: den
-    /// gewählten Emittenten und die Eingaben zum Staatshaushalt. Unter gleicher Nummer
-    /// stünde in der nächsten Partie ein anderer Betrieb, und der Steuersatz gälte einem
-    /// anderen Staat. Welche Fenster offen sind, bleibt, wie der Spieler es eingerichtet hat.
+    /// gewählten Emittenten und die Eingaben zu Staatshaushalt und Forschungsetat. Unter
+    /// gleicher Nummer stünde in der nächsten Partie ein anderer Betrieb, und Steuersatz
+    /// und Etat gälten einem anderen Staat. Welche Fenster offen sind, bleibt, wie der
+    /// Spieler es eingerichtet hat.
     fn forget_game(&mut self) {
         let fresh = Self::default();
         self.issuer = fresh.issuer;
         self.tax_percent = fresh.tax_percent;
         self.reserve_target = fresh.reserve_target;
+        self.research_percent = fresh.research_percent;
     }
 }
 
@@ -95,6 +114,9 @@ impl Default for UiState {
             flows_open: false,
             chains_open: false,
             fleets_open: false,
+            tech_open: false,
+            tech_tab: TechTab::default(),
+            research_percent: None,
             chart_goods: Vec::new(),
             exchange_open: false,
             treasury_open: false,
@@ -121,6 +143,8 @@ pub struct SimParams<'w> {
     finance: Res<'w, Finance>,
     logistics: Res<'w, Logistics>,
     fleets: Res<'w, Fleets>,
+    battles: Res<'w, Battles>,
+    research: Res<'w, Research>,
     diplomacy: Res<'w, Diplomacy>,
 }
 
@@ -217,6 +241,8 @@ fn draw_ui(
                 finance: &sim.finance,
                 logistics: &sim.logistics,
                 fleets: &sim.fleets,
+                battles: &sim.battles,
+                research: &sim.research,
                 diplomacy: &sim.diplomacy,
                 history: &history,
             };

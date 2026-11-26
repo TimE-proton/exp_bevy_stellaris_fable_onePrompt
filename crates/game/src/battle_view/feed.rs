@@ -344,6 +344,7 @@ fn copy_state(held: &mut Battle, source: &Battle) {
     held.tick = source.tick;
     held.time = source.time;
     held.finished = source.finished;
+    held.contact_time = source.contact_time;
     held.timed_out = source.timed_out;
     held.combatants.clone_from(&source.combatants);
     held.hostile.clone_from(&source.hostile);

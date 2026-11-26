@@ -329,6 +329,33 @@ impl TestGame {
         self.element(|node| node.role() == Role::Label && node.value() == Some(text))
     }
 
+    /// Alle Texte der Oberfläche mit ihrem Ort, wie sie zuletzt gezeichnet wurden.
+    pub fn labels(&mut self) -> Vec<(String, egui::Rect)> {
+        let world = self.world_mut();
+        let Ok(output) = world
+            .query_filtered::<&EguiOutput, With<PrimaryEguiContext>>()
+            .single(world)
+        else {
+            return Vec::new();
+        };
+        let Some(tree) = output.platform_output.accesskit_update.as_ref() else {
+            return Vec::new();
+        };
+        tree.nodes
+            .iter()
+            .map(|(_, node)| node)
+            .filter(|node| node.role() == Role::Label)
+            .filter_map(|node| {
+                let bounds = node.bounds()?;
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                );
+                Some((node.value()?.to_string(), rect))
+            })
+            .collect()
+    }
+
     /// Klickt auf den Knopf mit dieser Beschriftung.
     pub fn click_on(&mut self, label: &str) {
         let at = self

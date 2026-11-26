@@ -5,9 +5,10 @@ use crate::state::AppState;
 use crate::time_control::SimSpeed;
 use bevy::ecs::message::Messages;
 use bevy::prelude::*;
+use sim::command::{CommandLog, CommandOutcome, CommandSource};
 use sim::ids::PolityId;
-use sim::state::{SaveGame, SimConfig, SimState};
-use std::path::PathBuf;
+use sim::state::{SAVE_FORMAT, SaveError, SaveGame, SimConfig, SimState};
+use std::path::{Path, PathBuf};
 
 /// Standardpfad für Schnellspeichern und -laden.
 pub fn quicksave_path() -> PathBuf {
@@ -78,7 +79,14 @@ impl Plugin for SessionPlugin {
                 (remove_session, start_from_args).chain(),
             )
             .add_systems(OnEnter(AppState::InGame), install_session)
-            .add_systems(Update, (handle_requests, fade_notice));
+            .add_systems(
+                Update,
+                (
+                    handle_requests,
+                    fade_notice,
+                    report_rejections.run_if(in_state(AppState::InGame)),
+                ),
+            );
     }
 }
 
@@ -126,6 +134,58 @@ fn fade_notice(time: Res<Time<Real>>, mut notice: ResMut<Notice>) {
     }
 }
 
+/// Sagt dem Spieler, wenn der Kern einen seiner Befehle abgelehnt hat, und warum. Die
+/// Oberfläche bietet nur an, was der Kern annimmt; zwischen Klick und nächstem Takt kann
+/// sich die Lage aber ändern (eine Flotte gerät ins Gefecht, ein Ziel wird erforscht).
+fn report_rejections(
+    epoch: Res<SessionEpoch>,
+    log: Option<Res<CommandLog>>,
+    mut seen: Local<(Option<SessionEpoch>, usize)>,
+    mut notice: ResMut<Notice>,
+) {
+    let Some(log) = log else {
+        return;
+    };
+    if seen.0 != Some(*epoch) {
+        // Eine andere Partie: Was ihr Protokoll schon enthält, ist Vergangenheit.
+        *seen = (Some(*epoch), log.entries.len());
+        return;
+    }
+    let fresh = log.entries.get(seen.1..).unwrap_or_default();
+    seen.1 = log.entries.len();
+    let rejected = fresh.iter().rev().find_map(|entry| match &entry.outcome {
+        CommandOutcome::Rejected(reason) if entry.source == CommandSource::Player => Some(reason),
+        _ => None,
+    });
+    if let Some(reason) = rejected {
+        let end = if reason.ends_with(['.', '!', '?']) {
+            ""
+        } else {
+            "."
+        };
+        notice.error(format!("Befehl abgelehnt: {reason}{end}"));
+    }
+}
+
+/// Was der Spieler erfährt, wenn sich ein Spielstand nicht laden lässt. Ein Stand aus
+/// einer anderen Fassung des Spiels wird am Speicherformat erkannt und abgelehnt; die
+/// laufende Partie bleibt davon unberührt.
+fn load_failure(path: &Path, error: &SaveError) -> String {
+    match error {
+        SaveError::Format { found } if *found < SAVE_FORMAT => format!(
+            "{} stammt aus einer älteren Fassung des Spiels (Speicherformat {found}) und lässt \
+             sich nicht mehr laden. Diese Fassung liest Format {SAVE_FORMAT}.",
+            path.display()
+        ),
+        SaveError::Format { found } => format!(
+            "{} stammt aus einer neueren Fassung des Spiels (Speicherformat {found}). Diese \
+             Fassung liest Format {SAVE_FORMAT}.",
+            path.display()
+        ),
+        other => other.to_string(),
+    }
+}
+
 fn handle_requests(world: &mut World) {
     let requests: Vec<SessionRequest> = world
         .resource_mut::<Messages<SessionRequest>>()
@@ -169,7 +229,9 @@ fn handle_requests(world: &mut World) {
                     enter_game(world, save.state, notice);
                 }
                 // Die laufende Partie bleibt, wie sie ist.
-                Err(error) => world.resource_mut::<Notice>().error(error.to_string()),
+                Err(error) => world
+                    .resource_mut::<Notice>()
+                    .error(load_failure(&path, &error)),
             },
             SessionRequest::QuitToMenu => {
                 // Die Zeit hält sofort an: Sobald die Partie im Hauptmenü abgeräumt ist,
@@ -424,6 +486,107 @@ mod tests {
         assert!(!game.resource::<SimSpeed>().paused);
         let notice = game.resource::<Notice>();
         assert!(notice.is_error && notice.text.contains("Dateifehler"));
+    }
+
+    #[test]
+    fn a_save_of_an_older_format_is_rejected_with_a_message() {
+        use crate::testing::save_of_new_game;
+
+        let mut game = TestGame::start("");
+        let path = save_of_new_game(game.resource::<sim::GameData>(), 5, "alt");
+        // Derselbe Stand, wie ihn eine ältere Fassung des Spiels geschrieben hätte.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let current = format!("(format:{SAVE_FORMAT},");
+        assert!(text.starts_with(&current), "Spielstand beginnt anders");
+        let older = SAVE_FORMAT - 1;
+        std::fs::write(
+            &path,
+            text.replacen(&current, &format!("(format:{older},"), 1),
+        )
+        .unwrap();
+
+        // Aus dem Hauptmenü: Es bleibt beim Hauptmenü, und der Spieler erfährt den Grund.
+        game.send(SessionRequest::Load(path.clone()));
+        game.frames(4);
+        assert_eq!(game.state(), AppState::MainMenu);
+        assert!(!game.world().contains_resource::<Galaxy>());
+        let notice = game.resource::<Notice>().clone();
+        assert!(notice.is_error && notice.seconds_left > 0.0);
+        assert!(notice.text.contains("älteren Fassung"), "{}", notice.text);
+        assert!(notice.text.contains(&format!("Speicherformat {older}")));
+        assert!(notice.text.contains(&format!("liest Format {SAVE_FORMAT}")));
+        // Der Hinweis steht auch wirklich auf dem Bildschirm.
+        assert!(game.text(&notice.text).is_some());
+
+        // Mitten in einer Partie (F9): Sie läuft weiter, als wäre nichts gewesen.
+        start_campaign(&mut game, 3);
+        run_fast(&mut game, 6);
+        let tick = game.resource::<SimClock>().tick;
+        game.send(SessionRequest::Load(path.clone()));
+        game.frames(4);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(game.state(), AppState::InGame);
+        assert_eq!(game.resource::<SimConfig>().seed, 3);
+        assert!(game.resource::<SimClock>().tick > tick);
+        assert!(!game.resource::<SimSpeed>().paused);
+        let notice = game.resource::<Notice>();
+        assert!(notice.is_error && notice.text.contains("älteren Fassung"));
+    }
+
+    #[test]
+    fn a_rejected_command_of_the_player_is_reported_with_its_reason() {
+        use sim::command::{CommandQueue, SimCommand};
+        use sim::tech::Research;
+
+        let mut game = TestGame::start("");
+        start_campaign(&mut game, 3);
+        run_fast(&mut game, 6);
+        let player = game.resource::<SimConfig>().player.unwrap();
+        // Ein Befehl, den der Kern ablehnen muss: ein Forschungsziel, das schon erforscht
+        // ist oder dem die Voraussetzung fehlt.
+        let data = game.resource::<sim::GameData>().clone();
+        let research = game.resource::<Research>();
+        let tech = (0..data.techs.len() as u16)
+            .find(|tech| !research.available(&data, player).contains(tech))
+            .expect("eine Technologie, die nicht erforschbar ist");
+        let known = research.knows(player, tech);
+        game.world_mut().resource_mut::<CommandQueue>().push(
+            player,
+            CommandSource::Player,
+            SimCommand::SetResearchTarget { tech: Some(tech) },
+        );
+        game.frames(4);
+        let notice = game.resource::<Notice>();
+        assert!(notice.is_error, "{}", notice.text);
+        assert!(
+            notice.text.starts_with("Befehl abgelehnt: "),
+            "{}",
+            notice.text
+        );
+        let name = &data.techs[tech as usize].name;
+        if known {
+            assert!(
+                notice
+                    .text
+                    .contains(&format!("{name} ist bereits erforscht"))
+            );
+        } else {
+            assert!(
+                notice.text.contains("Voraussetzung fehlt"),
+                "{}",
+                notice.text
+            );
+        }
+        // Befehle der KI-Gemeinschaften gehen den Spieler nichts an.
+        game.world_mut().resource_mut::<Notice>().seconds_left = 0.0;
+        game.world_mut().resource_mut::<Notice>().text.clear();
+        game.world_mut().resource_mut::<CommandQueue>().push(
+            sim::ids::PolityId(1),
+            CommandSource::Ai,
+            SimCommand::SetResearchTarget { tech: Some(9999) },
+        );
+        game.frames(4);
+        assert!(game.resource::<Notice>().text.is_empty());
     }
 
     #[test]

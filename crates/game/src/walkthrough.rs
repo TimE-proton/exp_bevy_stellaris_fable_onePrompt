@@ -1,18 +1,22 @@
-//! Ein Spieler klickt sich durch das ganze Spiel: Hauptmenü, Partie, Gefechtsübung und
-//! zurück. Anders als die Tests der einzelnen Teile schickt dieser keine Bitten an die
-//! Systeme, sondern klickt wie ein Mensch auf die Knöpfe, die gerade gezeichnet sind. So
-//! fällt auf, wenn ein Knopf nichts auslöst, ein Wechsel das Spiel beendet oder ein Klick
-//! auf eine Leiste in die Szene dahinter durchschlägt.
+//! Ein Spieler klickt sich durch das ganze Spiel: Hauptmenü, Partie mit Forschungsfenster,
+//! Gefechtsübung und zurück. Anders als die Tests der einzelnen Teile schickt dieser keine
+//! Bitten an die Systeme, sondern klickt wie ein Mensch auf die Knöpfe, die gerade
+//! gezeichnet sind. So fällt auf, wenn ein Knopf nichts auslöst, ein Wechsel das Spiel
+//! beendet oder ein Klick auf eine Leiste in die Szene dahinter durchschlägt.
 
 use crate::battle_view::feed::BattleFeed;
 use crate::battle_view::practice::PracticeBattle;
 use crate::battle_view::{SelectedShip, ViewFrame, ViewOptions};
+use crate::map::Selection;
 use crate::state::AppState;
 use crate::testing::TestGame;
 use crate::time_control::SimSpeed;
+use crate::ui::{TechTab, UiState};
 use bevy::prelude::*;
 use sim::clock::SimClock;
 use sim::galaxy::Galaxy;
+use sim::state::SimConfig;
+use sim::tech::Research;
 
 /// Ein Schiff, das frei in der Szene steht (nicht unter einer Tafel), mit seiner Stelle
 /// im Bild.
@@ -33,6 +37,48 @@ fn battle_tick(game: &TestGame) -> u64 {
     game.resource::<PracticeBattle>().battle.tick
 }
 
+/// Eine Technologie, die der Spieler jetzt erforschen kann und die nicht schon sein Ziel
+/// ist: Nummer und Name.
+fn open_technology(game: &TestGame) -> (u16, String) {
+    let data = game.resource::<sim::GameData>();
+    let research = game.resource::<Research>();
+    let player = game.resource::<SimConfig>().player.expect("Spieler");
+    let target = research.get(player).and_then(|entry| entry.target);
+    let tech = research
+        .available(data, player)
+        .into_iter()
+        .find(|tech| Some(*tech) != target)
+        .expect("eine erforschbare Technologie");
+    (tech, data.techs[tech as usize].name.clone())
+}
+
+/// Der Spieler öffnet das Forschungsfenster, legt ein Ziel fest, sieht nach den anderen
+/// und schließt es wieder. Kein Klick davon erreicht die Karte dahinter.
+fn visit_the_technology_window(game: &mut TestGame) {
+    let selected = game.resource::<Selection>().system;
+    assert!(selected.is_some(), "das Heimatsystem ist gewählt");
+    assert!(game.window_rect("Forschung").is_none());
+    game.click_on("Forschung");
+    assert!(game.window_rect("Forschung").is_some());
+    let (tech, name) = open_technology(game);
+    game.click_on(&format!("Erforschen: {name}"));
+    game.frames(6);
+    let player = game.resource::<SimConfig>().player.expect("Spieler");
+    let entry = game.resource::<Research>().get(player).expect("Forschung");
+    assert_eq!(entry.target, Some(tech), "das Ziel ist {name}");
+    assert!(!entry.auto);
+    game.click_on("Einschätzung der anderen");
+    assert_eq!(game.resource::<UiState>().tech_tab, TechTab::Others);
+    assert!(game.text("Einblick").is_some());
+    game.click_on("Eigene Forschung");
+    assert!(game.text("Wirkung der eigenen Technik").is_some());
+    game.click_on("Forschung");
+    // Das Fenster blendet sich einige Frames lang aus.
+    game.frames(10);
+    assert!(game.window_rect("Forschung").is_none());
+    assert_eq!(game.resource::<Selection>().system, selected);
+}
+
 #[test]
 fn a_player_clicks_from_campaign_to_practice_and_back_again() {
     let mut game = TestGame::start("");
@@ -47,6 +93,7 @@ fn a_player_clicks_from_campaign_to_practice_and_back_again() {
         game.key(KeyCode::Space);
         game.frames(12);
         assert!(game.resource::<SimClock>().tick > 0, "die Zeit läuft");
+        visit_the_technology_window(&mut game);
         assert_eq!(game.button("Zum Hauptmenü"), None, "das Menü ist noch zu");
         game.key(KeyCode::Escape);
         game.click_on("Zum Hauptmenü");

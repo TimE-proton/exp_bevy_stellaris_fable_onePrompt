@@ -334,6 +334,8 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
         if battle.finished {
             let text = if battle.timed_out {
                 "ZEITGRENZE"
+            } else if in_stalemate(battle) {
+                "PATT"
             } else {
                 "BEENDET"
             };
@@ -470,7 +472,12 @@ fn side_panel(
                 if refs.feed.info.player_side == Some(side) {
                     ui.label(RichText::new("(du)").color(MUTED));
                 }
-                if combatant.retreating {
+                if combatant.stalemate {
+                    ui.label(RichText::new("PATT").color(WARNING).strong())
+                        .on_hover_text(
+                            "Keine Seite kam gegen die andere an: Alle lösen sich voneinander.",
+                        );
+                } else if combatant.retreating {
                     ui.label(RichText::new("RÜCKZUG").color(WARNING).strong());
                 }
             });
@@ -827,10 +834,21 @@ fn inspector(
         .map(|shown| shown.response.rect)
 }
 
+/// Hat sich eine Partei im Patt gelöst? Dann hat das Gefecht keinen Sieger.
+fn in_stalemate(battle: &Battle) -> bool {
+    battle
+        .combatants
+        .iter()
+        .any(|combatant| combatant.stalemate)
+}
+
 /// Ergebnis in einem Satz.
 pub fn outcome_text(feed: &BattleFeed, battle: &Battle, outcome: &Outcome) -> String {
     if battle.timed_out {
         return "Zeitgrenze erreicht: Beide Seiten lösen sich voneinander.".into();
+    }
+    if outcome.stalemate {
+        return "Patt: Keine Seite kam gegen die andere an, alle lösen sich voneinander.".into();
     }
     match outcome.winner() {
         Some(winner) => format!("{} behauptet das Feld.", feed.side_name(winner)),
@@ -872,7 +890,9 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                     if result.holds_field {
                         notes.push("hält das Feld");
                     }
-                    if result.retreated {
+                    if battle.combatants[side].stalemate {
+                        notes.push("im Patt gelöst");
+                    } else if result.retreated {
                         notes.push("Rückzug");
                     }
                     notes.push("Verlust am Bauwert");
@@ -1388,9 +1408,15 @@ mod tests {
         // Die Bilanz nennt den Ausgang und zählt je Partei, was der Kern gezählt hat.
         let outcome = matchup::outcome_of(&battle);
         let text = outcome_text(&feed, &battle, &outcome);
-        match outcome.winner() {
-            Some(winner) => assert!(text.contains(feed.side_name(winner))),
-            None => assert!(text.contains("Keine Seite") || text.contains("Zeitgrenze")),
+        if outcome.timed_out {
+            assert!(text.contains("Zeitgrenze"));
+        } else if outcome.stalemate {
+            assert!(text.starts_with("Patt"));
+        } else {
+            match outcome.winner() {
+                Some(winner) => assert!(text.contains(feed.side_name(winner))),
+                None => assert!(text.contains("Keine Seite")),
+            }
         }
         for (side, result) in outcome.sides.iter().enumerate() {
             let tally = summarize(&battle, &data, side).tally;
@@ -1679,6 +1705,36 @@ mod tests {
             .ctx
             .memory(|memory| memory.area_rect(egui::Id::new(Some(title))))
             .unwrap_or_else(|| panic!("Tafel „{title}“ fehlt"))
+    }
+
+    #[test]
+    fn a_stalemate_is_shown_as_a_stalemate_without_a_winner() {
+        // Zwei einzelne Korvetten kommen nicht durch die Schilde der anderen: Der Rechner
+        // lässt beide abziehen und meldet das Patt an den Parteien.
+        let data = data();
+        let (mut battle, mut feed) = stepped(&data, ["dolch:1", "dolch:1"], 0);
+        while !battle.finished {
+            battle.step(&data);
+            feed.refresh(&battle);
+        }
+        let outcome = matchup::outcome_of(&battle);
+        assert!(
+            outcome.stalemate && !outcome.timed_out,
+            "das Duell endete nicht im Patt: {outcome:?}"
+        );
+        let scene = Scene::of(data, battle, feed);
+        let text = outcome_text(&scene.feed, &scene.battle, &outcome);
+        assert!(text.starts_with("Patt"), "{text}");
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = scene.settle(&mut screen, None);
+        // Kopfleiste und beide Lagetafeln nennen das Patt, die Bilanz auch; von einem
+        // Rückzug oder einem Sieger ist keine Rede.
+        assert!(painted.all("PATT").len() >= 3, "{:?}", painted.all("PATT"));
+        assert!(painted.text("im Patt gelöst").is_some());
+        assert!(painted.text(&text).is_some());
+        assert!(painted.all("RÜCKZUG").is_empty());
+        assert!(painted.all("BEENDET").is_empty());
+        assert!(painted.text("behauptet das Feld").is_none());
     }
 
     #[test]

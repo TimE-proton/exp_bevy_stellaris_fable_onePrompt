@@ -1,7 +1,7 @@
 //! Die einzelnen Fenster und Leisten.
 
 use super::format::{decimal, percent, population};
-use super::{LeftTab, UiState, economy, finance, fleets};
+use super::{LeftTab, UiState, economy, finance, fleets, tech};
 use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
@@ -14,12 +14,13 @@ use sim::data::{GameData, Rgb};
 use sim::diplomacy::Diplomacy;
 use sim::economy::{Economy, to_credits};
 use sim::finance::Finance;
-use sim::fleet::Fleets;
+use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
 use sim::ids::{PlanetId, SystemId};
 use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
 use sim::state::SimConfig;
+use sim::tech::Research;
 
 /// Lesender Blick auf die laufende Partie.
 pub struct SimRefs<'a> {
@@ -33,6 +34,8 @@ pub struct SimRefs<'a> {
     pub finance: &'a Finance,
     pub logistics: &'a Logistics,
     pub fleets: &'a Fleets,
+    pub battles: &'a Battles,
+    pub research: &'a Research,
     pub diplomacy: &'a Diplomacy,
     pub history: &'a PriceHistory,
 }
@@ -212,6 +215,7 @@ pub fn in_game(
     economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
     economy::flows_window(&ctx, sim, &mut state.flows_open, None);
     fleets::fleets_window(&ctx, sim, &mut state.fleets_open, selection, actions);
+    tech::tech_window(&ctx, sim, state, actions);
     finance::exchange_window(&ctx, sim, state, actions);
     finance::treasury_window(&ctx, sim, state, actions);
     if state.menu_open {
@@ -306,6 +310,7 @@ fn top_bar(
         }
         ui.separator();
         ui.toggle_value(&mut state.fleets_open, "Flotten");
+        ui.toggle_value(&mut state.tech_open, "Forschung");
         ui.toggle_value(&mut state.treasury_open, "Staat");
         ui.toggle_value(&mut state.exchange_open, "Börse");
         ui.toggle_value(&mut state.chains_open, "Ketten");
@@ -817,6 +822,7 @@ pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
             } else {
                 ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
                 ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
+                ui.label("Dreiecke sind Flotten. Roter Ring = im Gefecht, gelber Bogen = sammelt sich nach einem Abzug.");
                 ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
             }
         });
@@ -880,6 +886,8 @@ mod tests {
                 finance: &self.state.finance,
                 logistics: &self.state.logistics,
                 fleets: &self.state.fleets,
+                battles: &self.state.battles,
+                research: &self.state.research,
                 diplomacy: &self.state.diplomacy,
                 history,
             }
@@ -933,6 +941,7 @@ mod tests {
                 flows_open: true,
                 chains_open: true,
                 fleets_open: true,
+                tech_open: true,
                 exchange_open: true,
                 exchange_all: true,
                 treasury_open: true,
@@ -987,6 +996,7 @@ mod tests {
             flows_open: true,
             chains_open: true,
             fleets_open: true,
+            tech_open: true,
             exchange_open: true,
             treasury_open: true,
             ..Default::default()
@@ -1003,7 +1013,7 @@ mod tests {
             screen.settle(&mut draw);
         }
         let painted = screen.settle(&mut draw);
-        // Kopfleiste, Chronik, beide Seitentafeln, sieben Fenster und der Hinweis: Durch
+        // Kopfleiste, Chronik, beide Seitentafeln, acht Fenster und der Hinweis: Durch
         // keinen dieser Hintergründe scheint die Karte.
         let backgrounds: Vec<_> = painted
             .rects
@@ -1011,7 +1021,7 @@ mod tests {
             .filter(|(rect, _)| rect.width() >= 200.0 && rect.height() >= 20.0)
             .collect();
         assert!(
-            backgrounds.len() >= 12,
+            backgrounds.len() >= 13,
             "{} Hintergründe",
             backgrounds.len()
         );
