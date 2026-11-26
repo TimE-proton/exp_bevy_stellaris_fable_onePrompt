@@ -1,4 +1,4 @@
-# Übergabe (Stand 26.11.2026)
+# Übergabe (Stand 26.11.2026, 10 Uhr UTC)
 
 Alles, was eine neue Sitzung braucht, um die Arbeit an KONFLUENZ fortzusetzen, nachdem der
 Container abgeräumt wurde. Dieser Branch (`wip/uebergabe`) enthält gegenüber dem Hauptzweig
@@ -7,8 +7,7 @@ Meilenstein 7 gelöscht.
 
 ## Entscheidungen des Auftraggebers
 
-- 26.11.2026: Auf das Hauptmodell der Sitzung warten. Fortsetzung erst nach dem Reset des Kontingents
-  (Sonntag, 29.11.2026, 03:00 UTC) und erst auf Startsignal; kein automatischer Start.
+- 26.11.2026 (später am Tag): Das Hauptmodell ist wieder verfügbar; die Arbeit an Teil II läuft seitdem.
 - 26.11.2026: Schlanke Prüfung je Paket (Umsetzung, zwei bis drei Prüfer, je Prüfer eine
   Sammel-Gegenprüfung, Nachbesserung).
 - 26.11.2026: Zwischenstände dürfen als `wip/…`-Branches gepusht werden. Der Hauptzweig
@@ -19,14 +18,15 @@ Meilenstein 7 gelöscht.
 
 ## Branches
 
-| Branch | Commit | Inhalt | Stand |
-|---|---|---|---|
-| `claude/keen-franklin-aqi4h7` | 8206ed1 | Meilenstein 1–3, 3D-Schlachtansicht, Gefechtsübung | lauffähig; 19 bestätigte Befunde der Schlachtansicht offen |
-| `wip/m4-taktik` | 35801ce | taktischer Gefechtsrechner, ausgewuchtet | fertig, geprüft, nachgebessert |
-| `wip/m4-tech` | d314838 | Technologie und Forschung im Kern | fertig, geprüft, nachgebessert |
-| `wip/m4-integ` | 9c63cad | Hauptzweig + Gefechtsrechner + Technologie | Tests und Clippy grün für `sim` und `headless`; `crates/game` dagegen noch nicht gebaut |
-| `wip/m4-sim` | 4b64d65 | Schiffe, Werften, Nachschub, Unterhalt, Gefechte in der Partie | geprüft; 17 bestätigte Befunde offen; gegen die alte Gefechts-Schnittstelle gebaut |
-| `wip/uebergabe` | – | dieses Verzeichnis | – |
+| Branch | Inhalt | Stand |
+|---|---|---|
+| `claude/keen-franklin-aqi4h7` | Meilenstein 1–3, 3D-Schlachtansicht, Gefechtsübung | lauffähig, unverändert (8206ed1) |
+| `wip/m4-integ` | zusammengeführter Kern: Flotten aus Schiffen, Werften, Nachschub, Gefechte der Partie über den taktischen Rechner, Technologie | Zusammenführung fertig (5ac904d, 264 Kerntests grün; Bericht `berichte/kern_zusammenfuehrung.md`). In Arbeit: 15 offene Befunde, Staatshaushalt, Militär-KI, Prüfung |
+| `wip/m4-spiel` | Hauptzweig + behobene Befunde der Schlachtansicht (Absturz „Zum Hauptmenü", Durchklicken, Inspektor, Dialog, Selbsttest) | in Arbeit; danach Anpassung an den neuen Kern, Flotten- und Technologiefenster |
+| `wip/m5-rechner` | Belagerung: Zustand, Stellschrauben, reiner Tagesrechner mit Prognose (Bericht `berichte/belagerungsrechner_umsetzung.md`) | Rechner fertig (2764a4a); in Arbeit: Belagerung in der laufenden Partie (Schritt 4 des Entwurfs) |
+| `wip/m6-nachfolge` | ein Pfad für Besitzwechsel und das Ende einer Gemeinschaft, Schutzgebiete, die beiden Enden | in Arbeit (Basis 5ac904d) |
+| `wip/m4-taktik`, `wip/m4-tech`, `wip/m4-sim` | Vorstufen | vollständig in `wip/m4-integ` enthalten |
+| `wip/uebergabe` | dieses Verzeichnis | – |
 
 ## Inhalt
 
@@ -43,10 +43,12 @@ Meilenstein 7 gelöscht.
 ## Wiedereinstieg in einem frischen Container
 
 ```bash
-git fetch origin wip/m4-integ wip/m4-sim wip/m4-taktik wip/m4-tech wip/uebergabe
+git fetch origin wip/m4-integ wip/m4-spiel wip/m5-rechner wip/m6-nachfolge wip/uebergabe
 echo "/.worktrees/" >> .git/info/exclude
 git worktree add .worktrees/integ wip/m4-integ
-git worktree add .worktrees/sim wip/m4-sim
+git worktree add .worktrees/spiel wip/m4-spiel
+git worktree add .worktrees/belagerung wip/m5-rechner
+git worktree add .worktrees/nachfolge wip/m6-nachfolge
 git worktree add .worktrees/uebergabe wip/uebergabe
 ```
 
@@ -57,15 +59,22 @@ git worktree add .worktrees/uebergabe wip/uebergabe
   Foto mit `import -window root datei.png`. Tastendrücke von `xdotool` kommen im Spiel nicht
   an, Mausklicks schon.
 - Erster Bau des Spiels etwa 12 bis 20 Minuten, Kern allein wenige Minuten.
-- Danach `restplan.md`, Teil II: zuerst Paket A (Kern zusammenführen), parallel D und E.
+- Reihenfolge ab hier (`restplan.md`, Teil II, leicht umgestellt): Kern (Befunde, Staatshaushalt,
+  Militär-KI) und Spiel (Anpassung, Technologiefenster, Flottenfenster, Gefechte der Partie in
+  der 3D-Ansicht) ergeben Meilenstein 4. Für Meilenstein 5 werden Kern, `wip/m6-nachfolge` und
+  `wip/m5-rechner` zusammengeführt: Die Übergabe eroberter Planeten in
+  `crates/sim/src/siege/conquest.rs` ist als Nahtstelle markiert und wird durch
+  `transfer_planet` ersetzt; Beschaffung und Unterhalt der Verteidigung (Schritt 5 des Entwurfs)
+  werden ein Anspruch im Staatshaushalt.
+- `SAVE_FORMAT` wird nur beim Zusammenführen in den Hauptzweig erhöht, nie auf den Strängen.
 
 ## Was man wissen muss
 
-- Probemerge von `wip/m4-sim` in `wip/m4-integ`: Konflikte in `crates/headless/src/main.rs`,
-  `crates/sim/src/economy/{capital,mod,production}.rs` und `crates/sim/src/harness.rs`.
-- `wip/m4-sim` kennt `Battle::results`, `Fate`, `CombatantSetup::with_war_weariness` und das
-  Patt noch nicht (siehe `berichte/gefechtsrechner_nachbesserung.md`). Das Patt löst zugleich
-  den Befund „unentschiedene Gefechte starten endlos neu".
+- Die Simulation ist chaotisch: Jede Änderung an der Reihenfolge der Systeme oder an den
+  Geldflüssen des Staates verschiebt alle Verläufe. Tests, die an einem Seed hängen, müssen
+  dann neu begründet werden (nie die Aussage abschwächen, sondern das Maß verbessern).
+- Die Headless-Werkzeuge lesen `assets/data` relativ zum aktuellen Verzeichnis: immer im
+  jeweiligen Arbeitsverzeichnis starten oder `--data-dir` angeben.
 - Die Forschung kostet eine Gemeinschaft bisher nichts Echtes
   (`berichte/technologie_nachbesserung.md`, Punkt 12); der Befund „Flottenkosten ohne Spur
   im Haushalt" hat dieselbe Ursache. Beides gehört zusammen gelöst.
