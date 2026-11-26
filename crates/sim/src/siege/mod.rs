@@ -35,6 +35,7 @@ pub use step::{
 };
 
 use crate::data::{GameData, SiegeBalance};
+use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money};
 use crate::finance::Finance;
 use crate::galaxy::Galaxy;
@@ -920,9 +921,70 @@ pub fn setup_sieges(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> Si
     sieges
 }
 
+/// Was in jedem Takt zwischen den Belagerungen und dem Rest der Welt stimmen muss: Der
+/// Verteidiger hält die Welt und steht mit dem Belagerer im Krieg, die Miliz der Welt ist
+/// die ihrer Zonen, die Region gilt genau dann als belagert, wenn ein Datensatz besteht,
+/// und jeder fällige Besitzwechsel gehört zu einer Belagerung dessen, der ihn antritt.
+pub fn check_records(
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    finance: &Finance,
+    sieges: &Sieges,
+) -> Result<(), String> {
+    for (planet, siege) in &sieges.active {
+        let target = galaxy.planet(*planet);
+        if target.owner != Some(siege.defender) {
+            return Err(format!(
+                "{}: Der Verteidiger der Belagerung hält die Welt nicht mehr",
+                target.name
+            ));
+        }
+        if !diplomacy.at_war(siege.attacker, siege.defender) {
+            return Err(format!(
+                "{}: Belagerung ohne Krieg zwischen Belagerer und Besitzer",
+                target.name
+            ));
+        }
+        let militia = siege.zone_militia();
+        if (sieges.defense(*planet).militia - militia).abs() > 1e-6 * militia.max(1.0) {
+            return Err(format!(
+                "{}: Miliz der Welt weicht von der Summe ihrer Zonen ab",
+                target.name
+            ));
+        }
+    }
+    for (planet, region) in galaxy.planets.iter().zip(&finance.regions) {
+        if region.besieged != sieges.active.contains_key(&planet.id) {
+            return Err(format!(
+                "{}: Die Region gilt als {}, der Datensatz sagt das Gegenteil",
+                planet.name,
+                if region.besieged {
+                    "belagert"
+                } else {
+                    "nicht belagert"
+                }
+            ));
+        }
+    }
+    for due in &sieges.pending {
+        let backed = sieges
+            .siege(due.planet)
+            .is_some_and(|siege| siege.attacker == due.to);
+        if !backed {
+            return Err(format!(
+                "Besitzwechsel von {} steht aus, ohne dass {} die Welt belagert",
+                galaxy.planet(due.planet).name,
+                due.to
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Invarianten der Belagerung: Stärken und Vorräte endlich und nicht negativ, Listen so
 /// lang wie die Galaxie, der Stillstand der Wirtschaft und die Spiegelwerte der Regionen
-/// in 0..1; Zuordnungen und eingeschiffte Truppen passen zu den Flotten.
+/// in 0..1; Datensätze passen zu Besitz und Kriegslage ([`check_records`]), Zuordnungen
+/// und eingeschiffte Truppen zu den Flotten.
 pub fn check(world: &World) -> Result<(), String> {
     let galaxy = world.resource::<Galaxy>();
     let planets = galaxy.planets.len();
@@ -954,6 +1016,12 @@ pub fn check(world: &World) -> Result<(), String> {
             ));
         }
     }
+    check_records(
+        galaxy,
+        world.resource::<Diplomacy>(),
+        finance,
+        world.resource::<Sieges>(),
+    )?;
     orbit::check(world)
 }
 
@@ -1076,6 +1144,70 @@ mod tests {
         assert_eq!(check(&world), Ok(()));
         world.resource_mut::<Finance>().regions[2].war_damage = -0.1;
         assert!(check(&world).unwrap_err().contains("Kriegsschäden"));
+    }
+
+    /// Datensätze, die nicht zu Besitz, Kriegslage, Spiegelwerten oder Flotten passen,
+    /// fallen der Prüfung auf; ein stimmiger Zustand nicht.
+    #[test]
+    fn records_out_of_step_with_the_world_are_reported() {
+        let mut scene = day::testing::Scene::colony();
+        let (me, foe) = (day::testing::ME, day::testing::FOE);
+        scene.state.sieges.embarked.insert(
+            FleetId(0),
+            Embarked {
+                troops: 5.0,
+                supply: 0.0,
+            },
+        );
+        scene.day();
+        let planet = scene.planet;
+        assert!(scene.state.sieges.siege(planet).is_some());
+        let verdict = |state: &SimState| {
+            let mut world = World::new();
+            world.insert_resource(scene.data.clone());
+            state.clone().install(&mut world);
+            check(&world)
+        };
+        assert_eq!(verdict(&scene.state), Ok(()));
+
+        // Der Verteidiger hält die Welt nicht mehr; es herrscht kein Krieg mehr.
+        let mut state = scene.state.clone();
+        state.galaxy.planet_mut(planet).owner = Some(PolityId(2));
+        assert!(verdict(&state).unwrap_err().contains("Verteidiger"));
+        let mut state = scene.state.clone();
+        state.diplomacy.wars.clear();
+        assert!(verdict(&state).unwrap_err().contains("ohne Krieg"));
+        // Der Spiegelwert der Region und die Miliz der Welt folgen dem Datensatz.
+        let mut state = scene.state.clone();
+        state.finance.regions[planet.index()].besieged = false;
+        assert!(verdict(&state).unwrap_err().contains("Region"));
+        let mut state = scene.state.clone();
+        state.finance.regions[0].besieged = true;
+        assert!(verdict(&state).unwrap_err().contains("Region"));
+        let mut state = scene.state.clone();
+        state.sieges.defense_mut(planet).militia += 1.0;
+        assert!(verdict(&state).unwrap_err().contains("Miliz"));
+        // Ein fälliger Besitzwechsel braucht die Belagerung dessen, der ihn antritt.
+        let mut state = scene.state.clone();
+        state.sieges.pending.push(Conquest {
+            planet,
+            to: foe,
+            outcome: Outcome::Starved,
+            sack: false,
+        });
+        assert!(verdict(&state).unwrap_err().contains("Besitzwechsel"));
+        state.sieges.pending[0].to = me;
+        assert_eq!(verdict(&state), Ok(()));
+        // Zuordnungen zeigen auf bestehende Flotten, Truppen haben Platz an Bord.
+        let mut state = scene.state.clone();
+        state.fleets.list[0].alive = false;
+        assert!(verdict(&state).unwrap_err().contains("besteht"));
+        let mut state = scene.state.clone();
+        state.sieges.assign.clear();
+        state.sieges.embarked.get_mut(&FleetId(0)).unwrap().troops = 18.0;
+        assert!(verdict(&state).unwrap_err().contains("Plätzen"));
+        state.sieges.embarked.get_mut(&FleetId(0)).unwrap().troops = 17.5;
+        assert_eq!(verdict(&state), Ok(()));
     }
 
     /// Ein gefüllter Zustand übersteht Speichern und Laden unverändert: RON für den
