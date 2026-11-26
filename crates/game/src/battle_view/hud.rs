@@ -685,8 +685,10 @@ fn inspector(
             // übliche erscheint erst unter dem Mauszeiger.
             ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
             egui::ScrollArea::vertical()
-                // Je Schiff eine eigene Rollstellung: Ein neu gewähltes beginnt oben.
-                .id_salt(("module", index))
+                // Je Schiff eine eigene Rollstellung: Ein neu gewähltes beginnt oben. Die
+                // Epoche gehört dazu, denn die Nummern der Schiffe beginnen mit jedem Gefecht
+                // von vorn, und was die Oberfläche sich merkt, überdauert das Gefecht.
+                .id_salt(("module", refs.feed.epoch, index))
                 // Genau so hoch, wie Raum ist (oder die Liste lang): Das Fenster selbst
                 // merkt sich nur seine erste Höhe und gäbe sonst nie mehr her.
                 .max_height(list_height)
