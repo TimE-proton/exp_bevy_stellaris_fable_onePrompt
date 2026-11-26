@@ -18,12 +18,16 @@
 pub mod conquest;
 pub mod day;
 pub mod orbit;
+pub mod orders;
 mod plugin;
 pub mod step;
 
 pub use conquest::{HandOverTerms, hand_over, mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
+pub use orders::{
+    begin_siege, embark_troops, lift_siege, peace_veto, set_garrison_orders, set_siege_orders,
+};
 pub use plugin::SiegePlugin;
 pub use step::{
     DayEffects, Landing, Projection, build_zones, forecast, form, hull_shares, land,

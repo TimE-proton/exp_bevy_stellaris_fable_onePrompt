@@ -186,6 +186,19 @@ impl<'a> Orbit<'a> {
         })
     }
 
+    /// Die Flotte, wenn sie besteht und `polity` gehört; sonst der Grund, mit dem auch
+    /// die Befehle der Flottenebene ablehnen.
+    pub fn own(&self, polity: PolityId, fleet: FleetId) -> Result<Standing, String> {
+        if self.fleets.get(fleet).is_none() {
+            return Err("Flotte unbekannt".into());
+        }
+        self.standing(fleet)
+            .filter(|fleet| fleet.owner == polity)
+            .ok_or_else(|| {
+                "Flotte gehört einer anderen Gemeinschaft oder besteht nicht mehr".to_string()
+            })
+    }
+
     /// Verbände, die die Flotte tragen kann; null, wenn sie nicht besteht.
     pub fn berths(&self, data: &GameData, fleet: FleetId) -> f64 {
         self.fleets

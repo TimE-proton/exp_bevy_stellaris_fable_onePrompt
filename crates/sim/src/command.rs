@@ -18,6 +18,7 @@ use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use crate::logistics::Logistics;
 use crate::polity::{self, Polities};
+use crate::siege::{self, Posture, SiegeOrders, Sieges};
 use crate::tech::{self, Research};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
@@ -133,6 +134,39 @@ pub enum SimCommand {
         planet: PlanetId,
         class: ShipClass,
     },
+    /// Eine eigene Flotte belagert einen Planeten in ihrem System, mit dessen Besitzer
+    /// Krieg herrscht. Ersetzt ein früheres Ziel der Flotte.
+    BeginSiege {
+        fleet: FleetId,
+        planet: PlanetId,
+    },
+    /// Stehende Befehle für eine eigene Belagerung: Feuerstufe, Sturm oder Halten,
+    /// Schwerpunkt (Index der Zone), Plünderung nach dem Fall.
+    SetSiegeOrders {
+        planet: PlanetId,
+        orders: SiegeOrders,
+    },
+    /// Eine eigene Belagerung aufheben. Truppen am Boden schiffen sich wieder ein, soweit
+    /// an Bord Platz ist; stehen welche am Boden, braucht der Abzug die Orbitalhoheit.
+    LiftSiege {
+        planet: PlanetId,
+    },
+    /// Haltung der Garnison einer eigenen Welt, und ob ihre Geschütze schweigen, um
+    /// Vorräte zu sparen.
+    SetGarrisonOrders {
+        planet: PlanetId,
+        posture: Posture,
+        hold_fire: bool,
+    },
+    /// Reguläre Verbände einer eigenen Welt auf eine eigene Flotte in deren System
+    /// einschiffen, mit Nachschub für `supply_days` Tage vom Markt des Systems, soweit
+    /// Ware und Staatskasse reichen.
+    EmbarkTroops {
+        fleet: FleetId,
+        planet: PlanetId,
+        strength: f64,
+        supply_days: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +256,7 @@ pub struct CommandContext<'w> {
     pub logistics: Res<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
     pub battles: ResMut<'w, Battles>,
+    pub sieges: ResMut<'w, Sieges>,
     pub diplomacy: ResMut<'w, Diplomacy>,
     pub chronicle: ResMut<'w, Chronicle>,
 }
@@ -330,14 +365,18 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             }
             Ok(())
         }
-        SimCommand::MakePeace { target } => diplomacy::make_peace(
-            &mut ctx.diplomacy,
-            &ctx.polities,
-            &mut ctx.chronicle,
-            tick,
-            polity,
-            *target,
-        ),
+        SimCommand::MakePeace { target } => {
+            // Wer belagert wird, kann den Frieden nicht selbst schließen.
+            siege::peace_veto(&ctx.galaxy, &ctx.polities, &ctx.sieges, polity, *target)?;
+            diplomacy::make_peace(
+                &mut ctx.diplomacy,
+                &ctx.polities,
+                &mut ctx.chronicle,
+                tick,
+                polity,
+                *target,
+            )
+        }
         SimCommand::BuyShares {
             issuer,
             shares,
@@ -483,17 +522,28 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         }
         SimCommand::CancelBuild { order } => fleet::cancel_order(&mut ctx.fleets, polity, *order),
         SimCommand::MergeFleets { from, into } => {
-            fleet::merge_fleets(&ctx.data, &mut ctx.fleets, polity, *from, *into)
+            fleet::merge_fleets(&ctx.data, &mut ctx.fleets, polity, *from, *into)?;
+            // Truppen an Bord und das Ziel einer Belagerung gehen mit den Schiffen.
+            siege::Orbit::new(&mut ctx.fleets, &ctx.research).merged(&mut ctx.sieges, *from, *into);
+            Ok(())
         }
-        SimCommand::SplitFleet { fleet, ships } => fleet::split_fleet(
-            &ctx.data,
-            &ctx.polities,
-            &mut ctx.fleets,
-            polity,
-            *fleet,
-            ships,
-        )
-        .map(|_| ()),
+        SimCommand::SplitFleet { fleet, ships } => {
+            let detached = fleet::split_fleet(
+                &ctx.data,
+                &ctx.polities,
+                &mut ctx.fleets,
+                polity,
+                *fleet,
+                ships,
+            )?;
+            siege::Orbit::new(&mut ctx.fleets, &ctx.research).split(
+                &ctx.data,
+                &mut ctx.sieges,
+                *fleet,
+                detached,
+            );
+            Ok(())
+        }
         SimCommand::SetFleetOrders {
             fleet,
             formation,
@@ -507,5 +557,62 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         SimCommand::Retreat { fleet } => {
             fleet::order_retreat(&ctx.fleets, &mut ctx.battles, polity, *fleet)
         }
+        SimCommand::BeginSiege { fleet, planet } => siege::begin_siege(
+            &ctx.galaxy,
+            &ctx.polities,
+            &ctx.diplomacy,
+            &mut ctx.sieges,
+            &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
+            polity,
+            *fleet,
+            *planet,
+        ),
+        SimCommand::SetSiegeOrders { planet, orders } => {
+            siege::set_siege_orders(&ctx.galaxy, &mut ctx.sieges, polity, *planet, *orders)
+        }
+        SimCommand::LiftSiege { planet } => siege::lift_siege(
+            &ctx.data,
+            &ctx.galaxy,
+            &ctx.polities,
+            &ctx.diplomacy,
+            &mut ctx.finance,
+            &mut ctx.sieges,
+            &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
+            &mut ctx.chronicle,
+            polity,
+            *planet,
+            tick,
+        ),
+        SimCommand::SetGarrisonOrders {
+            planet,
+            posture,
+            hold_fire,
+        } => siege::set_garrison_orders(
+            &ctx.data,
+            &ctx.galaxy,
+            &mut ctx.sieges,
+            polity,
+            *planet,
+            *posture,
+            *hold_fire,
+        ),
+        SimCommand::EmbarkTroops {
+            fleet,
+            planet,
+            strength,
+            supply_days,
+        } => siege::embark_troops(
+            &ctx.data,
+            &ctx.galaxy,
+            &ctx.diplomacy,
+            &mut ctx.economy,
+            &mut ctx.sieges,
+            &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
+            polity,
+            *fleet,
+            *planet,
+            *strength,
+            *supply_days,
+        ),
     }
 }
