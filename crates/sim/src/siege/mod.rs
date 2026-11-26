@@ -12,8 +12,11 @@
 //! und Forschung reicht sie nicht heran. Was ein Tag außerhalb des Datensatzes bewirkt,
 //! steht in [`step::DayEffects`].
 //!
-//! In der Partie liest allein [`orbit`] Flotten, Schiffe und Forschung und übersetzt sie
-//! in die einfachen Daten, mit denen alles Übrige rechnet.
+//! In der Partie führt [`day`] den Lebenslauf der Datensätze und wendet an, was der
+//! Tagesrechner bewirkt; [`conquest`] macht aus einem Urteil den Besitzwechsel, [`orders`]
+//! prüft die Befehle. Allein [`orbit`] liest Flotten, Schiffe und Forschung und übersetzt
+//! sie in die einfachen Daten, mit denen alles Übrige rechnet. Datensätze enden nur über
+//! [`close`].
 
 pub mod conquest;
 pub mod day;

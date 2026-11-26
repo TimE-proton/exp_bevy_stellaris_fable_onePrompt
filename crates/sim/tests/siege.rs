@@ -371,7 +371,7 @@ fn a_colony_is_starved_out_and_changes_its_owner_without_a_shot() {
             days <= balance.max_siege_days,
             "die Einschließung endet nicht in der Frist"
         );
-        if days % 10 == 0 || owner(&campaign.sim, planet) != Some(defender) {
+        if days <= 3 || days % 10 == 0 || campaign.defense().militia < 1.0 {
             println!("{}", campaign.report());
         }
         let Some(siege) = campaign.siege() else {
@@ -514,10 +514,8 @@ fn a_station_keeps_the_system_open_and_the_stores_full_until_it_falls() {
         );
         assert_eq!(held.defense().depot, stores);
         assert!(siege.report.hull > 0.0 && siege.report.stations_lost > 0.0);
-        if day % 4 == 0 {
-            println!("ohne Station  {}", open.report());
-            println!("mit Station   {}", held.report());
-        }
+        println!("ohne Station  {}", open.report());
+        println!("mit Station   {}", held.report());
     }
     // Das Duell kostet die Flotte Rumpf und Munition, die Station Stufe um Stufe.
     let unhurt = &fleet(&open.sim, open.fleet).ships[0];
@@ -532,15 +530,16 @@ fn a_station_keeps_the_system_open_and_the_stores_full_until_it_falls() {
         held.day();
         days += 1;
         assert!(days < 100, "die Station fällt nie");
+        println!("mit Station   {}", held.report());
     }
-    println!("mit Station   {}", held.report());
-    held.day();
-    held.day();
+    for _ in 0..2 {
+        held.day();
+        println!("mit Station   {}", held.report());
+    }
     let siege = held.siege().expect("die Belagerung dauert an");
     assert_eq!(siege.phase(held.defense()), Phase::Investment);
     assert!(held.blockaded());
     assert!(held.defense().depot < stores);
-    println!("mit Station   {}", held.report());
     assert_eq!(fleet(&held.sim, held.fleet).ships.len(), 6);
 }
 
@@ -1070,4 +1069,140 @@ fn a_siege_replays_identically_with_every_tick_and_across_saving() {
     assert_eq!(replay(true, None), plain);
     // Gespeichert und geladen mitten in der Belagerung.
     assert_eq!(replay(false, Some(20)), plain);
+}
+
+// --- Viele Kriege -------------------------------------------------------------------
+
+/// Die Welt des Gegners `foe`, die `fleet` als Nächstes belagern soll: im eigenen System
+/// die bevölkerungsreichste, sonst die nächstgelegene. Dazu ihr System.
+fn next_target(sim: &Headless, fleet: &Fleet, foe: PolityId) -> Option<(PlanetId, SystemId)> {
+    let galaxy = sim.galaxy();
+    let here = galaxy
+        .planets_in(fleet.system)
+        .filter(|planet| planet.owner == Some(foe))
+        .max_by(|a, b| a.population.total_cmp(&b.population).then(b.id.cmp(&a.id)));
+    if let Some(planet) = here {
+        return Some((planet.id, planet.system));
+    }
+    galaxy
+        .planets_of(foe)
+        .map(|planet| {
+            let path = galaxy
+                .shortest_path(fleet.system, planet.system, |_| true)
+                .unwrap();
+            (galaxy.path_length(&path), planet.id, planet.system)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(_, planet, system)| (planet, system))
+}
+
+/// Jede Gemeinschaft erklärt ihrer Nachbarin in der Liste den Krieg, schifft Truppen ein
+/// und belagert, was sie erreicht; alle zehn Tage neue Befehle. Kein Drehbuch für einen
+/// bestimmten Verlauf: Gefechte, Entsatz, Rückzüge, verlorene Flotten und Eroberungen
+/// greifen über zehn Jahre ineinander, und an jedem Tag müssen alle Invarianten und die
+/// Geldsumme halten. Die Seeds sind so gewählt, dass viel davon vorkommt.
+#[test]
+fn sieges_in_many_wars_keep_every_invariant() {
+    let mut conquests = 0;
+    let mut lifted = 0;
+    for seed in [4, 10, 14] {
+        let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
+        sim.run_days(3 * DAYS_PER_YEAR);
+        let count = sim.polities().list.len() as u32;
+        let foe_of = |polity: PolityId| PolityId((polity.0 + 1) % count);
+        for index in 0..count {
+            let polity = PolityId(index);
+            let fleet = fleet_of(&sim, polity);
+            let home = home_of(&sim, polity).0;
+            sim.issue(
+                polity,
+                SimCommand::DeclareWar {
+                    target: foe_of(polity),
+                },
+            );
+            sim.issue(
+                polity,
+                SimCommand::EmbarkTroops {
+                    fleet,
+                    planet: home,
+                    strength: TROOPS,
+                    supply_days: 30,
+                },
+            );
+            sim.issue(
+                polity,
+                SimCommand::SetStance {
+                    fleet,
+                    stance: Stance::Blockade,
+                },
+            );
+        }
+        for step in 0..(10 * DAYS_PER_YEAR / 10) {
+            let orders: Vec<(PolityId, SimCommand)> = fleets(&sim)
+                .list
+                .iter()
+                .filter(|fleet| fleet.alive && fleet.owner.0 < count && fleet.is_ready())
+                .filter(|fleet| fleet.is_docked() && fleet.route.is_empty())
+                .filter_map(|fleet| {
+                    let foe = foe_of(fleet.owner);
+                    let (planet, system) = next_target(&sim, fleet, foe)?;
+                    if sieges(&sim).assign.get(&fleet.id) == Some(&planet) {
+                        return None;
+                    }
+                    let order = if system == fleet.system {
+                        SimCommand::BeginSiege {
+                            fleet: fleet.id,
+                            planet,
+                        }
+                    } else {
+                        SimCommand::MoveFleet {
+                            fleet: fleet.id,
+                            to: system,
+                        }
+                    };
+                    Some((fleet.owner, order))
+                })
+                .collect();
+            for (polity, order) in orders {
+                sim.issue(polity, order);
+            }
+            for _ in 0..10 {
+                sim.run_days(1);
+                let day = sim.clock().day();
+                assert_eq!(
+                    check_invariants(sim.world()),
+                    Ok(()),
+                    "Seed {seed}, Tag {day} (Schritt {step})"
+                );
+                assert_eq!(money_drift(sim.world()), Some(0), "Seed {seed}, Tag {day}");
+            }
+        }
+        let state = sieges(&sim);
+        let stats = &state.stats;
+        println!(
+            "Seed {seed}: {} Belagerungen begonnen, {} ausgehungert, {} gestürmt, {} aufgehoben, \
+             {} laufen, {} Besitzwechsel stehen aus; längste {} Tage; Gefechte {}",
+            stats.begun,
+            stats.starved,
+            stats.stormed,
+            stats.lifted,
+            state.active.len(),
+            state.pending.len(),
+            stats.longest,
+            sim.world().resource::<Battles>().next_id
+        );
+        // Jeder Datensatz ist genau einmal verbucht oder läuft noch.
+        assert_eq!(
+            stats.begun as usize,
+            (stats.lifted + stats.conquests()) as usize + state.active.len()
+        );
+        assert!(stats.begun > 0, "Seed {seed}: niemand hat belagert");
+        conquests += stats.conquests();
+        lifted += stats.lifted;
+    }
+    assert!(conquests > 0, "in keiner Partie fiel eine Welt");
+    assert!(
+        lifted > 0,
+        "in keiner Partie wurde eine Belagerung aufgehoben"
+    );
 }

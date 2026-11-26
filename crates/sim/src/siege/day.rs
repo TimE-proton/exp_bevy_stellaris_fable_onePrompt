@@ -528,11 +528,12 @@ fn resolve_siege(
         Vec::new()
     };
 
-    // Schiffe: Rumpf, Munition, Treibstoff; Truppen, die als Besatzung an Land gingen.
-    let toll = orbit.apply(data, sieges, &squadron.fleets, attacker, &effects);
+    // Wer als Besatzung an Land ging, ist nicht mehr an Bord; danach die Schiffe: Rumpf,
+    // Munition, Treibstoff, und was mit verlorenen Plätzen an Truppen untergeht.
     if effects.landed > 0.0 {
         take_troops(sieges, &squadron.fleets, effects.landed);
     }
+    let toll = orbit.apply(data, sieges, &squadron.fleets, attacker, &effects);
     // Die Welt: Menschen, Kapital, Stimmung an der Börse.
     if effects.population < 1.0 {
         galaxy.planet_mut(planet).population *= effects.population;
