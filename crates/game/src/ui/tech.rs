@@ -274,8 +274,9 @@ fn budget(
     ui.horizontal(|ui| {
         ui.label(RichText::new("Etat").color(ACCENT)).on_hover_text(
             "Anteil der laufenden Staatseinnahmen des Vormonats (Lohnsteuer, Zölle, \
-             Dividenden): das Gehalt der Forschenden. Gezahlt wird nur aus dem, was die \
-             Staatskasse über ihrer Rücklage hält; Sold und Einkäufe der Flotte gehen vor.",
+             Dividenden): das Gehalt der Forschenden. Im Haushalt steht die Forschung hinter \
+             Flotte, Beschaffung und Kontoren und greift die Rücklage nicht an; reicht das \
+             Geld nicht, wird sie zuerst gekürzt (Fenster „Staat“).",
         );
         let slider = egui::Slider::new(&mut wanted, 0.0..=(max_share * 100.0) as f32)
             .step_by(1.0)
@@ -324,8 +325,8 @@ fn budget(
     if entry.budget_share > 0.0 && entry.target.is_some() && income > 0.0 && spent <= 0.0 {
         ui.label(
             detail(
-                "Im letzten Monat floss kein Geld in die Forschung: Es gab kein Ziel, oder die \
-                 Staatskasse lag nicht über ihrer Rücklage.",
+                "Im letzten Monat floss kein Geld in die Forschung: Es gab kein Ziel, oder der \
+                 Haushalt hat den Etat ganz gekürzt (Fenster „Staat“).",
             )
             .color(WARN),
         );
@@ -1052,7 +1053,8 @@ mod tests {
         // Ohne Änderung am Regler gibt es nichts festzusetzen.
         assert_eq!(game.button("Etat festsetzen"), None);
         // Der Spieler stellt einen anderen Etat ein und setzt ihn fest.
-        let wanted: f32 = if before > 0.15 { 10.0 } else { 25.0 };
+        // Beide Werte liegen unter dem höchsten Etat, den der Kern zulässt.
+        let wanted: f32 = if before > 0.08 { 5.0 } else { 10.0 };
         game.world_mut().resource_mut::<UiState>().research_percent = Some(wanted);
         game.frames(2);
         game.click_on("Etat festsetzen");
