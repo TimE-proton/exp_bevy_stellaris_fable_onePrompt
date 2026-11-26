@@ -1,4 +1,4 @@
-use super::{OrbitAccess, Sieges, run_day, tidy};
+use super::{OrbitAccess, Sieges, resolve_conquests, run_day, tidy};
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start};
 use crate::data::GameData;
@@ -20,11 +20,15 @@ impl Plugin for SiegePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             sim_schedule(),
-            // Nach den Gefechten des Takts: Wer dort eine Flotte verliert, belagert im
-            // selben Takt nicht mehr. Der Tagesschritt folgt am Tagesbeginn.
-            (siege_watch, siege_day.run_if(day_start))
-                .chain()
-                .in_set(SimSet::Siege),
+            (
+                // Nach den Gefechten des Takts: Wer dort eine Flotte verliert, belagert im
+                // selben Takt nicht mehr. Der Tagesschritt folgt am Tagesbeginn.
+                (siege_watch, siege_day.run_if(day_start))
+                    .chain()
+                    .in_set(SimSet::Siege),
+                // Urteile des Tages werden noch am selben Tag zum Besitzwechsel.
+                conquests.in_set(SimSet::Aftermath).run_if(day_start),
+            ),
         );
     }
 }
@@ -74,6 +78,38 @@ fn siege_day(
     mut chronicle: ResMut<Chronicle>,
 ) {
     run_day(
+        &data,
+        &mut galaxy,
+        &polities,
+        &diplomacy,
+        &mut economy,
+        &mut finance,
+        &logistics,
+        &mut sieges,
+        &mut access.orbit(),
+        &mut chronicle,
+        clock.tick,
+    );
+}
+
+/// Tagesabschluss: Fällige Besitzwechsel werden vollzogen.
+fn conquests(
+    data: Res<GameData>,
+    clock: Res<SimClock>,
+    polities: Res<Polities>,
+    diplomacy: Res<Diplomacy>,
+    logistics: Res<Logistics>,
+    mut galaxy: ResMut<Galaxy>,
+    mut economy: ResMut<Economy>,
+    mut finance: ResMut<Finance>,
+    mut sieges: ResMut<Sieges>,
+    mut access: OrbitAccess,
+    mut chronicle: ResMut<Chronicle>,
+) {
+    if sieges.pending.is_empty() {
+        return;
+    }
+    resolve_conquests(
         &data,
         &mut galaxy,
         &polities,

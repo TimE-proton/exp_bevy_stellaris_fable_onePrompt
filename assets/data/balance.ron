@@ -514,7 +514,7 @@
     siege: (
         // Der Kampf um einen Planeten. Einheiten: Ein Verband (V) steht für
         // pop_per_strength Mio. Menschen. Feuerkraft ist die Waffenleistung der Schiffe
-        // im Orbit (Startflotte 150, ein Schlachtschiff gut 80). Vorräte der Garnison
+        // im Orbit (Startflotte gut 130, ein Schlachtschiff knapp 90). Vorräte der Garnison
         // zählen in Tagen, der Nachschub der Landungstruppe in Verbandstagen.
         // Drei Wege führen zum Ziel: aushungern (langsam, die Beute bleibt heil), stürmen
         // (Wochen, kostet Truppen), beschießen (schnell, kostet Beute).
@@ -538,6 +538,8 @@
         // Anteil des Tanks je Tag im Orbit, Verbände je Rumpfsegment an Bord.
         station_fuel: 0.003,
         berth_per_segment: 0.5,
+        // So viele Tage Nachschub nehmen Truppen beim Einschiffen höchstens mit.
+        supply_days_cap: 120,
         // Aktive Geschütze fangen je Stufe diesen Anteil einer Landungswelle ab.
         landing_loss: 0.04,
         landing_loss_cap: 0.4,
@@ -679,7 +681,12 @@
         stake_pts: 30.0,
         scar_pts: 25.0,
         liberation: 55.0,
-        // Nach einer Übergabe wiegt die Besatzung nur diesen Anteil.
+        // Schranken dieses Zusammenhalts: Auch die verwüstete Welt behält einen Rest, auch
+        // die freundlich übernommene beginnt nicht loyal.
+        conquest_cohesion: (5.0, 70.0),
+        // Besatzung nach der Eroberung = 1 − Vorbesitz des Eroberers, mindestens
+        // occupation_min. Nach einer Übergabe wiegt sie nur den Anteil capitulation_mercy.
+        occupation_min: 0.1,
         capitulation_mercy: 0.6,
         // Besatzung und Kriegsschäden verblassen je Monat um diesen Anteil.
         occupation_decay: 0.015,

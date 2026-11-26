@@ -15,11 +15,13 @@
 //! In der Partie liest allein [`orbit`] Flotten, Schiffe und Forschung und übersetzt sie
 //! in die einfachen Daten, mit denen alles Übrige rechnet.
 
+pub mod conquest;
 pub mod day;
 pub mod orbit;
 mod plugin;
 pub mod step;
 
+pub use conquest::{HandOverTerms, hand_over, mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
 pub use plugin::SiegePlugin;

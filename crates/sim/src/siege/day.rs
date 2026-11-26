@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 /// Tiefer drückt kein einzelnes Ereignis die Stimmung an der Börse; so hält es auch
 /// `finance::shares::shock_polity`.
-const SHOCK_FLOOR: f64 = 0.2;
+pub(super) const SHOCK_FLOOR: f64 = 0.2;
 /// Unter diesem Wert gilt der Stillstand der Wirtschaft als abgeklungen.
 const DISRUPTION_FLOOR: f64 = 1e-6;
 
@@ -627,30 +627,30 @@ pub fn run_day(
     }
 }
 
+/// Von Hand gestellte Lagen für die Tests neben dem Code. Hier werden Tagesschritt und
+/// Eroberung selbst geprüft; durch Befehle gespielte Partien stehen in `tests/siege.rs`.
 #[cfg(test)]
-mod tests {
+pub(super) mod testing {
     use super::*;
-    use crate::fleet::{Stance, update_blockades};
-    use crate::siege::{Embarked, Phase, occupation_force};
+    use crate::siege::resolve_conquests;
     use crate::state::{SimConfig, SimState};
 
-    const ME: PolityId = PolityId(0);
-    const FOE: PolityId = PolityId(1);
+    pub const ME: PolityId = PolityId(0);
+    pub const FOE: PolityId = PolityId(1);
 
-    /// Eine neue Partie, in der die Flotte der Gemeinschaft 0 im Krieg über der Hauptwelt
-    /// der Gemeinschaft 1 liegt und ihr zugeordnet ist; deren Flotte steht ein System
-    /// weiter. Von Hand gestellt: Hier wird der Tagesschritt selbst geprüft; durch Befehle
-    /// gespielte Partien stehen in `tests/siege.rs`.
-    struct Scene {
-        data: GameData,
-        state: SimState,
-        planet: PlanetId,
-        system: SystemId,
-        day: u64,
+    /// Eine neue Partie, in der die Flotte der Gemeinschaft 0 im Krieg über einer Welt der
+    /// Gemeinschaft 1 liegt und ihr zugeordnet ist; deren Flotte steht ein System weiter.
+    pub struct Scene {
+        pub data: GameData,
+        pub state: SimState,
+        pub planet: PlanetId,
+        pub system: SystemId,
+        pub day: u64,
     }
 
     impl Scene {
-        fn new() -> Self {
+        /// Belagert wird die Hauptwelt der Gemeinschaft 1.
+        pub fn new() -> Self {
             let data = GameData::load_workspace().unwrap();
             let mut state = SimState::generate(
                 &data,
@@ -675,8 +675,53 @@ mod tests {
             }
         }
 
-        /// Rechnet den nächsten Tagesschritt der Belagerung.
-        fn day(&mut self) {
+        /// Belagert wird eine Kolonie, die die Gemeinschaft 1 eben gegründet hat.
+        pub fn colony() -> Self {
+            let mut scene = Self::new();
+            let state = &mut scene.state;
+            let treasury = state.economy.treasury(FOE);
+            let colony = crate::polity::claimable_planets(
+                &state.galaxy,
+                &state.polities,
+                &scene.data.balance.colonization,
+                treasury,
+                FOE,
+                0,
+            )[0];
+            crate::polity::claim_planet(
+                &mut state.galaxy,
+                &mut state.polities,
+                &mut state.economy,
+                &mut state.chronicle,
+                &scene.data,
+                FOE,
+                colony,
+                0,
+            )
+            .unwrap();
+            // Die Firmen der Kolonie gehen an die Börse, wie am Monatsende.
+            let capitals: Vec<_> = state.polities.list.iter().map(|p| p.capital).collect();
+            crate::finance::found_missing_issuers(
+                &scene.data,
+                &state.galaxy,
+                &state.economy,
+                &state.logistics,
+                &capitals,
+                &mut state.finance,
+            );
+            let system = state.galaxy.planet(colony).system;
+            state.fleets.list[0].system = system;
+            // Die Flotte der Gemeinschaft 1 steht weder dort noch im Weg.
+            let elsewhere = state.polities.get(PolityId(2)).capital.unwrap();
+            state.fleets.list[1].system = state.galaxy.planet(elsewhere).system;
+            state.sieges.assign.insert(FleetId(0), colony);
+            scene.planet = colony;
+            scene.system = system;
+            scene
+        }
+
+        /// Rechnet den nächsten Tag: den Tagesschritt und danach die fälligen Besitzwechsel.
+        pub fn day(&mut self) {
             self.day += 1;
             let state = &mut self.state;
             let mut orbit = Orbit::new(&mut state.fleets, &state.research);
@@ -693,16 +738,40 @@ mod tests {
                 &mut state.chronicle,
                 self.day * TICKS_PER_DAY,
             );
+            resolve_conquests(
+                &self.data,
+                &mut state.galaxy,
+                &state.polities,
+                &state.diplomacy,
+                &mut state.economy,
+                &mut state.finance,
+                &state.logistics,
+                &mut state.sieges,
+                &mut orbit,
+                &mut state.chronicle,
+                self.day * TICKS_PER_DAY,
+            );
         }
 
-        fn siege(&self) -> &Siege {
+        pub fn siege(&self) -> &Siege {
             self.state.sieges.siege(self.planet).expect("Belagerung")
         }
 
-        fn money(&self) -> i64 {
+        /// Alles Geld der Partie.
+        pub fn money(&self) -> i64 {
             self.state.economy.money_in_accounts()
+                + self.state.logistics.money()
+                + self.state.finance.money()
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{FOE, ME, Scene};
+    use super::*;
+    use crate::fleet::{Stance, update_blockades};
+    use crate::siege::{Embarked, Phase, occupation_force};
 
     #[test]
     fn a_record_forms_under_control_and_the_garrison_lives_off_stores_and_market() {

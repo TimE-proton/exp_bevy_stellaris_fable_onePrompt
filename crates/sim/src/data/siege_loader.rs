@@ -149,6 +149,7 @@ fn check_levers(siege: &SiegeBalance) -> Result<(), String> {
     }
     for (name, value) in [
         ("elite_flight", siege.elite_flight),
+        ("occupation_min", siege.occupation_min),
         ("intel_spread", siege.intel_spread),
         ("disrupt (umkämpft)", siege.disrupt.0),
         ("disrupt (besetzt)", siege.disrupt.1),
@@ -217,6 +218,14 @@ fn check_levers(siege: &SiegeBalance) -> Result<(), String> {
         if !(value.is_finite() && (0.0..=100.0).contains(&value)) {
             return Err(format!("siege.{name} muss in 0..100 liegen"));
         }
+    }
+    let (lowest, highest) = siege.conquest_cohesion;
+    if !(lowest.is_finite() && highest.is_finite() && lowest >= 0.0 && lowest <= highest)
+        || highest > 100.0
+    {
+        return Err(
+            "siege.conquest_cohesion: Schranken in 0..100, die untere nicht über der oberen".into(),
+        );
     }
     if !siege.wear_planet.0.is_finite() || !siege.wear_planet.1.is_finite() {
         return Err("siege.wear_planet muss aus endlichen Zahlen bestehen".into());
@@ -494,6 +503,14 @@ mod tests {
             (
                 "liberation",
                 Box::new(|data| data.balance.siege.liberation = 140.0),
+            ),
+            (
+                "conquest_cohesion",
+                Box::new(|data| data.balance.siege.conquest_cohesion = (40.0, 20.0)),
+            ),
+            (
+                "occupation_min",
+                Box::new(|data| data.balance.siege.occupation_min = 1.5),
             ),
             (
                 "occupation_hold",

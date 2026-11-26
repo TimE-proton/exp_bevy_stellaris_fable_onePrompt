@@ -492,6 +492,8 @@ pub struct SiegeBalance {
     pub station_fuel: f64,
     /// Verbände je Rumpfsegment, die ein Schiff tragen kann.
     pub berth_per_segment: f64,
+    /// Höchster Nachschub in Tagen, den Truppen beim Einschiffen mitnehmen.
+    pub supply_days_cap: u16,
     /// Anteil einer Landungswelle, den aktive Geschütze je Stufe abfangen, und Obergrenze.
     pub landing_loss: f64,
     pub landing_loss_cap: f64,
@@ -623,6 +625,10 @@ pub struct SiegeBalance {
     pub stake_pts: f64,
     pub scar_pts: f64,
     pub liberation: f64,
+    /// Untere und obere Schranke des Zusammenhalts nach der Eroberung.
+    pub conquest_cohesion: (f64, f64),
+    /// Besatzung nach der Eroberung: mindestens dieser Wert, auch bei vollem Vorbesitz.
+    pub occupation_min: f64,
     /// Faktor auf die Besatzung nach einer Übergabe.
     pub capitulation_mercy: f64,
     /// Monatliches Verblassen von Besatzung und Kriegsschäden.
