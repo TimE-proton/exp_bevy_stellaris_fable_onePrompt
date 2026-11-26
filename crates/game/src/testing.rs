@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::WgpuSettings;
 use bevy::time::TimeUpdateStrategy;
-use bevy::window::{CursorMoved, ExitCondition, PrimaryWindow};
+use bevy::window::{CursorMoved, ExitCondition, PrimaryWindow, WindowEvent};
 use bevy::winit::WinitPlugin;
 use bevy_egui::{EguiContext, EguiPlugin, PrimaryEguiContext, egui};
 use std::time::Duration;
@@ -120,6 +120,14 @@ impl TestGame {
         self.world_mut().write_message(message);
     }
 
+    /// Schickt eine Eingabe so, wie das Fenstersystem sie schickt: einmal als eigene
+    /// Nachricht (daraus liest die Engine Tasten und Mausknöpfe) und einmal im Sammelstrom
+    /// aller Fensterereignisse (daraus liest die Oberfläche).
+    fn input<M: Message + Clone + Into<WindowEvent>>(&mut self, message: M) {
+        self.send(message.clone());
+        self.send::<WindowEvent>(message.into());
+    }
+
     fn window(&mut self) -> Entity {
         let world = self.world_mut();
         world
@@ -131,24 +139,24 @@ impl TestGame {
     /// Bewegt den Mauszeiger an eine Stelle des Fensters (logische Pixel).
     pub fn move_pointer(&mut self, to: Vec2) {
         let window = self.window();
-        let world = self.world_mut();
-        let mut entity = world.entity_mut(window);
+        let mut entity = self.world_mut().entity_mut(window);
         let mut state = entity.get_mut::<Window>().expect("Fenster");
         let from = state.cursor_position();
         state.set_cursor_position(Some(to));
-        world.write_message(CursorMoved {
+        self.input(CursorMoved {
             window,
             position: to,
             delta: from.map(|from| to - from),
         });
         if let Some(from) = from {
-            world.write_message(MouseMotion { delta: to - from });
+            // Rohe Mausbewegung, aus der die Engine Züge und das Umsehen liest.
+            self.send(MouseMotion { delta: to - from });
         }
     }
 
     pub fn press(&mut self, button: MouseButton) {
         let window = self.window();
-        self.send(MouseButtonInput {
+        self.input(MouseButtonInput {
             button,
             state: ButtonState::Pressed,
             window,
@@ -157,7 +165,7 @@ impl TestGame {
 
     pub fn release(&mut self, button: MouseButton) {
         let window = self.window();
-        self.send(MouseButtonInput {
+        self.input(MouseButtonInput {
             button,
             state: ButtonState::Released,
             window,
@@ -204,7 +212,7 @@ impl TestGame {
         self.move_pointer(at);
         self.frames(2);
         let window = self.window();
-        self.send(MouseWheel {
+        self.input(MouseWheel {
             unit: MouseScrollUnit::Line,
             x: 0.0,
             y: lines,
@@ -231,14 +239,14 @@ impl TestGame {
             window,
         };
         for key in held {
-            self.send(message(*key, ButtonState::Pressed));
+            self.input(message(*key, ButtonState::Pressed));
         }
         self.frames(1);
-        self.send(message(key_code, ButtonState::Pressed));
+        self.input(message(key_code, ButtonState::Pressed));
         self.frames(1);
-        self.send(message(key_code, ButtonState::Released));
+        self.input(message(key_code, ButtonState::Released));
         for key in held {
-            self.send(message(*key, ButtonState::Released));
+            self.input(message(*key, ButtonState::Released));
         }
         self.frames(2);
     }

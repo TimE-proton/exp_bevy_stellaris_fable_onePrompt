@@ -4,6 +4,7 @@ mod args;
 mod battle_view;
 mod history;
 mod map;
+mod pointer;
 mod selftest;
 mod session;
 mod state;
@@ -63,6 +64,7 @@ fn add_game(app: &mut App, data: sim::GameData, args: args::Args) {
         .add_plugins((
             state::StatePlugin,
             time_control::TimeControlPlugin,
+            pointer::PointerPlugin,
             session::SessionPlugin,
             map::GalaxyViewPlugin,
             traffic::TrafficPlugin,

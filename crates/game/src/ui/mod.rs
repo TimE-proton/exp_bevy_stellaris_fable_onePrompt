@@ -6,6 +6,8 @@ mod finance;
 mod fleets;
 pub(crate) mod format;
 pub(crate) mod panels;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use panels::{SimRefs, UiAction};
 
@@ -13,13 +15,14 @@ use crate::battle_view::BattleViewShown;
 use crate::battle_view::practice::{PracticeSetup, StartPractice};
 use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
+use crate::pointer::UiCover;
 use crate::session::{Notice, SessionRequest, quicksave_path};
 use crate::state::AppState;
 use crate::time_control::SimSpeed;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::input::egui_wants_any_keyboard_input;
-use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use sim::chronicle::Chronicle;
 use sim::clock::SimClock;
 use sim::command::{CommandQueue, CommandSource};
@@ -165,6 +168,7 @@ fn draw_ui(
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
     mut practice: PracticeParams,
+    mut cover: ResMut<UiCover>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -173,13 +177,7 @@ fn draw_ui(
         panels::apply_style(ctx);
         *styled = true;
     }
-    let mut root = egui::Ui::new(
-        ctx.clone(),
-        "wurzel".into(),
-        egui::UiBuilder::new()
-            .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
-    );
+    let mut root = UiCover::root(ctx, "wurzel");
     let mut actions = Vec::new();
     match (app_state.get(), &sim) {
         (AppState::InGame, _) if practice.battle_view.0 => {
@@ -233,6 +231,8 @@ fn draw_ui(
         _ => {}
     }
     panels::notice(&mut root, &notice);
+    // Was die Leisten und Tafeln belegen, gehört nicht der Karte.
+    cover.record(&root);
 
     for action in actions {
         match action {

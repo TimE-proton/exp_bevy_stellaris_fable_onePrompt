@@ -8,6 +8,7 @@
 use super::camera::{CameraRequest, Projector, SelectedShip, ViewOptions};
 use super::feed::{BattleFeed, BattleOrder, BattleViewRequest};
 use super::{Part, ViewFrame, ViewTimings};
+use crate::pointer::UiCover;
 use crate::time_control::{SPEED_LABELS, SimSpeed};
 use crate::ui::UiState;
 use crate::ui::format::{decimal, percent};
@@ -903,16 +904,11 @@ pub(super) fn draw_hud(
     mut orders: MessageWriter<BattleOrder>,
     mut requests: MessageWriter<BattleViewRequest>,
     mut camera: MessageWriter<CameraRequest>,
+    mut cover: ResMut<UiCover>,
 ) -> Result {
     let _span = timings.span(Part::Hud);
     let ctx = contexts.ctx_mut()?;
-    let mut root = egui::Ui::new(
-        ctx.clone(),
-        "gefecht".into(),
-        egui::UiBuilder::new()
-            .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
-    );
+    let mut root = UiCover::root(ctx, "gefecht");
     let mut actions = Vec::new();
     let refs = HudRefs {
         feed: &feed,
@@ -926,6 +922,8 @@ pub(super) fn draw_hud(
     if ui_state.help_open {
         panels::help_window(root.ctx(), &mut ui_state.help_open, true);
     }
+    // Was die Kopfleiste belegt, gehört nicht der Szene.
+    cover.record(&root);
     for action in actions {
         match action {
             HudAction::Order(order) => {

@@ -4,14 +4,13 @@
 
 use super::feed::BattleFeed;
 use super::{BattleViewSet, Part, ViewFrame, ViewTimings, to_world};
+use crate::pointer::{PointerOwner, WorldMouse, track_pointer};
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::input::{
-    EguiWantsInput, egui_wants_any_keyboard_input, egui_wants_any_pointer_input,
-};
+use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input};
 use sim::battle::Battle;
 
 /// Senkrechter Bildwinkel der Schlachtkamera.
@@ -262,6 +261,8 @@ pub(super) fn plugin(app: &mut App) {
         .init_resource::<FollowAnchor>()
         .add_message::<CameraRequest>()
         .add_systems(Startup, spawn_camera)
+        // Vor der Freiflugsteuerung der Engine, die danach im selben Frame läuft.
+        .add_systems(PreUpdate, hold_mouse_look.after(track_pointer))
         .add_systems(
             Update,
             (
@@ -269,7 +270,7 @@ pub(super) fn plugin(app: &mut App) {
                 hotkeys.run_if(not(egui_wants_any_keyboard_input)),
                 apply_requests,
                 follow_selected,
-                pick_on_click.run_if(not(egui_wants_any_pointer_input)),
+                pick_on_click,
                 update_projector,
             )
                 .chain()
@@ -345,18 +346,36 @@ fn sync_flight(flight: &mut FreeCameraState, transform: &Transform) {
     flight.rotation_curve = None;
 }
 
+/// Umsehen beginnt nur über der Szene. Wird die Maustaste dafür über einer Tafel oder
+/// Leiste gedrückt, ruht die Freiflugsteuerung der Engine für dieses eine Frame: Sie
+/// sieht den Tastendruck dann nie und fängt den Zeiger nicht.
+fn hold_mouse_look(
+    buttons: Res<ButtonInput<MouseButton>>,
+    owner: Res<PointerOwner>,
+    mut camera: Single<(&FreeCamera, &mut FreeCameraState), With<BattleCamera>>,
+) {
+    let (controls, flight) = &mut *camera;
+    let look = controls.mouse_key_cursor_grab;
+    if flight.enabled && buttons.just_pressed(look) && owner.taken_by_ui(look) {
+        flight.enabled = false;
+    }
+}
+
 /// Hält die Freiflugkamera im Zaum: Tempo in Grenzen, kein Tempowechsel durch das Mausrad
-/// über einer Tafel, keine Bewegung beim Tippen in ein Textfeld, nicht zu weit weg.
+/// über einer Tafel oder Leiste, keine Bewegung beim Tippen in ein Textfeld, nicht zu weit
+/// weg.
 fn tame_free_camera(
     wants: Res<EguiWantsInput>,
+    mouse: WorldMouse,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
     mut kept_speed: Local<Option<f32>>,
 ) {
     let (transform, flight) = &mut *camera;
-    let speed = if wants.wants_any_pointer_input() {
-        kept_speed.unwrap_or(1.0)
-    } else {
+    // Die Engine hat das Mausrad schon verrechnet; über der Oberfläche gilt das nicht.
+    let speed = if mouse.wheel_is_free() {
         flight.speed_multiplier.clamp(0.04, 12.0)
+    } else {
+        kept_speed.unwrap_or(1.0)
     };
     if flight.speed_multiplier != speed {
         flight.speed_multiplier = speed;
@@ -511,17 +530,17 @@ fn follow_selected(
     anchor.0 = Some((ship, position));
 }
 
-/// Linksklick wählt das Schiff unter dem Mauszeiger; ein Klick ins Leere hebt die Auswahl
-/// auf.
+/// Linksklick in die Szene wählt das Schiff unter dem Mauszeiger; ein Klick ins Leere hebt
+/// die Auswahl auf. Klicks auf Tafeln und Leisten gelten nur diesen.
 fn pick_on_click(
-    buttons: Res<ButtonInput<MouseButton>>,
+    mouse: WorldMouse,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<&Transform, With<BattleCamera>>,
     feed: Res<BattleFeed>,
     frame: Res<ViewFrame>,
     mut selected: ResMut<SelectedShip>,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) {
+    if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let (Some(cursor), Some(battle)) = (window.cursor_position(), feed.battle()) else {
@@ -775,7 +794,7 @@ mod tests {
         world.init_resource::<FollowAnchor>();
         world.init_resource::<Messages<CameraRequest>>();
         world.init_resource::<ButtonInput<KeyCode>>();
-        world.init_resource::<ButtonInput<MouseButton>>();
+        crate::pointer::testing::free_mouse(&mut world);
         let camera = world
             .spawn((BattleCamera, view, FreeCameraState::default()))
             .id();
@@ -960,6 +979,158 @@ mod tests {
                 "{request:?}"
             );
         }
+    }
+
+    /// Eine Gefechtsübung ohne Fenster, pausiert vor dem ersten Takt.
+    fn practice() -> crate::testing::TestGame {
+        let mut game = crate::testing::TestGame::start("--practice --seed 3");
+        game.frames(4);
+        assert_eq!(game.state(), crate::state::AppState::Practice);
+        game
+    }
+
+    /// Ein Schiff, das frei in der Szene steht (nicht unter einer Tafel), und sein Ort im
+    /// Bild.
+    fn ship_in_the_open(game: &crate::testing::TestGame) -> (u32, Vec2) {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| ship.status.in_play())
+            .filter_map(|(index, _)| {
+                let (screen, _) = frame.projector.project(frame.position(index)?)?;
+                Some((index as u32, screen))
+            })
+            .find(|(_, at)| at.x > 300.0 && at.x < 1300.0 && at.y > 380.0 && at.y < 860.0)
+            .expect("ein Schiff in der freien Szene")
+    }
+
+    fn orientation(game: &mut crate::testing::TestGame) -> Quat {
+        let world = game.world_mut();
+        world
+            .query_filtered::<&Transform, With<BattleCamera>>()
+            .single(world)
+            .unwrap()
+            .rotation
+    }
+
+    /// Höhe, in der die Kopfleiste liegt, und eine Stelle auf der Lagetafel links.
+    const BAR_Y: f32 = 11.0;
+    const ON_SIDE_PANEL: Vec2 = Vec2::new(150.0, 70.0);
+    const OPEN_SCENE: Vec2 = Vec2::new(800.0, 620.0);
+
+    #[test]
+    fn clicks_on_the_top_bar_keep_the_selected_ship() {
+        use crate::state::AppState;
+        use crate::time_control::SimSpeed;
+
+        let mut game = practice();
+        let (ship, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(
+            selected.is_some(),
+            "Klick auf Schiff {ship} wählt ein Schiff"
+        );
+
+        // Einmal quer über die ganze Kopfleiste klicken, auf Knöpfe wie auf leere Stellen.
+        // Jeder Knopf tut dabei, was er soll; die Auswahl bleibt, bis „Verlassen“ die
+        // Übung beendet.
+        let (mut paused, mut options, mut clicks) = (false, false, 0);
+        let mut x = 5.0;
+        while x < crate::testing::WINDOW.x && game.state() == AppState::Practice {
+            let before = (
+                *game.resource::<SimSpeed>(),
+                *game.resource::<ViewOptions>(),
+            );
+            game.click(Vec2::new(x, BAR_Y));
+            if game.state() != AppState::Practice {
+                break;
+            }
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "Klick auf die Kopfleiste bei x = {x}"
+            );
+            paused |= before.0.paused != game.resource::<SimSpeed>().paused;
+            options |= before.1.labels != game.resource::<ViewOptions>().labels
+                || before.1.overlay != game.resource::<ViewOptions>().overlay;
+            clicks += 1;
+            x += 9.0;
+        }
+        assert!(paused, "die Zeitsteuerung der Leiste hat reagiert");
+        assert!(options, "die Schalter der Leiste haben reagiert");
+        assert!(clicks > 100, "nur {clicks} Klicks bis zum Verlassen");
+        game.frames(3);
+        assert_eq!(
+            game.state(),
+            AppState::MainMenu,
+            "„Verlassen“ am rechten Rand beendet die Übung"
+        );
+    }
+
+    #[test]
+    fn clicks_on_panels_keep_the_selection_and_clicks_into_space_clear_it() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(selected.is_some());
+        // Lagetafel, Tafel des gewählten Schiffs (unten rechts) und eine leere Stelle der
+        // Kopfleiste; auch dann, wenn Zeigerbewegung und Tastendruck im selben Frame
+        // eintreffen.
+        for point in [
+            ON_SIDE_PANEL,
+            Vec2::new(1400.0, 700.0),
+            Vec2::new(900.0, BAR_Y),
+        ] {
+            game.click(point);
+            assert_eq!(game.resource::<SelectedShip>().0, selected, "{point}");
+            game.move_pointer(OPEN_SCENE);
+            game.frames(2);
+            game.click_at_once(point);
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "schnell: {point}"
+            );
+        }
+        // Ein Klick in den leeren Raum hebt die Auswahl auf; die Tafel des Schiffs
+        // verschwindet, und die Stelle gehört wieder der Szene.
+        game.click(OPEN_SCENE);
+        assert_eq!(game.resource::<SelectedShip>().0, None);
+        game.click_at_once(at);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+    }
+
+    #[test]
+    fn wheel_and_mouse_look_over_panels_leave_the_camera_alone() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let rest = orientation(&mut game);
+        for point in [
+            ON_SIDE_PANEL,
+            Vec2::new(1400.0, 700.0),
+            Vec2::new(900.0, BAR_Y),
+        ] {
+            game.scroll(point, 4.0);
+            assert_eq!(
+                game.resource::<ViewFrame>().fly_speed,
+                1.0,
+                "Mausrad bei {point}"
+            );
+            game.drag(MouseButton::Right, point, Vec2::new(160.0, 40.0));
+            assert_eq!(orientation(&mut game), rest, "Umsehen ab {point}");
+        }
+        // In der freien Szene ändert das Mausrad das Flugtempo, und die rechte Maustaste
+        // dreht den Blick.
+        game.scroll(OPEN_SCENE, 4.0);
+        assert!(game.resource::<ViewFrame>().fly_speed > 1.5);
+        game.drag(MouseButton::Right, OPEN_SCENE, Vec2::new(160.0, 40.0));
+        assert!(orientation(&mut game).angle_between(rest) > 0.1);
     }
 
     #[test]
