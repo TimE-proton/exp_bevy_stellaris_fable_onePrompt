@@ -27,7 +27,7 @@ use sim::state::{SaveGame, SimConfig, money_drift};
 use sim::tech::Research;
 use std::sync::OnceLock;
 
-/// Seed aller Partien hier; derselbe, an dem das Headless-Werkzeug die Prüfsummen zeigt.
+/// Seed der Partien hier, soweit ein Test keinen eigenen nennt.
 const SEED: u64 = 3;
 /// So viele Jahre läuft die Partie, bevor der Krieg beginnt: Dann haben die
 /// Gemeinschaften ihre ersten Kolonien gegründet.
