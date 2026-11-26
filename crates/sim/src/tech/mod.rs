@@ -405,16 +405,42 @@ impl Research {
             return;
         }
         self.sync(data, parent.index().max(child.index()) + 1);
-        let source = self.polities[parent.index()].clone();
+        // Erschöpfend zerlegt und gefüllt: Bei einem neuen Feld des Forschungsstands muss
+        // hier entschieden werden, ob die Neue es erbt oder frisch beginnt.
+        let PolityResearch {
+            known,
+            progress,
+            target: _,
+            auto: _,
+            budget_share,
+            points_last_month: _,
+            spent_last_month: _,
+            effects,
+            spillover,
+            carry: _,
+            spent_total: _,
+            points_total: _,
+            completed: _,
+            focus,
+            usual_share,
+        } = self.polities[parent.index()].clone();
+        let fresh = PolityResearch::new(data);
         self.polities[child.index()] = PolityResearch {
-            known: source.known,
-            progress: source.progress,
-            budget_share: source.budget_share,
-            effects: source.effects,
-            spillover: source.spillover,
-            focus: source.focus,
-            usual_share: source.usual_share,
-            ..PolityResearch::new(data)
+            known,
+            progress,
+            target: fresh.target,
+            auto: fresh.auto,
+            budget_share,
+            points_last_month: fresh.points_last_month,
+            spent_last_month: fresh.spent_last_month,
+            effects,
+            spillover,
+            carry: fresh.carry,
+            spent_total: fresh.spent_total,
+            points_total: fresh.points_total,
+            completed: fresh.completed,
+            focus,
+            usual_share,
         };
         let (parent, child) = (parent.index(), child.index());
         for other in 0..self.intel.len() {

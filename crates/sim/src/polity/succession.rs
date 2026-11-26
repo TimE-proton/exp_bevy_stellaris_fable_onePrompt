@@ -23,8 +23,8 @@ use crate::diplomacy::{Diplomacy, NEUTRAL_CULTURE, Standing, drop_wars_of};
 use crate::economy::{Economy, Money, PlanetEconomy};
 use crate::endgame::{Endgame, Path, PlayerFate};
 use crate::finance::{
-    Bond, Finance, PolityFinance, Region, Stage, issuers_of_region, move_holdings, pass_holdings,
-    polity_of_issuer,
+    Bond, CohesionFactors, Finance, PolityFinance, Region, Stage, issuers_of_region, move_holdings,
+    pass_holdings, polity_of_issuer,
 };
 use crate::fleet::{Battles, Fleets, succession as fleet_succession};
 use crate::galaxy::{Galaxy, Planet};
@@ -733,22 +733,56 @@ impl<'a> Succession<'a> {
         // Welten: neuer Besitzer, alter Stand der Region.
         let mut planets = Vec::new();
         for index in 0..galaxy.planets.len() {
-            let world = &mut galaxy.planets[index];
-            if world.owner != Some(from) {
+            let Planet {
+                id,
+                system: _,
+                name: _,
+                kind: _,
+                orbit: _,
+                gravity: _,
+                atmosphere: _,
+                temperature: _,
+                water: _,
+                habitability: _,
+                capacity: _,
+                population,
+                deposits: _,
+                owner,
+            } = &mut galaxy.planets[index];
+            if *owner != Some(from) {
                 continue;
             }
-            world.owner = Some(into);
-            let id = world.id;
+            *owner = Some(into);
+            let (id, population) = (*id, *population);
             match path {
                 Path::Forced => {
-                    endgame.tag(id, Path::Forced, world.population, gap);
+                    endgame.tag(id, Path::Forced, population, gap);
                     endgame.seat[index] = false;
                 }
                 Path::Joined if endgame.path_of(id) != Path::Forced => {
-                    endgame.tag(id, Path::Joined, world.population, gap);
+                    endgame.tag(id, Path::Joined, population, gap);
                 }
                 Path::Joined | Path::Own => {}
             }
+            // An der Wirtschaft der Welt ändert das Ende nichts: Auch die Steuerfreiheit
+            // einer autonomen Region bleibt.
+            let PlanetEconomy {
+                capital: _,
+                output: _,
+                utilization: _,
+                utilization_trend: _,
+                roc: _,
+                firms: _,
+                households: _,
+                wage: _,
+                employment: _,
+                labor_demand: _,
+                needs_met: _,
+                income: _,
+                income_today: _,
+                founded_day: _,
+                tax_exempt: _,
+            } = &economy.planets[index];
             planets.push(id);
         }
         if !forced
@@ -757,15 +791,47 @@ impl<'a> Succession<'a> {
         {
             endgame.seat[capital.index()] = true;
         }
-        // Der Monatsabschluss soll den Wechsel nicht als neuen Besitzer lesen (das setzte
-        // Stufe und Fristen zurück), und nichts soll mehr die Beendete nennen.
+        // Die Regionen behalten Stufe, Zusammenhalt und Fristen. Der Monatsabschluss soll
+        // den Wechsel nicht als neuen Besitzer lesen (das setzte sie zurück), und nichts
+        // soll mehr die Beendete nennen.
         for (index, region) in finance.regions.iter_mut().enumerate() {
             let owner = galaxy.planets[index].owner;
-            if region.owner_seen == Some(from) {
-                region.owner_seen = owner;
+            let Region {
+                cohesion: _,
+                stage: _,
+                months_below: _,
+                months_above: _,
+                factors,
+                dividends_out: _,
+                dividends_in: _,
+                dividends_local: _,
+                drain: _,
+                owner_seen,
+                since_day: _,
+            } = region;
+            if *owner_seen == Some(from) {
+                *owner_seen = owner;
             }
-            if region.factors.foreign_polity == Some(from) {
-                region.factors.foreign_polity = Some(into).filter(|heir| owner != Some(*heir));
+            let CohesionFactors {
+                interlock: _,
+                dispersion: _,
+                local_share: _,
+                center_share: _,
+                foreign_share: _,
+                foreign_polity,
+                drain: _,
+                supply: _,
+                weariness: _,
+                tax: _,
+                blockaded: _,
+                is_capital: _,
+                distance: _,
+                years: _,
+                expropriation: _,
+                target: _,
+            } = factors;
+            if *foreign_polity == Some(from) {
+                *foreign_polity = Some(into).filter(|heir| owner != Some(*heir));
             }
         }
 
