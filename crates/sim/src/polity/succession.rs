@@ -585,10 +585,8 @@ impl<'a> Succession<'a> {
                     fleets, galaxy, chronicle, data, planet, from, tick,
                 );
             }
+            // Tritt sie mit ihrer letzten Welt bei, macht ihr Ende diese zum Sitz.
             self.conclude(from, to, path, tick);
-            if path == Path::Joined && was_capital {
-                self.endgame.seat[index] = true;
-            }
             return Ok(Transfer {
                 from,
                 new_capital: None,
@@ -653,7 +651,7 @@ impl<'a> Succession<'a> {
                 Some(from),
                 Some(home_system),
                 format!(
-                    "{} verliert seine Hauptwelt {}. Neue Hauptwelt ist {}.",
+                    "{} verliert die Hauptwelt {}. Neue Hauptwelt ist {}.",
                     loser.name,
                     galaxy.planet(planet).name,
                     galaxy.planet(new_capital).name
@@ -785,7 +783,9 @@ impl<'a> Succession<'a> {
             } = &economy.planets[index];
             planets.push(id);
         }
-        if !forced
+        // Die Hauptwelt einer Gemeinschaft, die beitritt, bleibt als Sitz kenntlich. Gründet
+        // ihre letzte Welt eine neue Gemeinschaft, ist niemand beigetreten.
+        if path == Path::Joined
             && let Some(capital) = old_capital
             && galaxy.planet(capital).owner == Some(into)
         {
@@ -970,11 +970,15 @@ impl<'a> Succession<'a> {
 
         let (ended, heir) = (&polities.get(from).name, &polities.get(into).name);
         let worlds = match planets.len() {
-            0 => "keine Welt mehr".to_string(),
             1 => "eine Welt".to_string(),
             count => format!("{count} Welten"),
         };
         let text = match path {
+            // Die letzte Welt ist schon übertragen: Zu übernehmen bleibt nur die Kasse.
+            Path::Forced if planets.is_empty() => format!(
+                "{ended} hat die letzte Welt verloren und endet. {heir} übernimmt die \
+                 Staatskasse; die Flotten von {ended} sind aufgelöst."
+            ),
             Path::Forced => format!(
                 "{ended} endet: {heir} übernimmt {worlds} und die Staatskasse. Die Flotten \
                  von {ended} sind aufgelöst."
@@ -1223,7 +1227,7 @@ pub fn check(world: &World) -> Result<(), String> {
                 .and_then(|world| world.owner)
                 != Some(polity.id)
             {
-                return Err(format!("{name} besitzt seine Hauptwelt nicht"));
+                return Err(format!("{name} besitzt die eigene Hauptwelt nicht"));
             }
             continue;
         }

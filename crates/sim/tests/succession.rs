@@ -823,6 +823,54 @@ fn last_planet() {
     assert!(!sim.polities().get(b).alive);
 }
 
+/// Die letzte Welt einer Gemeinschaft ruft eine neue aus: Die alte endet, die neue tritt
+/// friedlich ihr Erbe an. Beigetreten ist dabei niemand: Die Welt ist der neuen eigen und
+/// kein Sitz.
+#[test]
+fn a_last_planet_that_founds_a_community_is_its_own() {
+    let (a, b) = (PolityId(0), PolityId(1));
+    // Die Gemeinschaft b führt der Mensch: Sie hält nur ihre Hauptwelt.
+    let mut sim = with_player(5, b);
+    sim.issue(b, SimCommand::IssueBonds { amount: 10_000.0 });
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.run_days(3);
+    let home = capital(&sim, b);
+    assert_eq!(planets_of(&sim, b), vec![home]);
+    let (cash, debt) = (treasury(&sim, b), finance(&sim).debt_of(b));
+    let passing_fleets = fleets(&sim).of(b).count();
+    assert!(cash > 0 && debt > 0 && passing_fleets >= 1);
+    assert!(diplomacy(&sim).at_war(a, b));
+    let count = sim.polities().list.len();
+    let before = Before::of(&sim);
+
+    let child = found_free_state(&mut sim, home);
+
+    before.assert_conserved(&sim, "die letzte Welt gründet eine Gemeinschaft");
+    assert_eq!(child, PolityId::from_index(count));
+    let gone = sim.polities().get(b);
+    assert!(!gone.alive && gone.capital.is_none());
+    assert_eq!(capital(&sim, child), home);
+    assert_eq!(planets_of(&sim, child), vec![home]);
+    // Eigen, ohne Spur eines Wechsels, und kein Sitz.
+    assert_eq!(endgame(&sim).path_of(home), Path::Own);
+    assert_eq!(endgame(&sim).absorbed_pop[home.index()], 0.0);
+    assert_eq!(endgame(&sim).gap[home.index()], 0.0);
+    assert!(!endgame(&sim).is_seat(home));
+    // Das Erbe geht friedlich über: Kasse, Schulden und Flotten.
+    assert_eq!(treasury(&sim, child), cash);
+    assert_eq!(treasury(&sim, b), 0);
+    assert_eq!(finance(&sim).debt_of(child), debt);
+    assert_eq!(fleets(&sim).of(child).count(), passing_fleets);
+    assert_eq!(fleets(&sim).of(b).count(), 0);
+    // Der Krieg der Beendeten ist vorbei, und der Mensch ist ausgeschieden.
+    assert!(diplomacy(&sim).wars.is_empty());
+    assert_eq!(player(&sim), None);
+    assert_eq!(endgame(&sim).player, PlayerFate::Out);
+    sim.run_days(DAYS_PER_YEAR);
+    assert_sound(&sim, "ein Jahr nach der Gründung");
+    assert!(sim.polities().get(child).alive && !sim.polities().get(b).alive);
+}
+
 /// Staatlicher Besitz einer Gemeinschaft, die endet: Anteile, Angebote und Anleihen gehen
 /// an den Staat der Erbin; was sie sich danach selbst schuldete, ist getilgt.
 #[test]
@@ -1472,7 +1520,7 @@ fn the_invariant_check_finds_what_it_should() {
             }),
         ),
         (
-            "besitzt seine Hauptwelt nicht",
+            "besitzt die eigene Hauptwelt nicht",
             Box::new(move |sim| {
                 sim.world_mut()
                     .resource_mut::<Polities>()
