@@ -71,6 +71,19 @@ pub struct UiState {
     pub bond_amount: f32,
 }
 
+impl UiState {
+    /// Vergisst, was nur für die Partie galt, die gerade endet oder ersetzt wird: den
+    /// gewählten Emittenten und die Eingaben zum Staatshaushalt. Unter gleicher Nummer
+    /// stünde in der nächsten Partie ein anderer Betrieb, und der Steuersatz gälte einem
+    /// anderen Staat. Welche Fenster offen sind, bleibt, wie der Spieler es eingerichtet hat.
+    fn forget_game(&mut self) {
+        let fresh = Self::default();
+        self.issuer = fresh.issuer;
+        self.tax_percent = fresh.tax_percent;
+        self.reserve_target = fresh.reserve_target;
+    }
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -124,6 +137,9 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiState>()
+            // Am selben Punkt, an dem die Karte der Partie abgeräumt wird: beim Verlassen
+            // der Partie, auch wenn gleich die nächste folgt (Laden mitten im Spiel).
+            .add_systems(OnExit(AppState::InGame), forget_game)
             .add_systems(
                 Update,
                 hotkeys
@@ -132,6 +148,10 @@ impl Plugin for UiPlugin {
             )
             .add_systems(EguiPrimaryContextPass, draw_ui);
     }
+}
+
+fn forget_game(mut ui_state: ResMut<UiState>) {
+    ui_state.forget_game();
 }
 
 fn hotkeys(

@@ -319,6 +319,7 @@ mod tests {
     fn loading_another_galaxy_inside_a_running_campaign_works() {
         use crate::map::Selection;
         use crate::testing::{save_of_new_game, small_and_large_galaxy};
+        use crate::ui::UiState;
 
         let mut game = TestGame::start("");
         let (small, large) = small_and_large_galaxy(game.resource::<sim::GameData>());
@@ -329,6 +330,20 @@ mod tests {
         // Auswahl, Verkehr, Preisverläufe, Tafeln.
         start_campaign(&mut game, large);
         let large_size = galaxy_size(&game);
+        // An der Börse ist der letzte Emittent der großen Partie gewählt, und der Spieler
+        // hat am Steuersatz gedreht.
+        let last_issuer = *game
+            .resource::<sim::finance::Finance>()
+            .issuers
+            .keys()
+            .next_back()
+            .expect("Emittenten");
+        {
+            let mut ui_state = game.world_mut().resource_mut::<UiState>();
+            ui_state.exchange_open = true;
+            ui_state.issuer = Some(last_issuer);
+            ui_state.tax_percent = 33.0;
+        }
         run_fast(&mut game, 6);
         assert!(game.resource::<SimClock>().tick > 0);
 
@@ -347,6 +362,12 @@ mod tests {
         // Gewählt ist das Heimatsystem der geladenen Partie.
         assert_eq!(game.resource::<Selection>().system, home_system(&game));
         assert!(home_system(&game).is_some());
+        // Was die Oberfläche sich zur alten Partie gemerkt hatte, ist vergessen; die Fenster
+        // bleiben offen, wie sie waren.
+        let ui_state = game.resource::<UiState>();
+        assert_eq!(ui_state.issuer, None);
+        assert_eq!(ui_state.tax_percent, UiState::default().tax_percent);
+        assert!(ui_state.exchange_open);
         // Und sie läuft weiter wie jede andere.
         run_fast(&mut game, 8);
         assert!(game.resource::<SimClock>().tick > 0);
@@ -414,10 +435,8 @@ mod tests {
         game.frames(2);
         let saved = game.resource::<SimClock>().tick;
         assert!(saved > 0);
-        let path = std::env::temp_dir().join(format!(
-            "konfluenz_test_{}_stand.ron",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("konfluenz_test_{}_stand.ron", std::process::id()));
         game.send(SessionRequest::Save(path.clone()));
         game.frames(2);
         assert!(path.is_file());
