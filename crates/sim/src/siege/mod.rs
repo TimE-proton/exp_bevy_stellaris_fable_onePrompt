@@ -11,10 +11,15 @@
 //! Daten. Prognose, KI, Oberfläche und Tests rufen dieselbe Funktion; an Flotten, Märkte
 //! und Forschung reicht sie nicht heran. Was ein Tag außerhalb des Datensatzes bewirkt,
 //! steht in [`step::DayEffects`].
+//!
+//! In der Partie liest allein [`orbit`] Flotten, Schiffe und Forschung und übersetzt sie
+//! in die einfachen Daten, mit denen alles Übrige rechnet.
 
+pub mod orbit;
 mod plugin;
 pub mod step;
 
+pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
 pub use plugin::SiegePlugin;
 pub use step::{
     DayEffects, Landing, Projection, build_zones, forecast, form, hull_shares, land,
@@ -863,7 +868,7 @@ pub fn setup_sieges(_data: &GameData, galaxy: &Galaxy, _polities: &Polities) -> 
 
 /// Invarianten der Belagerung: Stärken und Vorräte endlich und nicht negativ, Listen so
 /// lang wie die Galaxie, der Stillstand der Wirtschaft und die Spiegelwerte der Regionen
-/// in 0..1.
+/// in 0..1; Zuordnungen und eingeschiffte Truppen passen zu den Flotten.
 pub fn check(world: &World) -> Result<(), String> {
     let galaxy = world.resource::<Galaxy>();
     let planets = galaxy.planets.len();
@@ -895,7 +900,7 @@ pub fn check(world: &World) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    orbit::check(world)
 }
 
 #[cfg(test)]
