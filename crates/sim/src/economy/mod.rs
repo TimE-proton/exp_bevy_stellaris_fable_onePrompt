@@ -298,9 +298,9 @@ pub struct Economy {
     /// Dieselben Einnahmen des laufenden Monats, bis der Monatsabschluss sie übernimmt.
     #[serde(default)]
     pub state_income_running: Vec<Money>,
-    /// Besteuerte Lohnsumme des laufenden Monats je Gemeinschaft: die Löhne, von denen
-    /// der Staat Lohnsteuer erhält. Aus ihr ergibt sich, was ein anderer Steuersatz
-    /// brächte (`BudgetMonth::standard_revenue`).
+    /// Besteuerbare Lohnsumme des laufenden Monats je Gemeinschaft: die Löhne auf allen
+    /// Welten, die dem Zentrum Lohnsteuer schulden, gleich zu welchem Satz. Aus ihr ergibt
+    /// sich, was ein anderer Steuersatz brächte (`BudgetMonth::standard_revenue`).
     #[serde(default)]
     pub wage_bill_running: Vec<Money>,
     /// Der Haushalt je Gemeinschaft: Ansprüche an die Staatskasse in fester Rangfolge,

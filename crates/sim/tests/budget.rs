@@ -373,3 +373,42 @@ fn arrears_occur_in_a_long_scripted_war() {
         "nur in {struck} von drei Kriegen blieb eine Kriegspartei Sold schuldig"
     );
 }
+
+#[test]
+fn cutting_the_tax_does_not_cut_the_civil_base() {
+    use sim::command::SimCommand;
+    // Dieselbe Partie zweimal; in der einen erhebt die vom Menschen geführte Gemeinschaft
+    // vom ersten Tag an keine Lohnsteuer mehr. Die Grundleistungen bemessen sich am
+    // üblichen Satz: Sie bleiben, und wer die Steuer streicht, muss anderswo kürzen.
+    let me = PolityId(0);
+    let play = |rate: Option<f64>| {
+        let mut sim = Headless::new(
+            data().clone(),
+            SimConfig {
+                seed: 3,
+                player: Some(me),
+            },
+        );
+        if let Some(rate) = rate {
+            sim.issue(me, SimCommand::SetTaxRate { rate });
+        }
+        sim.run_days(2 * DAYS_PER_YEAR);
+        let year = budget(&sim, me).year();
+        assert_eq!(check_invariants(sim.world()), Ok(()));
+        (year.revenue, year.line(Claim::Civil).wanted, year.handout())
+    };
+    let (revenue, civil, handout) = play(None);
+    let (less, same, nothing) = play(Some(0.0));
+    assert!(
+        (less as f64) < revenue as f64 * 0.9,
+        "ohne Lohnsteuer nimmt der Staat spürbar weniger ein: {less} gegen {revenue}"
+    );
+    assert!(
+        (same as f64) > civil as f64 * 0.9,
+        "die Grundleistungen bleiben: {same} gegen {civil}"
+    );
+    assert!(
+        nothing < handout,
+        "was an Steuer fehlt, fehlt der Ausschüttung: {nothing} gegen {handout}"
+    );
+}

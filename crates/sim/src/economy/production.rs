@@ -173,7 +173,10 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 firm.cash -= wages;
                 *treasury += tax;
                 book_income(state_income_running, owner, tax);
-                if tax_rate > 0.0 {
+                // Die besteuerbare Lohnsumme zählt auch bei einem Satz von null mit: An ihr
+                // bemisst der Haushalt, was der übliche Satz eingebracht hätte. Autonome
+                // Regionen zahlen dem Zentrum keine Steuer und zählen nicht.
+                if !local.tax_exempt {
                     book_income(wage_bill_running, owner, wages);
                 }
                 local.households += wages - tax;
