@@ -500,7 +500,8 @@
 
         // --- Schild und Beschuss ---
         // Ladung je Schildstufe und tägliche Nachladung; volles Nachladen kostet je Stufe
-        // shield_depot Vorratstage. Solange Ladung da ist, trifft Beschuss nur den Schild.
+        // shield_depot Vorratstage. Beschuss trifft zuerst die Ladung; nur was sie nicht
+        // schluckt, kommt durch. Wer schwächer feuert, als der Schild nachlädt, bricht ihn nie.
         shield_cap: 3000.0,
         shield_regen: 100.0,
         shield_depot: 0.1,
@@ -533,8 +534,8 @@
         // Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Truppe sinken; die
         // Oberfläche bricht, wenn sie unter diesen Anteil ihres Anfangs sinken; unter diesem
         // Anteil ihres Höchststands gilt eine Landung als abgeschlagen. Bei einem Zehntel
-        // wird bis zur doppelten Überlegenheit um jede Zone gekämpft, und eine Stadt hält
-        // auch dann noch, wenn das Zentrum gefallen ist.
+        // wird bis etwa zur doppelten Überlegenheit um jede Zone gekämpft, und unberührte
+        // Städte halten meist auch dann noch, wenn das Zentrum gefallen ist.
         zone_fall: 0.10,
         // Befestigung: Umland, Stadt, Zentrum, Batterie, Schildwerk.
         fort: (1.0, 1.3, 1.8, 1.4, 1.5),

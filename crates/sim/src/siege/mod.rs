@@ -901,6 +901,8 @@ pub fn check(world: &World) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finance::{CohesionFactors, cohesion_target};
+    use crate::harness::Headless;
     use crate::state::{SaveGame, SimConfig, SimState};
 
     fn data() -> GameData {
@@ -1120,5 +1122,108 @@ mod tests {
             vec![Blocked::ShieldHolds, Blocked::NoArmy]
         );
         assert!(!set.contains(Blocked::NoAmmo));
+    }
+
+    #[test]
+    fn occupation_and_war_damage_weigh_on_cohesion_only_when_present() {
+        let data = data();
+        let balance = &data.balance.finance.cohesion;
+        let neutral = CohesionFactors {
+            supply: 1.0,
+            tax: balance.tax_neutral,
+            years: 2.0,
+            ..Default::default()
+        };
+        let points = |factors: &CohesionFactors, label: &str| {
+            factors
+                .contributions(balance)
+                .into_iter()
+                .find(|(name, _)| *name == label)
+                .map(|(_, points)| points)
+                .unwrap_or_else(|| panic!("Beitrag „{label}“ fehlt"))
+        };
+        // Ohne Besatzung und Schäden bleibt alles, wie es war.
+        assert_eq!(points(&neutral, "Besatzung"), 0.0);
+        assert_eq!(points(&neutral, "Kriegsschäden"), 0.0);
+        let honeymoon = points(&neutral, "Aufbruchstimmung");
+        assert!(
+            (honeymoon - balance.honeymoon * (1.0 - 2.0 / balance.honeymoon_years)).abs() < 1e-12
+        );
+        let target = cohesion_target(&neutral, balance);
+        assert!((target - (balance.base + honeymoon)).abs() < 1e-12);
+
+        // Volle Besatzung ohne Garnison: der ganze Abzug, und keine Aufbruchstimmung.
+        let occupied = CohesionFactors {
+            occupation: 1.0,
+            ..neutral.clone()
+        };
+        assert_eq!(points(&occupied, "Besatzung"), -balance.occupation);
+        assert_eq!(points(&occupied, "Aufbruchstimmung"), 0.0);
+        assert!(
+            (cohesion_target(&occupied, balance) - (balance.base - balance.occupation)).abs()
+                < 1e-12
+        );
+        // Eine volle Garnison fängt einen Teil davon auf: Halten kostet Truppen.
+        let held = CohesionFactors {
+            garrison_cover: 1.0,
+            ..occupied.clone()
+        };
+        let softened = -balance.occupation * (1.0 - balance.occupation_hold);
+        assert!((points(&held, "Besatzung") - softened).abs() < 1e-12);
+        assert!(cohesion_target(&held, balance) > cohesion_target(&occupied, balance));
+        // Halbe Besatzung lässt die halbe Aufbruchstimmung zu.
+        let easing = CohesionFactors {
+            occupation: 0.5,
+            ..neutral.clone()
+        };
+        assert!((points(&easing, "Aufbruchstimmung") - 0.5 * honeymoon).abs() < 1e-12);
+
+        // Kriegsschäden wiegen nach ihrem Ausmaß.
+        let scarred = CohesionFactors {
+            war_damage: 0.4,
+            ..neutral.clone()
+        };
+        assert!((points(&scarred, "Kriegsschäden") + 0.4 * balance.war_damage).abs() < 1e-12);
+        assert!(
+            (cohesion_target(&scarred, balance) - (target - 0.4 * balance.war_damage)).abs() < 1e-9
+        );
+    }
+
+    /// Was die Belagerung in eine Region schreibt, kommt beim nächsten Monatsabschluss im
+    /// Zusammenhalt an.
+    #[test]
+    fn region_mirrors_reach_the_cohesion_factors() {
+        let data = data();
+        let config = SimConfig {
+            seed: 4,
+            player: None,
+        };
+        let mut sim = Headless::new(data.clone(), config.clone());
+        let mut twin = Headless::new(data, config);
+        let home = sim.polities().list[0].capital.unwrap();
+        {
+            let mut finance = sim.world_mut().resource_mut::<Finance>();
+            let region = &mut finance.regions[home.index()];
+            region.occupation = 0.8;
+            region.garrison_cover = 0.5;
+            region.war_damage = 0.3;
+        }
+        sim.run_days(31);
+        twin.run_days(31);
+        let factors = &sim.world().resource::<Finance>().region(home).factors;
+        assert_eq!(factors.occupation, 0.8);
+        assert_eq!(factors.garrison_cover, 0.5);
+        assert_eq!(factors.war_damage, 0.3);
+        let untouched = &twin.world().resource::<Finance>().region(home).factors;
+        assert_eq!(untouched.occupation, 0.0);
+        assert!(
+            factors.target < untouched.target - 20.0,
+            "Ziel {} gegen {}",
+            factors.target,
+            untouched.target
+        );
+        assert_eq!(check(sim.world()), Ok(()));
+        // Der Zwilling ohne Eingriff rechnet wie eine Partie ohne Belagerungszustand.
+        assert_eq!(check(twin.world()), Ok(()));
     }
 }
