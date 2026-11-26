@@ -115,12 +115,11 @@
         raid_chance: 0.35,
     ),
     fleets: (
+        // Stärke einer unversehrten Startflotte. Die Stärke jeder Flotte ist der Bauwert
+        // ihrer Schiffe mal deren Zustand, an diesem Maß geeicht.
         start_strength: 100.0,
         // Strecke je Tag.
         speed: 22.0,
-        // Anteil der eigenen Stärke, den eine Flotte dem Gegner je Tag zufügt
-        // (grobe Auflösung bis Meilenstein 4).
-        daily_damage: 0.06,
     ),
     finance: (
         // Anteil des Geldes einer Heimatwelt, den zu Beginn ihre Elite hält.
@@ -216,14 +215,45 @@
         starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
         // Monatlicher Unterhalt als Anteil am Bauwert; der Sold geht an die Haushalte.
         upkeep_per_month: 0.012,
+        // Reicht die Staatskasse nicht, bleibt Sold aus. Der Rückstand (0..1) folgt dem
+        // ausgebliebenen Anteil je Monat um diesen Anteil der Lücke.
+        arrears_smoothing: 0.5,
         // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
         yard_capital_per_slot: 4.0,
+        // Eine Welt bekommt eine Werft, wenn ihr Rüstungskapital den ersten Wert erreicht,
+        // und behält sie, bis es unter den zweiten fällt. Reste von Kapital, die nur noch
+        // verfallen, machen so keine Werft, und an der Schwelle wechselt nichts von Monat
+        // zu Monat. Die Hauptwelt hat ihre Werft immer.
+        yard_open_capital: 1.0,
+        yard_close_capital: 0.5,
+        // Verliert eine Welt ihre Werft, ruhen ihre Aufträge so viele Tage. Kehrt die
+        // Werft zurück, geht der Bau ohne Verlust weiter; sonst verfällt der Auftrag wie
+        // ein gestrichener, ohne Erstattung.
+        yard_grace_days: 360,
+        // Aufschlag der Werft auf den Einkaufswert der Bauteile. Er geht als Erlös an die
+        // Rüstungsfirma der Welt: An Staatsaufträgen verdienen ihre Anteilseigner mit.
+        yard_fee: 0.15,
+        // So viele Aufträge nimmt die Werft einer Welt höchstens an.
+        yard_queue: 8,
         // Anteil des Rumpfes, der im Dock je Tag instand gesetzt wird, und Rumpfsegmente
         // je vollständig repariertem Rumpf, als Anteil der Bausegmente.
         repair_per_day: 0.01,
         repair_parts: 0.4,
+        // Davon entfällt dieser Anteil auf den Rumpf, der Rest auf die Module.
+        repair_hull_share: 0.5,
+        // Anteil des Kampfwerts eines Schiffs, der an seinen Modulen hängt: Sind alle
+        // ausgefallen, zählt der Rumpf nur noch mit dem Rest.
+        module_weight: 0.5,
+        // Anteil des Bordvorrats an Munition und Treibstoff, den eine Flotte im eigenen,
+        // nicht blockierten System je Tag vom Markt nachfasst.
+        resupply_per_day: 0.05,
         // Treibstoff je Streckeneinheit auf der Karte, als Anteil des Tankinhalts.
         fuel_per_distance: 0.0012,
+        // Auch wer liegt, verbraucht: Anteil des Tankinhalts je Tag in einem System. Im
+        // eigenen Gebiet fasst die Flotte ihn am Markt nach; fern davon ist ein voller
+        // Tank nach 250 Tagen leer. Ohne Treibstoff sperrt, kapert und geleitet eine
+        // Flotte nicht mehr.
+        fuel_per_day: 0.004,
         // Ohne Treibstoff fährt eine Flotte nur noch mit diesem Anteil ihrer Fahrt.
         dry_speed: 0.4,
         // Munition: Einheiten des Guts je Punkt Bordvorrat; ebenso Treibstoff.
@@ -232,6 +262,35 @@
         // Güter für Rumpfreparaturen und für die Munition an Bord.
         hull_good: "rumpfsegmente",
         ammo_good: "munition",
+
+        // --- Gefechte in der Partie ---
+        // Moral der Besatzungen zu Gefechtsbeginn: battle.morale_start, gemindert um die
+        // Kriegsmüdigkeit (battle.morale_per_weariness) und um diesen Abzug bei vollem
+        // Soldrückstand.
+        morale_per_arrears: 30.0,
+        // Wer das Feld einem Gegner überlässt, weicht aus und sammelt sich so viele Tage,
+        // der Marsch eingerechnet. Solange beginnt die Flotte kein Gefecht, tritt keinem
+        // bei, wird nicht angegriffen, zählt nicht für Blockade, Kaperfahrt, Geleit und
+        // Orbitverteidigung und nimmt keinen Marschbefehl an. Dasselbe gilt nach einem
+        // Gefecht ohne Entscheidung (Patt oder Zeitgrenze) für alle, die nicht im eigenen
+        // System stehen, und für eine Flotte, die das Feld geräumt hat und hinter den
+        // Linien ihrer Seite im System bleibt. Frühestens nach dieser Frist stehen
+        // dieselben Gegner einander wieder gegenüber.
+        regroup_days: 30,
+        // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
+        // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
+        // Gemessen wird an der Flotte, wie sie in das Gefecht ging, mindestens aber am
+        // Bauwert der Startflotte: Der Verlust des letzten verbliebenen Schiffs wiegt so
+        // viel wie dieses Schiff, nicht so viel wie eine ganze Flotte.
+        weariness_per_navy_lost: 20.0,
+        // Schwere Niederlage: Wer das Feld einem Gegner überlässt und dabei mindestens
+        // diesen Anteil verliert (am selben Maßstab), dessen Kurse fallen um den Faktor
+        // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock). Ein Gefecht
+        // ohne Entscheidung ist keine Niederlage.
+        heavy_defeat_share: 0.25,
+        defeat_shock: 0.9,
+        // Trümmerfelder verblassen je Monat um diesen Anteil (rund die Hälfte in drei Jahren).
+        debris_fade_per_month: 0.02,
     ),
     battle: (
         // Gefechtszeit je Takt in Sekunden. 20 Takte sind ein Kalendertag.
@@ -251,24 +310,30 @@
         // Trefferwahrscheinlichkeit von Strahlwaffen: Nachführung gegen Winkelgeschwindigkeit
         // des Ziels, dazu die Zielgröße (signature) mit diesem Gewicht.
         beam_signature_weight: 0.55,
-        // Anteil eines Rumpftreffers, der zusätzlich ein Modul beschädigt.
+        // Jeder Rumpftreffer beschädigt zusätzlich ein Modul um diesen Anteil des
+        // Rumpfschadens (welches, hängt von der getroffenen Seite ab).
         module_damage: 0.6,
         // Wahrscheinlichkeit, dass ein zerstörter Reaktor das Schiff zerreißt.
         reactor_breach: 0.5,
         // --- Moral (0..100) ---
+        // Moral = Ausgangswert - Rumpfabzug - Schreck - Lage der eigenen Seite. Der
+        // Ausgangswert ist morale_start abzüglich der Kriegsmüdigkeit
+        // (CombatantSetup::with_war_weariness, beim Aufstellen aus der Gemeinschaft).
         morale_start: 72.0,
-        // Abzug je Punkt Kriegsmüdigkeit der eigenen Gemeinschaft.
+        // Abzug je Punkt Kriegsmüdigkeit (0..100) der eigenen Gemeinschaft.
         morale_per_weariness: 0.3,
-        // Abzug, wenn der eigene Rumpf vollständig verloren ginge.
+        // Bleibender Abzug, wenn der eigene Rumpf vollständig verloren ginge (anteilig).
         morale_hull_loss: 45.0,
-        // Abzug, wenn in der Nähe ein eigenes Schiff verloren geht (Großkampfschiff doppelt),
-        // Zuwachs, wenn ein feindliches verloren geht.
+        // Schreck, wenn in der Nähe ein eigenes Schiff verloren geht, Auftrieb, wenn ein
+        // feindliches verloren geht (gewichtet nach Größe, siehe loss_shock). Beides klingt ab.
         morale_friend_lost: 3.5,
         morale_enemy_lost: 2.0,
         morale_radius: 650.0,
-        // Treffer ins Heck verunsichern zusätzlich (Faktor auf den Abzug).
-        morale_rear_factor: 1.6,
-        // Unter diesem Wert bricht ein Schiff aus der Formation und flieht.
+        // Treffer ins Heck erschrecken zusätzlich: vorübergehend dieser Faktor mal dem
+        // bleibenden Rumpfabzug des Treffers.
+        morale_rear_factor: 1.5,
+        // Unter diesem Wert bricht ein Schiff aus der Formation und versucht, das Feld zu
+        // verlassen.
         morale_break: 18.0,
         // Eine Flotte zieht sich zurück, wenn ihr verbliebener Kampfwert unter diesen
         // Anteil des gegnerischen fällt (je Doktrin: Offensiv, Ausgewogen, Defensiv).
@@ -279,13 +344,186 @@
         fuel_per_second: 0.02,
         // --- Aufstellung ---
         formation_spacing: 95.0,
+        // --- Tempo ---
+        // Gemeinsamer Faktor auf jeden Schaden gegen Schiffe. Der wichtigste Hebel für die
+        // Dauer der Gefechte: Halbieren verdoppelt sie ungefähr, ohne die Verhältnisse der
+        // Waffen untereinander zu verschieben. Wirkt nicht auf das Abfangen von Lenkwaffen.
+        damage_scale: 0.3,
+        // Trefferchance der Punktverteidigung gegen Lenkwaffen.
+        point_defense_hit: 0.65,
+        // Treffer ins Heck gehen auf die Antriebe: Aufschlag auf den Rumpfschaden.
+        rear_hull_factor: 1.6,
+        // --- Moral und Rückzug ---
+        // Ein Schreck (Verluste in der Nähe, Treffer von achtern) klingt mit dieser Rate ab
+        // (Punkte je Sekunde); der Abzug durch den eigenen Rumpfschaden bleibt.
+        morale_shock_recovery: 0.6,
+        // Größter Abzug, wenn die eigene Seite hoffnungslos unterlegen ist; bei
+        // Gleichstand null.
+        morale_outlook: 18.0,
+        // Rückzug der ganzen Flotte, wenn dieser Anteil des Bauwerts ihrer Schiffe verloren
+        // ist (offensiv spät, defensiv früh) und sie nicht klar vorn liegt. Bordjäger zählen
+        // nicht mit, sie sind zum Verschleiß da. Ausgewogen knapp unter einem Drittel: Wer
+        // von drei Schiffen eines verliert und nicht vorn liegt, rettet die beiden anderen.
+        retreat_loss: (0.6, 0.32, 0.22),
+        retreat_unless_ahead: 1.3,
+        // Nach so vielen Sekunden auf der Flucht springt ein Schiff aus dem Gefecht, auch
+        // wenn es den Rand noch nicht erreicht hat: So haben auch langsame Schiffe eine
+        // Aussicht zu entkommen.
+        jump_out_time: 30.0,
+        // --- Bewegung der Flotten ---
+        // Umlauf in der Breitseite als Anteil der Flottenfahrt (alle Parteien im selben
+        // Drehsinn), und wie stark der Mittelpunkt des Gefechts zur Feldmitte zurückgezogen
+        // wird (je Sekunde).
+        orbit_share: 0.45,
+        center_pull: 0.05,
+        // Jäger kehren zum Träger zurück, wenn die Lenkwaffen verschossen sind, und sind
+        // nach so vielen Sekunden wieder versorgt.
+        rearm_time: 6.0,
+        // Abstand, den Träger zum Gegner halten wollen (gemessen von den Trägern selbst),
+        // solange sie Jäger haben: Sie schlagen mit ihren Jägern zu, nicht mit eigenen
+        // Geschützen. Mal range_keep und range_bands.urgent ergibt das den Abstand, bis zu
+        // dem sie vor schnelleren Verfolgern zurückweichen (ausgewogen gut 1000); er muss über
+        // der Reichweite schwerer Geschütze (900) liegen, sonst verlieren Träger gegen
+        // Schlachtschiffe. Ohne Jäger rücken sie in die Linie und auf ihre Geschützreichweite.
+        carrier_standoff: 2100.0,
+        // Eine Flotte, die so viele Sekunden nach dem ersten Kontakt nicht mehr durch die
+        // Schilde des Gegners dringt, bricht ab (statt bis zur Zeitgrenze zu verharren).
+        stalemate_time: 60.0,
+        // Wer nichts mehr ausrichtet, weicht allein, wenn der Gegner in so vielen Sekunden
+        // durch die eigenen Schilde kam. Richtet auch der Gegner nichts aus, lösen sich
+        // beide gemeinsam, ohne Sieger.
+        stalemate_pressure: 20.0,
+        // Ab diesem Verhältnis von Seiten- zu Bugfeuer dreht ein Schiff dem Ziel die Seite
+        // zu und die Flotte umkreist den Gegner; darunter bleibt der Bug vorn.
+        broadside_min: 1.05,
+        // Winkel zwischen Bug und Ziel in der Breitseite (Grad). Unter 45 Grad trifft das
+        // Ziel noch die Bugpanzerung, und das Heck zeigt schräg vom Gegner weg: Wer in den
+        // Rücken der Linie kommt, trifft es.
+        broadside_angle: 80.0,
+        // --- Module und Ausfälle ---
+        // Gewicht, mit dem ein Rumpftreffer ein Modul dieser Art trifft. Treffer ins Heck
+        // gehen auf die Antriebe, Treffer in den Bug auf die Waffen: Flankieren lohnt.
+        module_hits: (
+            engine_rear: 3.0, engine: 0.6, weapon_front: 1.6, weapon: 1.0, hangar: 1.0,
+            reactor: 0.8, shield: 0.8, magazine: 0.6, tank: 0.6,
+        ),
+        // Ein zerstörtes Magazin geht hoch (Anteil des höchsten Rumpfs), ein zerstörter
+        // Tank verliert diesen Anteil seines Treibstoffs.
+        magazine_blast: 0.1,
+        tank_leak: 0.5,
+        // Eine Waffe unter diesem Zustand lädt um den Faktor langsamer nach.
+        damaged_weapon_below: 0.5,
+        damaged_weapon_cooldown: 1.5,
+        // Ohne Treibstoff fährt ein Schiff im Gefecht nur noch mit diesem Anteil.
+        dry_speed: 0.5,
+        // --- Moral ---
+        // Gewicht von Schreck und Auftrieb bei einem Verlust, je Größe: Jäger, Korvette
+        // und Fregatte, Großkampfschiff.
+        loss_shock: (fighter: 0.12, escort: 1.0, capital: 2.0),
+        // --- Waffen und Ziele ---
+        // Zielgröße in der Trefferchance der Punktverteidigung (gebaut für kleine Ziele,
+        // daher schwach gewichtet).
+        point_defense_signature_weight: 0.2,
+        // Bis zu dieser Zielgröße gilt ein Schiff als klein (Korvette 0,35, Fregatte 0,55):
+        // Punktverteidigung beschießt es, Fregatten gehen ihm entgegen.
+        small_signature: 0.4,
+        // Kleiner als das (Jäger 0,1): kein Ziel für Lenkwaffen und träge Türme, d. h.
+        // Türme mit weniger Nachführung als slow_tracking (rad/s).
+        tiny_signature: 0.2,
+        slow_tracking: 0.6,
+        // Die Punktverteidigung nimmt das kleinste Ziel zuerst: Entfernung mal
+        // (1 + Wert × Zielgröße).
+        point_defense_size_bias: 40.0,
+        // Zielwahl: Aufschlag für angeschlagene Ziele, Abschlag für Fliehende und
+        // Treibende, Bonus für das bisherige Ziel, Streuung je Paar.
+        targeting: (damaged: 0.3, routing: 0.75, disabled: 0.3, keep: 1.25, jitter: 0.15),
+        // --- Bewegung ---
+        // Reichweitenkontrolle in Anteilen des gewünschten Abstands: darüber heran,
+        // darunter zurück (gemächlich), weit darunter mit voller Fahrt zurück.
+        range_bands: (approach: 1.05, back_off: 0.8, urgent: 0.6, back_off_speed: 0.6),
+        // Korvetten bleiben bis zu dieser Entfernung vom Ziel im Verband, dann umgehen sie
+        // es seitlich (Anteil ihrer Reichweite) und greifen von achtern an.
+        flanking: (engage_distance: 1500.0, reach: 0.55, wide: 0.9),
+        // So weit gehen Fregatten kleinen Angreifern von ihrem Platz aus entgegen.
+        frigate_leash: 320.0,
+        // Jäger bleiben in Bewegung, mindestens mit diesem Anteil ihrer Höchstfahrt.
+        fighter_min_speed: 0.55,
+        // --- Träger ---
+        // Sekunden bis zum ersten Start und zwischen zwei Starts (je Hangar schneller).
+        first_launch: 3.0,
+        launch_interval: 1.6,
+        // Nach einem Anflug fliegt ein Jäger so viele Sekunden geradeaus weiter.
+        breakaway_time: 2.2,
+        // --- Bewertung ---
+        // Kampfwert eines Schiffs für Rückzug und Moral: Bauwert mal (Sockel + Rest mal
+        // Rumpfzustand). Ein angeschlagenes Schiff zählt weniger, ein Wrack nicht nichts.
+        value_hull_floor: 0.3,
     ),
     research: (
-        // Anteil der Staatseinnahmen, der anfangs in die Forschung geht.
-        budget_share: 0.10,
+        // --- Mittel ---
+        // Anteil der laufenden Staatseinnahmen des Vormonats (Lohnsteuer, Zölle der
+        // Kontore, Dividenden auf staatliche Anteile; kein Geld der Notenbank, keine
+        // Anleihen, keine Verkäufe), der in die Forschung geht: der übliche, wenn die
+        // Vorlage einer Gemeinschaft keinen eigenen nennt, und der höchste, der sich
+        // einstellen lässt. Die Vorlagen in polities.ron liegen zwischen beiden: Wer den
+        // höchsten Etat wählt, forscht anderthalbmal so viel wie eine übliche Gemeinschaft,
+        // nicht ein Vielfaches.
+        // Das Geld ist das Gehalt der Forschenden: Es fließt aus der Staatskasse an die
+        // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
+        // Kriegskasse, Schuldendienst und die Flotte (Sold, Nachschub, Instandsetzung,
+        // Werften) gehen vor: Sie werden am Monatsersten vor der Forschung bezahlt.
+        budget_share: 0.20,
+        max_budget_share: 0.30,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
-        efficiency: 1.0,
+        efficiency: 0.026,
         // Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
         population_exponent: 0.25,
+
+        // --- Wissenstransfer ---
+        // Eine Technologie, die Gemeinschaften in Kontakt erkennbar beherrschen, kostet
+        // weniger: höchstens um diesen Anteil. Erkennbar heißt: Die untere Grenze der
+        // eigenen Schätzung erreicht die Stufe (siehe Einblick). Jede solche Gemeinschaft
+        // zählt mit einem Gewicht, das sich je spillover_half_hops Sprüngen zwischen den
+        // Gebieten halbiert; im Krieg ruht der Austausch.
+        // Nachlass = spillover_max * Summe / (1 + Summe).
+        spillover_max: 0.35,
+        spillover_half_hops: 3.0,
+
+        // --- Automatische Zielwahl ---
+        // Gewählt wird die erforschbare Technologie mit dem höchsten Verhältnis von Gewicht
+        // zu Restkosten. Die Gewichte hier gelten für alle; jede Vorlage in polities.ron
+        // setzt mit research_focus ihre eigenen Vorlieben als Faktor darauf.
+        auto_peace: (economy: 1.8, propulsion: 1.3, weapons: 0.8, defense: 0.8, ground: 0.5),
+        auto_war:   (economy: 0.6, propulsion: 0.9, weapons: 1.8, defense: 1.5, ground: 1.0),
+
+        // --- Etat der KI ---
+        // Eine KI-Gemeinschaft setzt den Etat ihrer Vorlage an (research_share in
+        // polities.ron), im Krieg das ai_war_factor-Fache davon, höchstens
+        // max_budget_share. Sie stellt ihn wie der Spieler per Befehl ein.
+        ai_war_factor: 1.25,
+
+        // --- Einblick in fremde Forschung (0..1) ---
+        // Grundwert ohne jede Verflechtung; Besitz an den Betrieben der anderen hebt ihn bis
+        // intel_ties_max, erreicht bei einem Anteil von intel_ties_share an deren Wirtschaft.
+        intel_base: 0.15,
+        intel_ties_max: 0.8,
+        intel_ties_share: 0.10,
+        // Was Ereignisse (etwa beobachtete Gefechte) darüber hinaus einbringen, verliert je
+        // Monat diesen Anteil.
+        intel_decay: 0.02,
+        // Ein Gefecht zeigt beiden Seiten die Technik der anderen am Werk: Jede gewinnt
+        // so viel Einblick in die Forschung des Gegners. Vom Grundwert aus engt ein Gefecht
+        // bei 0,3 die Schätzung um eine Stufe ein, nach dreien ist sie genau; ohne neue
+        // Gefechte verblasst der Gewinn wieder (intel_decay).
+        intel_per_battle: 0.3,
+        // Schätzungen fremder Stufen sind höchstens 2 * estimate_spread Stufen weit; bei
+        // vollem Einblick sind sie genau. Die untere Grenze einer Schätzung ist bestätigt
+        // und fällt nie.
+        estimate_spread: 2,
+        // Wahrscheinlichkeit je Monat, dass sich für einen Betrachter eine weitere Stufe
+        // bestätigt, die eine andere Gemeinschaft in einem Zweig schon beherrscht. Etwa so
+        // häufig wie ein Stufenaufstieg selbst: Dann liegt die Wahrheit im Mittel an
+        // keiner bestimmten Stelle der Spanne.
+        sighting_per_month: 0.004,
     ),
 )

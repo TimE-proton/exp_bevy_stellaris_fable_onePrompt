@@ -14,7 +14,8 @@ pub mod shares;
 
 pub use bonds::{Bond, bond_yield, issue_bonds, service_bonds};
 pub use cohesion::{
-    CohesionFactors, Region, Stage, cohesion_target, ownership_of_region, update_cohesion,
+    CohesionFactors, Region, Secession, Stage, apply_secession, cohesion_target,
+    ownership_of_region, update_cohesion,
 };
 pub use investors::invest_holders;
 pub use plugin::{EquityFlows, FinancePlugin};

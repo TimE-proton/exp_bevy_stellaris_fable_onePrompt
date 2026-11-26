@@ -9,7 +9,10 @@ mod plugin;
 pub mod production;
 mod setup;
 
-pub use capital::{invest_and_depreciate, migrate, settle_public_accounts, steer_money_supply};
+pub use capital::{
+    invest_and_depreciate, migrate, pay_households, settle_public_accounts, state_reserve,
+    steer_money_supply,
+};
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
     abandon_dead_colonies, grow_population, produce_and_consume, target_price,
@@ -43,6 +46,61 @@ pub fn pay(from: &mut Money, to: &mut Money, amount: Money) -> Money {
     *from -= moved;
     *to += moved;
     moved
+}
+
+/// Anteil des Marktbestands, den ein einzelner Käufer an einem Tag höchstens abnimmt.
+/// Verhindert, dass der erste Käufer eines Systems den Markt leerkauft.
+pub const BUYER_SHARE: f64 = 0.5;
+
+/// Bucht einen Kauf am Kontor zum Briefkurs: Ware aus dem Bestand, Geld aus `purse` in die
+/// Kasse des Kontors. Gekauft wird höchstens, was vorhanden und bezahlbar ist. Gibt Menge
+/// und gezahlten Betrag zurück.
+pub fn purchase(
+    market: &mut Market,
+    good: GoodId,
+    quantity: f64,
+    purse: &mut Money,
+    spread: f64,
+) -> (f64, Money) {
+    let index = good.index();
+    let ask = market.ask(good, spread);
+    let quantity = quantity
+        .min(market.stock[index])
+        .min(to_credits((*purse).max(0)) / ask)
+        .max(0.0);
+    if quantity <= 0.0 {
+        return (0.0, 0);
+    }
+    let paid = pay(purse, &mut market.cash, to_money(quantity * ask));
+    market.stock[index] = (market.stock[index] - quantity).max(0.0);
+    market.turnover_today += to_credits(paid);
+    (quantity, paid)
+}
+
+/// Einkauf eines Käufers ohne eigenes Lager (der Staat für Nachschub und Instandsetzung):
+/// meldet den Wunsch als Nachfrage und nimmt höchstens den Anteil am Bestand, der einem
+/// einzelnen Käufer zusteht. Gibt Menge und gezahlten Betrag zurück.
+pub fn procure(
+    market: &mut Market,
+    good: GoodId,
+    wanted: f64,
+    purse: &mut Money,
+    spread: f64,
+) -> (f64, Money) {
+    if wanted <= 0.0 {
+        return (0.0, 0);
+    }
+    // Kaufkräftige Nachfrage zählt auch dann, wenn die Ware fehlt: Knappheit hebt den Preis
+    // und zieht Frachter an. Wünsche ohne Geld bewegen keinen Preis.
+    let affordable = to_credits((*purse).max(0)) / market.ask(good, spread);
+    market.demand_today[good.index()] += wanted.min(affordable);
+    purchase(
+        market,
+        good,
+        wanted.min(market.available(good)),
+        purse,
+        spread,
+    )
 }
 
 /// Das Kontor lagert höchstens dieses Vielfache der Soll-Reichweite.
@@ -105,6 +163,12 @@ impl Market {
     pub fn room(&self, good: GoodId, cover_days: f64) -> f64 {
         let cap = (self.demand[good.index()] * cover_days * STOCK_CAP_FACTOR).max(STOCK_CAP_FLOOR);
         (cap - self.stock[good.index()]).max(0.0)
+    }
+
+    /// Was ein einzelner Käufer heute höchstens abnehmen darf.
+    #[inline]
+    pub fn available(&self, good: GoodId) -> f64 {
+        self.stock[good.index()] * BUYER_SHARE
     }
 
     /// Preis, den ein Käufer zahlt.
@@ -219,6 +283,25 @@ pub struct Economy {
     pub initial_money: Money,
     /// Seit Spielbeginn ausgewiesene Geldschöpfung.
     pub minted: Money,
+    /// Ertragsfaktor der Technik je Gemeinschaft (1 = Grundstand; fehlende Einträge
+    /// gelten als 1). Folgt der Forschung: gesetzt bei Spielbeginn, nach jedem
+    /// Forschungsschritt und bei einer Abspaltung, täglich aufgefrischt.
+    #[serde(default)]
+    pub tech_yield: Vec<f64>,
+    /// Laufende Einnahmen des Staates im letzten abgeschlossenen Monat, je Gemeinschaft:
+    /// Lohnsteuer, Zölle der Kontore und Dividenden auf staatliche Anteile. Geld der
+    /// Notenbank, Anleihen und Verkäufe zählen nicht. Daran bemisst sich der Forschungsetat.
+    #[serde(default)]
+    pub state_income: Vec<Money>,
+    /// Dieselben Einnahmen des laufenden Monats, bis der Monatsabschluss sie übernimmt.
+    #[serde(default)]
+    pub state_income_running: Vec<Money>,
+}
+
+/// Faktor einer Gemeinschaft aus einer Liste je Gemeinschaft; fehlt der Eintrag, 1.
+#[inline]
+pub fn factor_of(factors: &[f64], polity: PolityId) -> f64 {
+    factors.get(polity.index()).copied().unwrap_or(1.0)
 }
 
 impl Economy {
@@ -235,6 +318,53 @@ impl Economy {
     #[inline]
     pub fn treasury(&self, polity: PolityId) -> Money {
         self.treasuries.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Ertragsfaktor der Technik, mit dem die Werke der Gemeinschaft produzieren.
+    #[inline]
+    pub fn yield_factor(&self, polity: PolityId) -> f64 {
+        factor_of(&self.tech_yield, polity)
+    }
+
+    /// Laufende Einnahmen des Staates im letzten abgeschlossenen Monat (siehe
+    /// [`Economy::state_income`]).
+    #[inline]
+    pub fn state_income_of(&self, polity: PolityId) -> Money {
+        self.state_income.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Sorgt dafür, dass jede Liste je Gemeinschaft für jede Staatskasse einen Eintrag
+    /// hat, auch für eben erst gegründete Gemeinschaften.
+    pub fn sync_polities(&mut self) {
+        let count = self.treasuries.len();
+        if self.tech_yield.len() < count {
+            self.tech_yield.resize(count, 1.0);
+        }
+        if self.state_income.len() < count {
+            self.state_income.resize(count, 0);
+        }
+        if self.state_income_running.len() < count {
+            self.state_income_running.resize(count, 0);
+        }
+    }
+
+    /// Verbucht eine laufende Einnahme des Staates. Das Geld selbst ist schon in der
+    /// Staatskasse; hier wird nur mitgeschrieben, woraus sie sich speist.
+    #[inline]
+    pub fn book_state_income(&mut self, polity: PolityId, amount: Money) {
+        book_income(&mut self.state_income_running, polity, amount);
+    }
+
+    /// Monatsabschluss der Einnahmenrechnung: Der laufende Monat wird zum letzten.
+    pub fn close_income_month(&mut self) {
+        self.sync_polities();
+        for (last, running) in self
+            .state_income
+            .iter_mut()
+            .zip(&mut self.state_income_running)
+        {
+            *last = std::mem::take(running);
+        }
     }
 
     /// Summe aller Konten der Wirtschaft (ohne Handelshäuser).
@@ -279,8 +409,42 @@ impl Economy {
         if self.treasuries.iter().any(|cash| *cash < 0) {
             return Some("Staatskasse negativ".into());
         }
+        let count = self.treasuries.len();
+        if self.tech_yield.len() != count
+            || self.state_income.len() != count
+            || self.state_income_running.len() != count
+        {
+            return Some("Listen je Gemeinschaft sind unvollständig".into());
+        }
+        if self
+            .state_income
+            .iter()
+            .chain(&self.state_income_running)
+            .any(|income| *income < 0)
+        {
+            return Some("Staatseinnahmen negativ".into());
+        }
+        if self
+            .tech_yield
+            .iter()
+            .any(|factor| !factor.is_finite() || *factor <= 0.0)
+        {
+            return Some("Ertragsfaktor der Technik entgleist".into());
+        }
         None
     }
+}
+
+/// Schreibt eine laufende Einnahme in die Liste je Gemeinschaft; sie wächst bei Bedarf.
+#[inline]
+pub(crate) fn book_income(running: &mut Vec<Money>, polity: PolityId, amount: Money) {
+    if amount <= 0 {
+        return;
+    }
+    if running.len() <= polity.index() {
+        running.resize(polity.index() + 1, 0);
+    }
+    running[polity.index()] += amount;
 }
 
 /// Kapitalbewegungen, die die Börse verbuchen muss. Das Geld ist dem Emittenten bereits
@@ -335,7 +499,7 @@ pub struct UnitEconomics {
     /// Startkosten in den Orbit und zurück.
     pub lift: f64,
     pub wages: f64,
-    /// Ertragsfaktor aus Vorkommen oder Boden.
+    /// Ertragsfaktor aus Vorkommen oder Boden, samt dem der Technik.
     pub local_yield: f64,
 }
 
@@ -357,8 +521,21 @@ pub fn unit_economics(
     market: &Market,
     recipe: &RecipeDef,
 ) -> UnitEconomics {
+    unit_economics_at(data, planet, wage, market, recipe, 1.0)
+}
+
+/// Wie [`unit_economics`], mit dem Ertragsfaktor der Technik der Gemeinschaft
+/// ([`Economy::yield_factor`]): Er hebt den Ausstoß bei gleichem Einsatz.
+pub fn unit_economics_at(
+    data: &GameData,
+    planet: &Planet,
+    wage: f64,
+    market: &Market,
+    recipe: &RecipeDef,
+    tech_yield: f64,
+) -> UnitEconomics {
     let balance = &data.balance.economy;
-    let local_yield = local_yield(recipe, planet);
+    let local_yield = local_yield(recipe, planet) * tech_yield;
     let output = recipe.output.1 as f64 * local_yield;
     let mut lift = output * lift_cost(data, planet, recipe.output_id);
     let mut inputs = 0.0;
@@ -391,4 +568,98 @@ pub fn recipes_of(data: &GameData, sector: Sector) -> impl Iterator<Item = (usiz
         .iter()
         .enumerate()
         .filter(move |(_, recipe)| recipe.sector == sector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn munition_market(stock: f64) -> (GameData, Market, GoodId, f64) {
+        let data = GameData::load_workspace().unwrap();
+        let good = data.good_id("munition").unwrap();
+        let mut market = Market::new(&data);
+        market.stock[good.index()] = stock;
+        let spread = data.balance.economy.spread;
+        (data, market, good, spread)
+    }
+
+    #[test]
+    fn a_purchase_moves_goods_and_money_and_never_more_than_there_is() {
+        let (_, mut market, good, spread) = munition_market(10.0);
+        let ask = market.ask(good, spread);
+        let mut purse = to_money(1000.0);
+
+        // Ein gewöhnlicher Kauf: Ware gegen Geld zum Briefkurs, auf das Tausendstel.
+        let (got, paid) = purchase(&mut market, good, 4.0, &mut purse, spread);
+        assert_eq!((got, paid), (4.0, to_money(4.0 * ask)));
+        assert_eq!(market.stock_of(good), 6.0);
+        assert_eq!(market.cash, paid);
+        assert_eq!(purse, to_money(1000.0) - paid);
+        assert!((market.turnover_today - to_credits(paid)).abs() < 1e-9);
+
+        // Mehr als der Bestand gibt es nicht.
+        let (got, _) = purchase(&mut market, good, 100.0, &mut purse, spread);
+        assert_eq!(got, 6.0);
+        assert_eq!(market.stock_of(good), 0.0);
+
+        // Mehr als der Geldbeutel hergibt, auch nicht: Er wird leer, nie negativ.
+        market.stock[good.index()] = 10.0;
+        let before = market.cash;
+        let mut purse = to_money(2.5 * ask);
+        let (got, paid) = purchase(&mut market, good, 8.0, &mut purse, spread);
+        assert!((got - 2.5).abs() < 1e-3);
+        assert_eq!((purse, market.cash - before), (0, paid));
+
+        // Ohne Geld oder ohne Wunsch geschieht nichts.
+        let stock = market.stock_of(good);
+        assert_eq!(
+            purchase(&mut market, good, 3.0, &mut purse, spread),
+            (0.0, 0)
+        );
+        let mut rich = to_money(100.0);
+        assert_eq!(
+            purchase(&mut market, good, 0.0, &mut rich, spread),
+            (0.0, 0)
+        );
+        assert_eq!(
+            purchase(&mut market, good, -2.0, &mut rich, spread),
+            (0.0, 0)
+        );
+        assert_eq!((market.stock_of(good), rich), (stock, to_money(100.0)));
+    }
+
+    #[test]
+    fn procuring_reports_solvent_demand_and_leaves_stock_for_others() {
+        let (_, mut market, good, spread) = munition_market(10.0);
+        let ask = market.ask(good, spread);
+
+        // Ein einzelner Käufer bekommt höchstens seinen Anteil am Bestand; gemeldet ist der
+        // ganze Wunsch.
+        let mut purse = to_money(10_000.0);
+        let (got, paid) = procure(&mut market, good, 8.0, &mut purse, spread);
+        assert_eq!(got, 10.0 * BUYER_SHARE);
+        assert_eq!(paid, to_money(got * ask));
+        assert_eq!(market.demand_today[good.index()], 8.0);
+
+        // Fehlt die Ware ganz, zählt der Wunsch trotzdem: Knappheit soll den Preis heben.
+        market.stock[good.index()] = 0.0;
+        assert_eq!(
+            procure(&mut market, good, 3.0, &mut purse, spread),
+            (0.0, 0)
+        );
+        assert_eq!(market.demand_today[good.index()], 11.0);
+
+        // Wünsche ohne Geld bewegen keinen Preis: Gemeldet wird nur, was bezahlbar ist.
+        market.stock[good.index()] = 10.0;
+        let mut poor = to_money(1.5 * ask);
+        let (got, _) = procure(&mut market, good, 4.0, &mut poor, spread);
+        assert!((got - 1.5).abs() < 1e-3);
+        assert!((market.demand_today[good.index()] - 12.5).abs() < 1e-3);
+        let mut broke = 0;
+        assert_eq!(
+            procure(&mut market, good, 4.0, &mut broke, spread),
+            (0.0, 0)
+        );
+        assert!((market.demand_today[good.index()] - 12.5).abs() < 1e-3);
+    }
 }

@@ -144,6 +144,20 @@ pub struct PolityDef {
     pub short: String,
     pub color: Rgb,
     pub motto: String,
+    /// Technologien, die die Gemeinschaft von Beginn an beherrscht (Schlüssel aus
+    /// `techs.ron`, samt allen Voraussetzungen).
+    #[serde(default)]
+    pub start_techs: Vec<String>,
+    #[serde(skip)]
+    pub start_tech_ids: Vec<u16>,
+    /// Vorlieben der Forschung: Faktor je Zweig auf die Gewichte der automatischen
+    /// Zielwahl. Ohne Angabe wiegen alle Zweige gleich.
+    #[serde(default = "super::ships::BranchWeights::even")]
+    pub research_focus: super::ships::BranchWeights,
+    /// Anteil der laufenden Staatseinnahmen, den die Gemeinschaft für Forschung ansetzt.
+    /// Ohne Angabe gilt `balance.ron: research.budget_share`.
+    #[serde(default)]
+    pub research_share: Option<f64>,
 }
 
 /// `names.ron`
@@ -417,7 +431,6 @@ pub struct LogisticsBalance {
 pub struct FleetBalance {
     pub start_strength: f32,
     pub speed: f32,
-    pub daily_damage: f32,
 }
 
 fn one_f32() -> f32 {

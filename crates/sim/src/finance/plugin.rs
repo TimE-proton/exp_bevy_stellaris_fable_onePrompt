@@ -12,9 +12,10 @@ use crate::economy::{
 };
 use crate::fleet::Fleets;
 use crate::galaxy::Galaxy;
-use crate::ids::PlanetId;
+use crate::ids::{PlanetId, PolityId};
 use crate::logistics::Logistics;
 use crate::polity::Polities;
+use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -102,10 +103,18 @@ fn monthly_books(
     for (issuer, investor, amount) in injections {
         record_injection(&mut finance, issuer, investor, amount);
     }
+    let before_dividends = economy.treasuries.clone();
     for (issuer, amount) in dividends {
         let seat = seat_of_issuer(&galaxy, &logistics, &capitals, issuer);
         pay_dividend(&mut finance, &mut economy, seat, issuer, amount);
     }
+    // Dividenden auf staatliche Anteile zählen wie Lohnsteuer und Zölle zu den laufenden
+    // Einnahmen. Damit ist der Monat der Einnahmenrechnung vollständig.
+    for (index, before) in before_dividends.into_iter().enumerate() {
+        let received = economy.treasuries[index] - before;
+        economy.book_state_income(PolityId::from_index(index), received);
+    }
+    economy.close_income_month();
 
     service_bonds(
         &mut finance,
@@ -163,11 +172,12 @@ fn cohesion(
     data: Res<GameData>,
     clock: Res<SimClock>,
     fleets: Res<Fleets>,
-    logistics: Res<Logistics>,
+    mut logistics: ResMut<Logistics>,
     mut galaxy: ResMut<Galaxy>,
     mut polities: ResMut<Polities>,
     mut economy: ResMut<Economy>,
     mut finance: ResMut<Finance>,
+    mut research: ResMut<Research>,
     mut chronicle: ResMut<Chronicle>,
 ) {
     let secessions = update_cohesion(
@@ -181,7 +191,7 @@ fn cohesion(
         clock.day(),
     );
     for secession in secessions {
-        apply_secession(
+        let founded = apply_secession(
             &secession,
             &mut finance,
             &mut galaxy,
@@ -192,5 +202,13 @@ fn cohesion(
             &data,
             clock.tick,
         );
+        // Ein neuer Freistaat nimmt das Wissen des Reichs mit, das er verlässt. Noch im
+        // selben Takt hat er in jeder Liste je Gemeinschaft seinen Eintrag, und seine
+        // Werke und Frachter rechnen mit der geerbten Technik.
+        if let (None, Some(child)) = (secession.joins, founded) {
+            research.inherit(&data, secession.from, child);
+            economy.sync_polities();
+            research.publish_effects(&mut economy, &mut logistics);
+        }
     }
 }

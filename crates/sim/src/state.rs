@@ -10,12 +10,13 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, setup_economy};
 use crate::finance::{Finance, setup_finance};
-use crate::fleet::{Fleets, setup_fleets};
+use crate::fleet::{Battles, Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
 use crate::hash::Fnv64;
 use crate::ids::PolityId;
 use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
+use crate::tech::{Research, setup_research};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -46,6 +47,8 @@ macro_rules! sim_state {
             /// Setzt den Zustand in die Welt ein und ersetzt eine laufende Partie.
             pub fn install(mut self, world: &mut World) {
                 self.galaxy.rebuild_index();
+                // Ältere Spielstände kennen neuere Listen je Gemeinschaft noch nicht.
+                self.economy.sync_polities();
                 $( world.insert_resource(self.$field); )*
             }
 
@@ -72,8 +75,10 @@ sim_state! {
     polities: Polities,
     economy: Economy,
     finance: Finance,
+    research: Research,
     logistics: Logistics,
     fleets: Fleets,
+    battles: Battles,
     diplomacy: Diplomacy,
     queue: CommandQueue,
     log: CommandLog,
@@ -120,10 +125,13 @@ impl SimState {
             ),
         );
         let mut economy = setup_economy(data, &galaxy, &polities);
-        let logistics = setup_logistics(data, &galaxy, &polities);
+        let mut logistics = setup_logistics(data, &galaxy, &polities);
         economy.initial_money += logistics.money();
         // Die Eliten erhalten ihr Geld aus dem der Haushalte: Die Summe bleibt gleich.
         let finance = setup_finance(data, &galaxy, &polities, &mut economy, &logistics);
+        let research = setup_research(data, &polities);
+        // Das Startwissen wirkt vom ersten Takt an, auch für Befehle vor dem ersten Tag.
+        research.publish_effects(&mut economy, &mut logistics);
         let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,
@@ -132,8 +140,10 @@ impl SimState {
             polities,
             economy,
             finance,
+            research,
             logistics,
             fleets,
+            battles: Battles::default(),
             diplomacy: Diplomacy::default(),
             queue: CommandQueue::default(),
             log: CommandLog::default(),
@@ -154,7 +164,11 @@ pub fn new_game(world: &mut World, config: SimConfig) {
     state.install(world);
 }
 
-pub const SAVE_FORMAT: u32 = 1;
+/// Format 2: Flotten bestehen aus Schiffen und führen Bauaufträge.
+/// Format 3: Gefechte laufen im taktischen Rechner und gehören zum Spielstand.
+/// Format 4: Forschung gehört zum Spielstand; Gefechte kennen das Patt und keine
+/// Gefechtspause mehr.
+pub const SAVE_FORMAT: u32 = 4;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]

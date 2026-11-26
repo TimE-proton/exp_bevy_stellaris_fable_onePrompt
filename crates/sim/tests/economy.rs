@@ -175,8 +175,12 @@ fn traded_goods(sim: &Headless, system: SystemId) -> (Vec<usize>, Vec<usize>) {
 fn a_blockade_raises_prices_and_idles_factories() {
     let attacker = PolityId(0);
     let victim = PolityId(1);
-    let mut blockaded = observer(7);
-    let mut control = observer(7);
+    // Der Seed bestimmt, welche Kolonie getroffen wird. Die Prüfung braucht eine, die
+    // Güter von außen bezieht und im Frieden gut versorgt ist; das gilt für etwa jede
+    // zweite Partie. Ändert sich der Verlauf der ersten Jahrzehnte (hier: Forschung
+    // bemisst sich an den laufenden Staatseinnahmen), passt ein anderer Seed.
+    let mut blockaded = observer(4);
+    let mut control = observer(4);
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let target = largest_colony_system(&blockaded, victim);
@@ -202,7 +206,8 @@ fn a_blockade_raises_prices_and_idles_factories() {
             to: target,
         },
     );
-    // Die Flotte braucht Zeit für den Anmarsch; danach steht die Sperre zwei Jahre.
+    // Die Flotte braucht Zeit für den Anmarsch. Danach steht die Sperre, solange der
+    // Treibstoff reicht: Fern der Heimat fasst die Flotte nichts nach.
     let mut established = false;
     for _ in 0..3 * DAYS_PER_YEAR {
         blockaded.run_days(1);
@@ -213,9 +218,19 @@ fn a_blockade_raises_prices_and_idles_factories() {
         }
     }
     assert!(established, "die Flotte hat die Blockade nie errichtet");
-    blockaded.run_days(2 * DAYS_PER_YEAR);
-    control.run_days(2 * DAYS_PER_YEAR);
-    assert!(blockaded.world().resource::<Fleets>().is_blockaded(target));
+    let mut held = 0;
+    while blockaded.world().resource::<Fleets>().is_blockaded(target) {
+        blockaded.run_days(1);
+        control.run_days(1);
+        held += 1;
+        assert!(held < 2 * DAYS_PER_YEAR, "die Sperre endet nie");
+    }
+    assert!(
+        held >= 100,
+        "die Sperre hielt nur {held} Tage; für die Messung braucht es Monate"
+    );
+    let fuel = blockaded.world().resource::<Fleets>().list[0].min_fuel();
+    assert_eq!(fuel, 0.0, "die Sperre endet, weil der Treibstoff ausgeht");
 
     // Mittleres Preisverhältnis gesperrt/offen über eine Gütergruppe.
     let ratio = |goods: &[usize]| -> f64 {
@@ -346,17 +361,38 @@ fn raiders_capture_freighters_and_escorts_protect_them() {
         };
         {
             // Der Kaperer steht im Heimatsystem des Opfers; dessen Flotte ist entweder
-            // ein starker Geleitschutz oder abwesend.
+            // ein starker Geleitschutz oder abwesend. Die Stärke folgt aus den Schiffen:
+            // Der Kaperer führt nur einen Kreuzer, eine Fregatte und eine Korvette (Stärke 60),
+            // der Geleitschutz wächst um 150 Kreuzer (Stärke rund 5000).
+            let data = data();
             let mut fleets = sim.world_mut().resource_mut::<Fleets>();
-            fleets.list[raider.index()].system = victim_home;
-            fleets.list[raider.index()].stance = Stance::Raid;
-            fleets.list[raider.index()].strength = 60.0;
-            let guard = &mut fleets.list[victim.index()];
+            let raiders = &mut fleets.list[raider.index()];
+            raiders.system = victim_home;
+            raiders.stance = Stance::Raid;
+            let mut kept: Vec<u16> = Vec::new();
+            raiders.ships.retain(|ship| {
+                let first_of_its_design = !kept.contains(&ship.design);
+                kept.push(ship.design);
+                first_of_its_design
+            });
+            let guard = FleetId(victim.index() as u32);
             if escort {
-                guard.stance = Stance::Escort;
-                guard.strength = 5_000.0;
+                fleets.list[guard.index()].stance = Stance::Escort;
+                let cruiser = data.design_index("speer").unwrap();
+                for _ in 0..150 {
+                    fleets.add_ship(&data, guard, cruiser).unwrap();
+                }
             } else {
-                guard.alive = false;
+                // Ohne Schiffe besteht die Flotte nicht mehr.
+                fleets.list[guard.index()].ships.clear();
+            }
+            fleets.refresh(&data);
+            let strength = |polity: PolityId| fleets.list[polity.index()].strength;
+            assert!((strength(raider) - 60.0).abs() < 1.0);
+            if escort {
+                assert!((strength(victim) - 5_000.0).abs() < 100.0);
+            } else {
+                assert!(!fleets.list[guard.index()].alive);
             }
         }
         sim.issue(raider, SimCommand::DeclareWar { target: victim });
