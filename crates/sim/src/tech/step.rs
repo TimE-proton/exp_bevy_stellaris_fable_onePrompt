@@ -6,7 +6,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
 use crate::data::{GameData, ResearchBalance};
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, Money, pay_households, state_reserve, to_credits};
+use crate::economy::{Claim, Economy, Money, to_credits};
 use crate::finance::Finance;
 use crate::galaxy::Galaxy;
 use crate::ids::PolityId;
@@ -183,11 +183,64 @@ pub fn choose_target(data: &GameData, entry: &PolityResearch, at_war: bool) -> O
 
 /// Etat, den die KI-Führung einer Gemeinschaft ansetzt: im Frieden den üblichen ihrer
 /// Vorlage (`usual`), im Krieg das `ai_war_factor`-Fache davon, nie über dem höchsten
-/// zulässigen. Forschung wird ohnehin nur aus dem bezahlt, was über der Rücklage liegt:
-/// Eine Kriegskasse, die erst gefüllt werden muss, geht vor.
+/// zulässigen. Bezahlt wird die Forschung ohnehin nur aus dem, was der Haushalt nach
+/// Schuldendienst, Grundleistungen, Flotte und Beschaffung übrig lässt.
 pub fn ai_budget_share(balance: &ResearchBalance, usual: f64, at_war: bool) -> f64 {
     let factor = if at_war { balance.ai_war_factor } else { 1.0 };
     (usual * factor).clamp(0.0, balance.max_budget_share)
+}
+
+/// Das Ziel, an dem eine Gemeinschaft diesen Monat forscht: bei der Automatik das, was
+/// sie heute wählen würde, sonst das gesetzte, solange es noch erforschbar ist.
+fn planned_target(
+    data: &GameData,
+    entry: &PolityResearch,
+    auto: bool,
+    at_war: bool,
+) -> Option<u16> {
+    if auto {
+        return choose_target(data, entry, at_war);
+    }
+    entry
+        .target
+        .filter(|tech| !entry.known[*tech as usize] && entry.prerequisites_met(data, *tech))
+}
+
+/// Etat der Forschung für einen Monat: der eingestellte Anteil der laufenden
+/// Staatseinnahmen des Vormonats.
+fn research_budget(economy: &Economy, entry: &PolityResearch, polity: PolityId) -> Money {
+    let income = economy.state_income_of(polity).max(0);
+    (entry.budget_share * income as f64).round() as Money
+}
+
+/// Was die Forschung einer Gemeinschaft im beginnenden Monat vom Staatshaushalt verlangt:
+/// ihren Etat, solange es etwas zu erforschen gibt.
+pub fn research_claim(
+    research: &Research,
+    economy: &Economy,
+    galaxy: &Galaxy,
+    polities: &Polities,
+    diplomacy: &Diplomacy,
+    data: &GameData,
+    config: &SimConfig,
+    polity: PolityId,
+) -> Money {
+    let Some(entry) = research.get(polity) else {
+        return 0;
+    };
+    let alive = polities
+        .list
+        .get(polity.index())
+        .is_some_and(|found| found.alive);
+    if !alive || galaxy.population_of(polity) <= 0.0 {
+        return 0;
+    }
+    // Wie im Forschungsschritt: KI-geführte Gemeinschaften ohne Ziel wählen automatisch.
+    let auto = entry.auto || (config.player != Some(polity) && entry.target.is_none());
+    if planned_target(data, entry, auto, diplomacy.is_at_war(polity)).is_none() {
+        return 0;
+    }
+    research_budget(economy, entry, polity)
 }
 
 /// Der Forschungsschritt eines Monats für alle Gemeinschaften, in ID-Reihenfolge.
@@ -195,8 +248,9 @@ pub fn ai_budget_share(balance: &ResearchBalance, usual: f64, at_war: bool) -> f
 /// 1. Einträge für alle Gemeinschaften sicherstellen; den Nachlass aus dem erkennbaren
 ///    Wissen der anderen bestimmen, für alle aus dem Stand zu Monatsbeginn: Die
 ///    Reihenfolge der Gemeinschaften spielt keine Rolle.
-/// 2. Je Gemeinschaft: Ziel prüfen oder wählen, Gehälter zahlen (aus der Staatskasse über
-///    der Rücklage an die Haushalte), Punkte gutschreiben, fertige Technologien abschließen.
+/// 2. Je Gemeinschaft: Ziel prüfen oder wählen, Gehälter zahlen (aus dem, was der Haushalt
+///    der Forschung bewilligt hat, an den Staatsdienst), Punkte gutschreiben, fertige
+///    Technologien abschließen.
 /// 3. Bilder und Einblick fortschreiben: Was die Gemeinschaften voneinander sehen, folgt
 ///    den Abschlüssen des Monats und der Verflechtung. Daraus der Nachlass, der ab jetzt
 ///    gilt.
@@ -244,31 +298,23 @@ pub fn research_month(
         if player != Some(id) && entry.target.is_none() {
             entry.auto = true;
         }
-        if entry
-            .target
-            .is_some_and(|tech| entry.known[tech as usize] || !entry.prerequisites_met(data, tech))
-        {
-            entry.target = None;
-        }
         // Die Automatik prüft ihre Wahl jeden Monat: Fortschritt bleibt beim Wechsel
         // erhalten, und so folgt sie einem Kriegsausbruch oder neuem Einblick.
-        if entry.auto {
-            entry.target = choose_target(data, entry, at_war);
-        }
+        entry.target = planned_target(data, entry, entry.auto, at_war);
         if entry.target.is_none() {
             // Nichts zu erforschen: Das Geld bleibt in der Staatskasse.
             continue;
         }
 
         // Der Etat ist ein Anteil der laufenden Einnahmen des Vormonats. Gezahlt wird er
-        // nur aus dem, was über der Rücklage des Staates liegt: Eine leere Kasse bremst
-        // die Forschung ebenso wie ein Kriegsschatz, der erst gefüllt werden muss. Sold
-        // und Einkäufe der Flotte sind an diesem Tag schon abgegangen (Reihenfolge der
-        // Systeme in `SimSet`): Sie gehen der Forschung vor.
-        let income = economy.state_income_of(id).max(0);
-        let free = economy.treasury(id) - state_reserve(economy, data, id, population);
-        let budget = ((entry.budget_share * income as f64).round() as Money).min(free);
-        let spent = pay_households(galaxy, economy, id, budget);
+        // aus dem, was der Haushalt der Forschung am Monatsersten bewilligt hat: was die
+        // Einnahmen nach Schuldendienst, Grundleistungen, Flotte und dem Voranschlag der
+        // Beschaffung übrig ließen, und was schon über der Rücklage lag. Die Rücklage
+        // selbst rührt die Forschung nicht an.
+        let wanted = research_budget(economy, entry, id);
+        let budget = wanted.min(economy.allowance(id, Claim::Research));
+        economy.want(id, Claim::Research, wanted);
+        let spent = economy.pay_staff(id, Claim::Research, budget);
         let points = research_points(
             balance,
             to_credits(spent),

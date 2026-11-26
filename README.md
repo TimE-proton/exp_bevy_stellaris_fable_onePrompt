@@ -65,9 +65,21 @@ und Prüfsummen ein.
 cargo headless fleets --seed 7 --years 20 --order 10:alle:speer:1,dolch:2
 ```
 
-Flotten, Schiffe, Vorräte, Werften und Bauaufträge je Gemeinschaft nach einer Partie mit
-demselben Drehbuch; `--ships` listet jedes Schiff einzeln, `--polity N` zeigt nur eine
-Gemeinschaft, `--save datei.ron` schreibt den Spielstand weg.
+Flotten, Schiffe, Vorräte, Werften, Bauaufträge und der Staatshaushalt je Gemeinschaft
+nach einer Partie mit demselben Drehbuch; `--ships` listet jedes Schiff einzeln,
+`--months` die letzten zwölf Haushaltsmonate, `--polity N` zeigt nur eine Gemeinschaft,
+`--save datei.ron` schreibt den Spielstand weg.
+
+```bash
+cargo headless fleets --seeds 0..8 --years 10 --start-fleets 2
+```
+
+Die Haushaltsübersicht über mehrere Partien: Einnahmen, jeder Anspruch als Anteil der
+Einnahmen, Ausschüttung, Monate mit Defizit und unter der Rücklage, Soldrückstand, dazu
+Geld und Bedarfsdeckung der Haushalte. Zum Vergleichen: `--start-fleets N` (jede
+Gemeinschaft beginnt mit N Startflotten), `--research-share X`, `--tax X` (Lohnsteuersatz
+aller Gemeinschaften, per Befehl am ersten Tag) und `--fleet-cost F` (Faktor auf die
+laufenden Kosten der Flotte; 0 schaltet sie ab).
 
 ```bash
 cargo headless research --seed 7 --years 100
@@ -331,11 +343,59 @@ wählt `--data-dir PFAD` oder die Umgebungsvariable `KONFLUENZ_DATA`.
 - **Werkzeuge des Staates:** Anteile kaufen, anbieten, an eine Region verteilen,
   Übernahmeangebot, Enteignung (wirkt sofort, kostet Kurse und Vertrauen über Jahre),
   Staatsanleihen (Zins steigt mit Schulden und Kriegsmüdigkeit, Ausfall möglich),
-  Steuersatz und Rücklage.
+  Steuersatz und Rücklage. Was der Staat mit seinen Einnahmen tut, regelt sein Haushalt.
 - **Geldmenge.** Fällt das Preisniveau unter das Ziel, schöpft die Notenbank Geld für den
   Staat. Die Schöpfung ist ausgewiesen und Teil der Geldsummenprüfung.
 
 Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
+
+## Staatshaushalt
+
+- **Ein Haushalt je Gemeinschaft und Monat.** Am Monatsersten steht fest, was der
+  abgeschlossene Monat eingebracht hat: Lohnsteuer, Zölle der Kontore, Dividenden auf
+  staatliche Anteile. Aus der Kasse bedient der Staat dann seine Ansprüche in fester
+  Rangfolge (`economy::Claim`):
+  1. **Schuldendienst:** Zinsen und fällige Anleihen.
+  2. **Grundleistungen:** laufende Verwaltung und Versorgung, ein fester Anteil
+     (`civil_share`) der Einnahmen, gemittelt über zwölf Monate und gerechnet zum
+     üblichen Lohnsteuersatz. Sie gehen an die Haushalte.
+  3. **Flotte:** Sold der Besatzungen und Ersatzteile der Wartung.
+  4. **Beschaffung:** Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft
+     wird, den ganzen Monat über; am Monatsersten wird der Voranschlag zurückgelegt.
+  5. **Kontore:** Einlagen in Kontore, deren Kasse leer ist, gegen neue Anteile.
+  6. **Forschung:** der eingestellte Anteil der Einnahmen.
+  7. **Rücklage:** Was übrig ist, füllt sie bis zu ihrem Ziel auf.
+  8. **Ausschüttung:** Erst vom Rest darüber geht ein Anteil (`handout_share`) an die
+     Haushalte.
+- **Kürzung.** Reicht das Geld nicht, wird von hinten gekürzt, mit den Folgen, die jeder
+  Anspruch selbst hat: Ausgebliebener Sold wird zum Soldrückstand und drückt die Moral
+  der Besatzungen, unbezahlte Forschung kommt langsamer voran, Werften, Nachschub und
+  Instandsetzung warten. Die Ansprüche 1 bis 5 greifen notfalls die Rücklage an, die
+  Forschung nie: Sie lebt von dem, was der Monat nach ihnen übrig lässt, und von dem, was
+  schon über der Rücklage lag.
+- **Rüstung kostet Wohlfahrt.** Sold und Gehälter gehen an die, die dem Staat dienen
+  (Besatzungen, Forschende), nicht an die Haushalte der Welten. Der Staatsdienst kauft am
+  Markt des Sitzes seiner Gemeinschaft ein, was Haushalte kaufen; Ersatzteile und
+  Treibstoff verbraucht die Flotte selbst. Was Flotte und Forschung kosten, fehlt der
+  Ausschüttung: Eine Gemeinschaft, die für beides nichts ausgibt, schüttet gut doppelt so
+  viel aus, und ihre Haushalte decken mehr von ihrem Bedarf.
+- **Größenordnung** (gemessen über die Seeds 0 bis 7, erste zehn Jahre): Die Startflotte
+  kostet rund 9 % der laufenden Staatseinnahmen, die Forschung zum üblichen Etat rund
+  13 %; jede weitere Flotte kostet noch einmal so viel. Mit der doppelten Flotte halbiert
+  sich die Ausschüttung. Das Vierfache trägt der Haushalt ohne höhere Steuer nicht: Die
+  Ansprüche verlangen mehr, als die Monate einbringen, die Kasse fällt unter die
+  Rücklage, die Ausschüttung endet, und wer sich das Geld nicht leiht, bleibt Sold
+  schuldig. Eine höhere Lohnsteuer hilft, weil die Grundleistungen am üblichen Satz
+  bemessen sind; sie kostet die Haushalte Kaufkraft.
+- **Lesemodell.** `Economy::budget(gemeinschaft)` liefert reine Daten: den laufenden
+  Monat, die letzten zwölf abgeschlossenen (`history`) und ihre Summe (`year()`). Je
+  Monat die Einnahmen, je Anspruch verlangt und bezahlt (`line`), den Rest nach den
+  Ansprüchen (`remainder`), die Ausschüttung (`handout`), was aus Geldmangel gekürzt
+  wurde (`unfunded`), Kasse und Rücklagenziel.
+
+Die Stellschrauben stehen in `assets/data/balance.ron`: `civil_share`, `handout_share` und
+`state_reserve_per_million` unter `economy`, Sold und Wartung unter `military`, der
+Forschungsetat unter `research`.
 
 ## Flotten, Werften und Nachschub
 
@@ -369,27 +429,31 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   Eine Blockade weit von zu Hause hält nur, wer seine Flotten ablöst.
 - **Instandsetzung.** Im eigenen Gebiet mit Werft, gegen Rumpfsegmente vom Markt; verlorene
   Bordjäger kommen aus ihren eigenen Bauteilen.
-- **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
-  Haushalte. Reicht die Kasse nicht, wächst der Soldrückstand der Gemeinschaft.
+- **Sold und Wartung.** Monatlich der Sold, ein Anteil am Bauwert aller Schiffe
+  (`upkeep_per_month`); er geht an die Besatzungen, die ihn am Markt des Sitzes ihrer
+  Gemeinschaft ausgeben. Dazu täglich die Ersatzteile der Wartung: je Monat ein Anteil
+  der Bauteile jedes Schiffs (`maintenance_per_month`), gekauft am selben Markt, wo immer
+  die Flotte liegt. Eine Flotte steht so in Preisen und Beständen der Rüstungsgüter, auch
+  im Frieden. Bewilligt der Staatshaushalt der Flotte weniger, als sie verlangt, wächst
+  der Soldrückstand der Gemeinschaft.
 - **Befehle.** Schiffe bestellen (einen bestimmten Entwurf oder eine Klasse, dann wählt die
   Werft den besten Entwurf, den die Gemeinschaft beherrscht) und Aufträge streichen,
   Flotten teilen und vereinigen, Aufstellung und Doktrin als stehende Befehle, Rückzug aus
   einem laufenden Gefecht.
-- **Rangfolge der Ausgaben.** Die Staatskasse bedient ihre Ansprüche in fester
-  Reihenfolge. Am Monatsersten kehrt der Staat zuerst die Hälfte dessen, was über seiner
-  Rücklage liegt, an die Haushalte aus und bedient seine Schulden. Dann kommt die Flotte:
-  der Sold, danach täglich Nachschub, Instandsetzung und Werften, Flotten und Aufträge in
-  Nummernfolge; sie greifen notfalls die Rücklage an. Zuletzt die Forschung: Sie bekommt
-  nur, was dann noch über der Rücklage liegt.
+- **Rangfolge der Ausgaben.** Flotte (Sold und Wartung) und Beschaffung (Werften,
+  Nachschub, Instandsetzung) sind zwei Ansprüche des Staatshaushalts; sie gehen
+  Forschung, Rücklage und Ausschüttung vor und greifen notfalls die Rücklage an.
 
 Die Stellschrauben stehen in `assets/data/balance.ron` unter `military`.
 
 ## Technologie
 
 - **Forschung.** Jede Gemeinschaft gibt monatlich einen Anteil ihrer laufenden
-  Staatseinnahmen (Lohnsteuer, Zölle, Dividenden) für Forschung aus. Das Geld ist das
-  Gehalt der Forschenden und fließt an die Haushalte; aus ihm werden Forschungspunkte,
-  mehr davon bei großer Bevölkerung. Fünf Zweige mit je sechs Stufen (`techs.ron`).
+  Staatseinnahmen (Lohnsteuer, Zölle, Dividenden) für Forschung aus, soweit ihr Haushalt
+  es nach den vorrangigen Ansprüchen hergibt. Das Geld ist das Gehalt der Forschenden:
+  Es geht an den Staatsdienst, nicht an die Haushalte der Welten. Aus ihm werden
+  Forschungspunkte, mehr davon bei großer Bevölkerung. Fünf Zweige mit je sechs Stufen
+  (`techs.ron`).
 - **Wirkungen.** Wirtschaft: Ausstoß der Werke, Fahrt der Frachter. Antrieb: Fahrt der
   Flotten auf der Karte und der Schiffe im Gefecht. Waffen und Verteidigung: Schaden,
   Reichweite, Schilde, Panzerung, Rumpf. Eine Flotte kämpft mit der Technik, die ihre
@@ -471,7 +535,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte. Oberfläche: Forschungsfenster, Flotten mit Zustand, Rückzug und stehenden Befehlen; offen: Militär-KI, Bauliste und Umgliedern im Flottenfenster, Gefechte der Partie in der 3D-Ansicht |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche. Oberfläche: Forschungsfenster, Flotten mit Zustand, Rückzug und stehenden Befehlen; offen: Militär-KI, Haushalt, Bauliste und Umgliedern im Flottenfenster, Gefechte der Partie in der 3D-Ansicht |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |

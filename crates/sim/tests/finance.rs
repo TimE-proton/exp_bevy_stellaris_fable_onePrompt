@@ -172,6 +172,8 @@ fn a_colony_owned_by_the_center_drifts_into_autonomy_while_a_shared_one_stays() 
 
         // Zusammenhalt beider Kolonien am Ende jedes Jahres.
         let (mut lows, mut highs) = (Vec::new(), Vec::new());
+        let stage = |sim: &Headless| sim.world().resource::<Finance>().region(colony).stage;
+        let (mut restless, mut loyal) = (0u32, 0u32);
         for year in 0..25 {
             // Im einen Reich zieht der Staat jedes Jahr allen Besitz an sich …
             give_everything_to(&mut hoarded, colony, HolderId::State(me));
@@ -207,14 +209,23 @@ fn a_colony_owned_by_the_center_drifts_into_autonomy_while_a_shared_one_stays() 
             shared.run_days(DAYS_PER_YEAR);
             lows.push(cohesion_of(&hoarded, colony));
             highs.push(cohesion_of(&shared, colony));
+            if year >= 15 {
+                restless += u32::from(stage(&hoarded) != Stage::Loyal);
+                loyal += u32::from(stage(&shared) == Stage::Loyal);
+            }
         }
-        let stage = |sim: &Headless| sim.world().resource::<Finance>().region(colony).stage;
-        assert_ne!(
-            stage(&hoarded),
-            Stage::Loyal,
-            "Seed {seed}: Konzentration muss Unruhe erzeugen"
+        // Gezählt wird über die letzten zehn Jahresenden, nicht am letzten Tag: Eine Kolonie
+        // an der Schwelle wechselt ihre Stufe von Jahr zu Jahr.
+        assert!(
+            restless >= 8,
+            "Seed {seed}: Konzentration muss Unruhe erzeugen; unruhig oder autonom nur an \
+             {restless} von zehn Jahresenden"
         );
-        assert_eq!(stage(&shared), Stage::Loyal, "Seed {seed}");
+        assert!(
+            loyal >= 8,
+            "Seed {seed}: Die Kolonie in breitem Besitz war nur an {loyal} von zehn \
+             Jahresenden loyal"
+        );
         // Autonome Regionen zahlen keine Steuern mehr.
         if stage(&hoarded) == Stage::Autonomous {
             assert!(
@@ -232,10 +243,7 @@ fn a_colony_owned_by_the_center_drifts_into_autonomy_while_a_shared_one_stays() 
     // Gemessen wird das Mittel der letzten zehn Jahre über drei Partien, nicht ein einzelner
     // Monat einer einzigen: Der Abfluss der Gewinne schwankt mit den Ausschüttungen von Jahr
     // zu Jahr um mehrere Punkte, und ein Stichtag träfe mal ein Tal, mal einen Gipfel.
-    // Die Partien sind so gewählt, dass die Kolonie nicht schon aus anderen Gründen an der
-    // Schwelle steht: In Seed 24 etwa pendelt die gehortete Kolonie zwischen 45 und 51
-    // Punkten genau um die Grenzen der Stufen, und ihre Stufe am Stichtag ist Zufall.
-    let games: Vec<(f64, f64)> = [4, 14, 44].into_iter().map(play).collect();
+    let games: Vec<(f64, f64)> = [4, 14, 24].into_iter().map(play).collect();
     for (low, high) in &games {
         assert!(
             *high > *low + 10.0,

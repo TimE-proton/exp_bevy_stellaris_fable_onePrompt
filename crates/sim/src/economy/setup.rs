@@ -28,6 +28,9 @@ pub fn setup_economy(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> E
         tech_yield: Vec::new(),
         state_income: Vec::new(),
         state_income_running: Vec::new(),
+        wage_bill_running: Vec::new(),
+        budgets: Vec::new(),
+        staff: Vec::new(),
     };
     economy.sync_polities();
     for polity in &polities.list {

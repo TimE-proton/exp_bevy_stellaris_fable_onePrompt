@@ -7,9 +7,9 @@ use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR};
 use sim::command::{CommandLog, CommandOutcome, SimCommand};
 use sim::data::TechBranch;
 use sim::economy::{
-    Economy, EquityFlows, Money, expected_return, invest_and_depreciate, produce_and_consume,
-    seed_colony, settle_public_accounts, state_reserve, steer_money_supply, to_credits, to_money,
-    unit_economics_at,
+    Claim, Economy, EquityFlows, Money, Wants, expected_return, invest_and_depreciate,
+    produce_and_consume, seed_colony, settle_budget, settle_public_accounts, state_reserve,
+    steer_money_supply, to_credits, to_money, unit_economics_at,
 };
 use sim::finance::{Finance, Stage};
 use sim::galaxy::Galaxy;
@@ -18,8 +18,8 @@ use sim::ids::{PlanetId, PolityId};
 use sim::logistics::Logistics;
 use sim::state::{SaveGame, SimConfig, SimState, money_drift};
 use sim::tech::{
-    Research, TechEffects, TierEstimate, contact_weights, estimate_width, research_month,
-    update_beliefs, visible_spillover,
+    Research, TechEffects, TierEstimate, contact_weights, estimate_width, research_claim,
+    research_month, update_beliefs, visible_spillover,
 };
 
 fn data() -> GameData {
@@ -385,10 +385,21 @@ fn larger_economies_research_faster_in_a_running_game() {
     // Gleicher Etat für alle, damit nur die Wirtschaft den Unterschied macht. Gemessen
     // wird sie an der Leistung der Betriebe und an der Bevölkerung, nicht an der Größe,
     // aus der die Forschung selbst rechnet.
+    //
+    // Was die Partie zusagt, sind Forschungspunkte: Sie folgen den Staatseinnahmen und der
+    // Bevölkerung. Wie viele Technologien daraus werden, hängt an Stufenkosten und
+    // Vorlieben und schwankt von Partie zu Partie. Geprüft wird deshalb, was über sechs
+    // Partien an Punkten verdient wurde, und die Zahl der Technologien nur in der Summe.
     let data = data();
     let share = data.balance.research.budget_share;
-    let mut clear_pairs = 0;
-    for seed in [1, 2, 3] {
+    // Je Gemeinschaft und Partie: Wirtschaftsgewicht und verdiente Punkte.
+    let mut sizes: Vec<(f64, f64)> = Vec::new();
+    // Paare mit deutlichem Abstand im Gewicht: Punkte und Abschlüsse der größeren und der
+    // kleineren Gemeinschaft.
+    let (mut clear_pairs, mut ahead) = (0, 0);
+    let (mut points_larger, mut points_smaller) = (0.0, 0.0);
+    let (mut done_larger, mut done_smaller) = (0u32, 0u32);
+    for seed in 0..6 {
         let mut sim = observer(seed);
         set_all_shares(&mut sim, share);
         let count = sim.polities().list.len();
@@ -412,46 +423,18 @@ fn larger_economies_research_faster_in_a_running_game() {
         let weight = |index: usize| {
             output[index] * people[index].powf(data.balance.research.population_exponent)
         };
-        // Wissen einer Gemeinschaft: die Zahl ihrer Technologien und was sie nach Liste
-        // gekostet haben.
-        let known = |index: usize| research.known_count(PolityId::from_index(index));
-        let worth = |index: usize| -> f64 {
-            data.techs
-                .iter()
-                .zip(&research.polities[index].known)
-                .filter(|(_, known)| **known)
-                .map(|(tech, _)| tech.cost)
-                .sum()
-        };
         for a in 0..count {
+            sizes.push((weight(a), points(a)));
             for b in 0..count {
                 if weight(a) < weight(b) * 1.3 {
                     continue;
                 }
                 clear_pairs += 1;
-                assert!(
-                    points(a) > points(b) * 1.1,
-                    "Seed {seed}: G{a} leistet deutlich mehr als G{b} ({:.0} gegen {:.0}), \
-                     forscht aber nicht deutlich mehr ({:.0} gegen {:.0} Punkte)",
-                    weight(a),
-                    weight(b),
-                    points(a),
-                    points(b)
-                );
-                // Wer deutlich mehr leistet, weiß nicht weniger. Die Zahl allein sagt das
-                // nicht: Eine Technologie der dritten Stufe kostet so viel wie zwei der
-                // zweiten, und welche eine Gemeinschaft als Nächstes angeht, hängt an ihren
-                // Vorlieben. Im Rückstand ist erst, wer weniger Technologien kennt und
-                // dafür auch weniger aufgewendet hat.
-                assert!(
-                    known(a) >= known(b) || worth(a) >= worth(b),
-                    "Seed {seed}: G{a} leistet deutlich mehr als G{b}, weiß aber weniger \
-                     ({} Technologien im Wert von {:.0} gegen {} im Wert von {:.0})",
-                    known(a),
-                    worth(a),
-                    known(b),
-                    worth(b)
-                );
+                ahead += (points(a) > points(b)) as u32;
+                points_larger += points(a);
+                points_smaller += points(b);
+                done_larger += research.polities[a].completed;
+                done_smaller += research.polities[b].completed;
             }
         }
         // Das Tempo liegt im gewollten Rahmen: Die erste Technologie braucht einige Jahre,
@@ -474,8 +457,48 @@ fn larger_economies_research_faster_in_a_running_game() {
         }
     }
     assert!(
-        clear_pairs >= 6,
+        clear_pairs >= 20,
         "nur {clear_pairs} Paare mit deutlichem Abstand: die Prüfung sagt zu wenig"
+    );
+    // Wer deutlich mehr leistet, hat mehr Punkte verdient: in fast jedem Paar, und über
+    // alle Paare zusammen deutlich mehr.
+    assert!(
+        ahead * 10 >= clear_pairs * 9,
+        "nur in {ahead} von {clear_pairs} Paaren hat die größere Wirtschaft mehr geforscht"
+    );
+    assert!(
+        points_larger > points_smaller * 1.2,
+        "die größeren Wirtschaften verdienten zusammen {points_larger:.0} Punkte, die \
+         kleineren {points_smaller:.0}"
+    );
+    // Über alle Gemeinschaften und Partien wachsen die Punkte mit dem Gewicht der
+    // Wirtschaft, annähernd im selben Verhältnis: Korrelation und Steigung der Logarithmen.
+    let n = sizes.len() as f64;
+    let (mean_w, mean_p) = sizes.iter().fold((0.0, 0.0), |(w, p), (weight, points)| {
+        (w + weight.ln() / n, p + points.ln() / n)
+    });
+    let (mut cov, mut var_w, mut var_p) = (0.0, 0.0, 0.0);
+    for (weight, points) in &sizes {
+        let (dw, dp) = (weight.ln() - mean_w, points.ln() - mean_p);
+        cov += dw * dp;
+        var_w += dw * dw;
+        var_p += dp * dp;
+    }
+    let correlation = cov / (var_w * var_p).sqrt();
+    let slope = cov / var_w;
+    assert!(
+        correlation >= 0.75,
+        "Punkte und Wirtschaftsgewicht hängen nur mit {correlation:.2} zusammen"
+    );
+    assert!(
+        (0.5..=1.2).contains(&slope),
+        "ein Prozent mehr Gewicht bringt {slope:.2} Prozent mehr Punkte"
+    );
+    // Aus mehr Punkten werden über alle Paare auch nicht weniger Technologien.
+    assert!(
+        done_larger >= done_smaller,
+        "die größeren Wirtschaften schlossen {done_larger} Technologien ab, die kleineren \
+         {done_smaller}"
     );
 }
 
@@ -680,7 +703,7 @@ fn every_template_begins_with_a_project_of_the_first_tier() {
 // --- 2. Forschung bewegt Geld, sie schafft und vernichtet keines ---
 
 #[test]
-fn research_pay_moves_money_from_the_treasury_to_households() {
+fn research_pay_moves_money_from_the_treasury_to_the_research_staff() {
     let data = data();
     let mut world = start(&data, 3);
     for index in 0..world.polities.list.len() {
@@ -691,24 +714,32 @@ fn research_pay_moves_money_from_the_treasury_to_households() {
     for polity in &world.polities.list {
         let index = polity.id.index();
         let entry = &world.research.polities[index];
-        let planets = world.galaxy.planets_of(polity.id).count() as Money;
-        // Der Etat ist der Anteil an den Einnahmen; je Welt kann ein Tausendstel fehlen.
+        // Der Etat ist der Anteil an den Einnahmen, auf das Tausendstel.
         let budget = to_money(entry.budget_share * 20_000.0);
-        assert!(
-            entry.spent_last_month <= budget && entry.spent_last_month >= budget - planets,
-            "{} von {budget} gezahlt",
-            entry.spent_last_month
-        );
+        assert_eq!(entry.spent_last_month, budget);
         assert!(entry.points_last_month > 0.0);
-        // Die Kasse sinkt um genau das, was die Haushalte erhalten.
+        // Die Kasse sinkt um genau das, was die Forschenden erhalten. Die Gehälter gehen an
+        // den Staatsdienst, nicht an die Haushalte der Welten: Was die Forschung kostet,
+        // fehlt den übrigen.
         assert_eq!(
             before.economy.treasuries[index] - world.economy.treasuries[index],
             entry.spent_last_month
         );
         assert_eq!(
-            households_of(&world, polity.id) - households_of(&before, polity.id),
+            world.economy.staff_money(polity.id) - before.economy.staff_money(polity.id),
             entry.spent_last_month
         );
+        assert_eq!(
+            households_of(&world, polity.id),
+            households_of(&before, polity.id)
+        );
+        let line = world
+            .economy
+            .budget(polity.id)
+            .unwrap()
+            .current
+            .line(Claim::Research);
+        assert_eq!((line.wanted, line.paid), (budget, budget));
         assert_eq!(entry.spent_total, entry.spent_last_month);
     }
     assert_eq!(
@@ -725,43 +756,85 @@ fn research_pay_moves_money_from_the_treasury_to_households() {
     assert_eq!(entry.points_last_month, 0.0);
     assert!(entry.progress.iter().all(|points| *points == 0.0));
     assert_eq!(broke.economy.treasuries[0], 0);
-    assert_eq!(
-        households_of(&broke, PolityId(0)),
-        households_of(&before, PolityId(0))
-    );
+    assert_eq!(broke.economy.staff_money(PolityId(0)), 0);
     assert!(
         broke.research.polities[1].points_last_month > 0.0,
         "die anderen forschen weiter"
     );
+}
 
-    // Die Rücklage ist tabu: Liegt die Kasse nur knapp darüber, wird nur dieser Rest
-    // gezahlt und entsprechend weniger geforscht.
-    let me = PolityId(0);
-    let reserve = state_reserve(&before.economy, &data, me, before.galaxy.population_of(me));
-    assert!(reserve > 0 && reserve < before.economy.treasuries[0]);
-    let mut tight = before.clone();
-    tight.economy.treasuries[0] = reserve + to_money(7.0);
-    research_step(&data, &mut tight);
-    let entry = &tight.research.polities[0];
-    assert!(entry.spent_last_month > 0 && entry.spent_last_month <= to_money(7.0));
-    assert_eq!(
-        tight.economy.treasuries[0],
-        reserve + to_money(7.0) - entry.spent_last_month
+/// Ein Monatsabschluss des Haushalts für eine Gemeinschaft, in dem die Forschung ihren
+/// Etat verlangt und die Flotte den Betrag `fleet`, und danach der Forschungsschritt.
+fn budget_then_research(data: &GameData, world: &mut SimState, polity: PolityId, fleet: Money) {
+    let wanted = research_claim(
+        &world.research,
+        &world.economy,
+        &world.galaxy,
+        &world.polities,
+        &world.diplomacy,
+        data,
+        &world.config,
+        polity,
     );
-    assert!(entry.points_last_month < world.research.polities[0].points_last_month / 10.0);
-    let mut at_reserve = before.clone();
-    at_reserve.economy.treasuries[0] = reserve;
-    research_step(&data, &mut at_reserve);
-    assert_eq!(at_reserve.research.polities[0].spent_last_month, 0);
-    assert_eq!(at_reserve.economy.treasuries[0], reserve);
+    world
+        .economy
+        .open_budget_month(world.clock.day(), data.balance.economy.income_tax);
+    let wants = Wants::from([(Claim::Fleet, fleet), (Claim::Research, wanted)]);
+    settle_budget(&world.galaxy, &mut world.economy, data, polity, &wants);
+    research_step(data, world);
+}
 
-    // Ein befohlener Kriegsschatz bindet das Geld ebenso: Erst was darüber liegt, fließt.
-    let mut hoarding = before.clone();
-    hoarding.economy.treasury_targets[0] = before.economy.treasuries[0] + to_money(1.0);
-    research_step(&data, &mut hoarding);
-    assert_eq!(hoarding.research.polities[0].spent_last_month, 0);
-    assert_eq!(hoarding.research.polities[0].points_last_month, 0.0);
-    assert_eq!(hoarding.economy.treasuries[0], before.economy.treasuries[0]);
+#[test]
+fn research_is_paid_from_what_the_month_leaves_and_never_from_the_reserve() {
+    // In der Partie bewilligt der Haushalt der Forschung ihr Geld: nach den Ansprüchen, die
+    // ihr vorgehen, und nie aus der Rücklage.
+    let data = data();
+    let me = PolityId(0);
+    let mut base = start(&data, 3);
+    // Kein Kontor braucht Kapital vom Staat.
+    for market in &mut base.economy.markets {
+        market.cash = to_money(10_000.0);
+    }
+    let revenue = to_money(10_000.0);
+    set_income(&mut base, 0, 10_000.0);
+    let reserve = state_reserve(&base.economy, &data, me, base.galaxy.population_of(me));
+    let civil = to_money(10_000.0 * data.balance.economy.civil_share);
+    let budget = to_money(base.research.polities[0].budget_share * 10_000.0);
+    assert!(reserve > 0 && civil > 0 && budget > to_money(7.0));
+    // `above`: was vor dem Monat schon über der Rücklage lag. `fleet`: was die Flotte
+    // verlangt. `target`: befohlene Rücklage.
+    let month = |above: Money, fleet: Money, target: Money| {
+        let mut world = base.clone();
+        world.economy.treasuries[0] = reserve + above + revenue;
+        world.economy.treasury_targets[0] = target;
+        budget_then_research(&data, &mut world, me, fleet);
+        let entry = world.research.polities[0].clone();
+        (entry.spent_last_month, entry.points_last_month)
+    };
+
+    // Die Rücklage ist voll, der Monat hat seine Einnahmen gebracht: Die Forschung bekommt
+    // ihren Etat.
+    let (paid, points) = month(0, 0, 0);
+    assert_eq!(paid, budget);
+    assert!(points > 0.0);
+    // Lassen Grundleistungen und Flotte vom Monat nur sieben Credits, bekommt sie nur
+    // diesen Rest und forscht entsprechend weniger; lassen sie nichts, bekommt sie nichts.
+    // Die Flotte greift dann die Rücklage an, die Forschung nie.
+    let rest = revenue - civil;
+    let (tight, tight_points) = month(0, rest - to_money(7.0), 0);
+    assert_eq!(tight, to_money(7.0));
+    assert!(tight_points > 0.0 && tight_points < points / 10.0);
+    assert_eq!(month(0, rest, 0), (0, 0.0));
+    assert_eq!(month(0, rest + to_money(2_000.0), 0), (0, 0.0));
+    // Was vor dem Monat schon über der Rücklage lag, steht ihr offen.
+    assert_eq!(month(budget, rest, 0).0, budget);
+
+    // Ein befohlener Kriegsschatz ändert daran nichts: Die Forschung geht dem Auffüllen
+    // der Rücklage vor und lebt weiter von dem, was der Monat nach den vorrangigen
+    // Ansprüchen übrig lässt. Gekürzt wird die Ausschüttung.
+    let chest = reserve + to_money(50_000.0);
+    assert_eq!(month(0, 0, chest).0, budget);
+    assert_eq!(month(0, rest - to_money(7.0), chest).0, to_money(7.0));
 }
 
 #[test]
@@ -2339,7 +2412,10 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
         let planet = galaxy.planet_mut(colony);
         planet.population = planet.population.max(needed);
     }
-    // Das alte Reich ist den anderen voraus und mitten in einer Arbeit.
+    // Das alte Reich ist den anderen voraus und mitten in einer Arbeit. Sein Etat ist
+    // ein eigener, erkennbar anderer als der seiner Vorlage: der höchste zulässige.
+    let share = data.balance.research.max_budget_share;
+    assert_ne!(sim.research().polities[0].usual_share, share);
     let begun = tech(&data, "antrieb_3");
     {
         let mut research = sim.world_mut().resource_mut::<Research>();
@@ -2347,8 +2423,8 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
         research.grant(&data, parent, tech(&data, "wirtschaft_3"));
         research.grant(&data, parent, tech(&data, "antrieb_2"));
         research.polities[0].progress[begun as usize] = 4321.0;
-        research.polities[0].budget_share = 0.2;
-        research.polities[0].usual_share = 0.2;
+        research.polities[0].budget_share = share;
+        research.polities[0].usual_share = share;
         research.add_intel(parent, PolityId(1), 0.5);
     }
     let inherited = sim.research().known(parent).to_vec();
@@ -2390,8 +2466,8 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
     assert_eq!(new.effects, TechEffects::of(&data, &inherited));
     assert!(new.effects.yield_factor > 1.0);
     assert_eq!(new.progress[begun as usize], 4321.0);
-    assert_eq!(new.budget_share, 0.2);
-    assert_eq!(new.usual_share, 0.2);
+    assert_eq!(new.budget_share, share);
+    assert_eq!(new.usual_share, share);
     assert_eq!(new.focus, focus);
     assert!(new.auto);
     assert_eq!(new.completed, 0);

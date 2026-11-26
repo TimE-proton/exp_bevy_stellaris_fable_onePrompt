@@ -16,7 +16,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{Date, TICKS_PER_DAY};
 use crate::data::{GameData, Sector, ShipClass};
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, Money, pay, purchase, recipes_of, to_credits, to_money};
+use crate::economy::{Claim, Economy, Money, pay, purchase, recipes_of, to_credits, to_money};
 use crate::galaxy::Galaxy;
 use crate::ids::{GoodId, PlanetId, PolityId};
 use crate::polity::Polities;
@@ -349,8 +349,10 @@ pub fn advance_yards(
         let step = (1.0 / stats.build_days.max(1) as f32)
             .min(1.0 - order.progress)
             .max(0.0);
+        // Gekauft wird aus dem, was der Haushalt der Beschaffung lässt.
+        let mut purse = economy.allowance(order.polity, Claim::Procurement);
+        let before = purse;
         let market = &mut economy.markets[world.system.index()];
-        let treasury = &mut economy.treasuries[order.polity.index()];
 
         // Der knappste Posten bestimmt, wie weit der Tag reicht: zuerst die Ware …
         let mut in_stock = 1.0f64;
@@ -367,10 +369,10 @@ pub fn advance_yards(
                 cost += wanted * market.ask(*good, spread);
             }
         }
-        // … dann die Kasse, aus der auch der Aufschlag der Werft bezahlt wird.
+        // … dann das Geld, aus dem auch der Aufschlag der Werft bezahlt wird.
         let total = cost * (1.0 + balance.yard_fee);
         let affordable = if total > 0.0 {
-            (to_credits((*treasury).max(0)) / total).min(1.0)
+            (to_credits(purse) / total).min(1.0)
         } else {
             1.0
         };
@@ -391,11 +393,11 @@ pub fn advance_yards(
             let mut parts: Money = 0;
             for (good, amount) in &stats.parts {
                 let quantity = *amount as f64 * step as f64 * share;
-                parts += purchase(market, *good, quantity, treasury, spread).1;
+                parts += purchase(market, *good, quantity, &mut purse, spread).1;
             }
             let firm = &mut economy.planets[order.planet.index()].firms[Sector::Arms.index()];
             let fee = pay(
-                treasury,
+                &mut purse,
                 &mut firm.cash,
                 (parts as f64 * balance.yard_fee).round() as Money,
             );
@@ -404,6 +406,8 @@ pub fn advance_yards(
             order.spent += parts + fee;
             order.progress += step * share as f32;
         }
+        economy.want(order.polity, Claim::Procurement, to_money(total));
+        economy.spend(order.polity, Claim::Procurement, before - purse);
         // Woran es lag, wenn der Tag nicht voll genutzt wurde: an der Ware, wenn sie
         // knapper war als das Geld, sonst am Geld.
         order.status = if share >= 1.0 {

@@ -8,14 +8,16 @@ use crate::clock::{SimClock, month_start};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{
-    Economy, Money, invest_and_depreciate, settle_public_accounts, steer_money_supply, to_credits,
+    Claim, Economy, Money, Wants, invest_and_depreciate, settle_budget, settle_public_accounts,
+    steer_money_supply, to_credits,
 };
-use crate::fleet::Fleets;
+use crate::fleet::{Fleets, fleet_claim, procurement_estimate};
 use crate::galaxy::Galaxy;
-use crate::ids::{PlanetId, PolityId};
+use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::Logistics;
 use crate::polity::Polities;
-use crate::tech::Research;
+use crate::state::SimConfig;
+use crate::tech::{Research, research_claim};
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -42,14 +44,18 @@ impl Plugin for FinancePlugin {
 }
 
 /// Monatsabschluss in fester Reihenfolge: Kapital wandert, öffentliche Kassen gleichen
-/// aus, Einlagen werden zu Anteilen, Dividenden fließen an die Halter, der Staat bedient
-/// seine Schulden, Halter legen an, Kurse bilden sich.
+/// aus, Einlagen werden zu Anteilen, Dividenden fließen an die Halter. Dann der
+/// Staatshaushalt: Schuldendienst, Grundleistungen, die Bewilligungen für Flotte,
+/// Beschaffung und Forschung, Rücklage und Ausschüttung. Zuletzt legen die Halter an, und
+/// die Kurse bilden sich.
 fn monthly_books(
     data: Res<GameData>,
+    config: Res<SimConfig>,
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
     fleets: Res<Fleets>,
+    research: Res<Research>,
     diplomacy: Res<Diplomacy>,
     logistics: Res<Logistics>,
     mut economy: ResMut<Economy>,
@@ -116,6 +122,11 @@ fn monthly_books(
     }
     economy.close_income_month();
 
+    // Der Haushalt des neuen Monats: Was der abgeschlossene eingebracht hat, steht fest.
+    // Der Schuldendienst ist der erste Anspruch, dann folgen die übrigen in ihrer
+    // Rangfolge. Flotte und Forschung geben ihre Bewilligung später in diesem Takt aus
+    // (`SimSet::Fleets`, `SimSet::Research`), die Beschaffung den Monat über.
+    economy.open_budget_month(clock.day(), data.balance.economy.income_tax);
     service_bonds(
         &mut finance,
         &mut economy,
@@ -126,6 +137,34 @@ fn monthly_books(
         &data,
         clock.tick,
     );
+    for polity in polities.alive() {
+        let mut wants = Wants::new();
+        wants.insert(
+            Claim::Fleet,
+            fleet_claim(&data, &galaxy, &economy, &fleets, polity),
+        );
+        wants.insert(
+            Claim::Procurement,
+            procurement_estimate(
+                &data, &galaxy, &economy, &polities, &fleets, &diplomacy, polity.id,
+            ),
+        );
+        wants.insert(
+            Claim::Research,
+            research_claim(
+                &research, &economy, &galaxy, &polities, &diplomacy, &data, &config, polity.id,
+            ),
+        );
+        // Für Einlagen in Kontore gibt die Börse dem Staat neue Anteile aus.
+        for (system, amount) in settle_budget(&galaxy, &mut economy, &data, polity.id, &wants) {
+            record_injection(
+                &mut finance,
+                IssuerId::Kontor(system),
+                HolderId::State(polity.id),
+                amount,
+            );
+        }
+    }
 
     // Staatseinnahmen schätzen und Kriegsmüdigkeit fortschreiben.
     for polity in &polities.list {

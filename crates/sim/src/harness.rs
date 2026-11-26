@@ -142,6 +142,9 @@ pub struct EconomyStats {
     pub utilization: f64,
     /// Bevölkerungsgewichtete Deckung des Lebensnotwendigen.
     pub essentials_met: f64,
+    /// Bevölkerungsgewichtete Deckung aller Bedarfe der Haushalte (Mittel über die
+    /// Bedarfe): das Maß dafür, was bei den Haushalten ankommt.
+    pub needs_met: f64,
     /// Mittleres Verhältnis von Preis zu Richtpreis auf belebten Märkten.
     pub price_level: f64,
     /// Mittlere Preisspanne zwischen teuerstem und billigstem belebten Markt je Gut.
@@ -155,6 +158,8 @@ pub struct EconomyStats {
     pub money_drift: i64,
     /// Summe der Staatskassen in Credits.
     pub treasuries: f64,
+    /// Geld des Staatsdienstes (Besatzungen, Forschende) in Credits.
+    pub staff_money: f64,
     /// Geldverteilung in Credits: Haushalte, Firmen, Kontore, Handelshäuser.
     pub household_money: f64,
     pub firm_money: f64,
@@ -184,6 +189,7 @@ pub fn economy_stats(world: &World) -> EconomyStats {
     let balance = &data.balance.economy;
     let mut stats = EconomyStats::default();
     let (mut labor, mut employed, mut used_capital, mut fed, mut wages) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut served = 0.0;
     for planet in &galaxy.planets {
         if planet.owner.is_none() || planet.population <= 0.0 {
             continue;
@@ -194,6 +200,8 @@ pub fn economy_stats(world: &World) -> EconomyStats {
         labor += supply;
         employed += supply.min(local.labor_demand);
         fed += planet.population * local.essentials_met(balance);
+        served += planet.population * local.needs_met.iter().sum::<f64>()
+            / local.needs_met.len().max(1) as f64;
         wages += planet.population * local.wage;
         for (capital, utilization) in local.capital.iter().zip(&local.utilization) {
             stats.capital += capital;
@@ -203,6 +211,7 @@ pub fn economy_stats(world: &World) -> EconomyStats {
     stats.employment = employed / labor.max(1e-9);
     stats.utilization = used_capital / stats.capital.max(1e-9);
     stats.essentials_met = fed / stats.population.max(1e-9);
+    stats.needs_met = served / stats.population.max(1e-9);
     stats.mean_wage = wages / stats.population.max(1e-9);
 
     let live: Vec<usize> = galaxy
@@ -246,6 +255,7 @@ pub fn economy_stats(world: &World) -> EconomyStats {
         .map(|cash| crate::economy::to_credits(*cash))
         .sum();
     let credits = crate::economy::to_credits;
+    stats.staff_money = economy.staff.iter().map(|cash| credits(*cash)).sum();
     stats.household_money = economy.planets.iter().map(|p| credits(p.households)).sum();
     stats.firm_money = economy
         .planets
@@ -390,6 +400,11 @@ pub struct PolitySummary {
     pub war_weariness: f64,
     /// Bevölkerungsgewichteter Zusammenhalt der eigenen Welten, 0..100.
     pub cohesion: f64,
+    /// Der Staatshaushalt der letzten zwölf abgeschlossenen Monate, summiert: Einnahmen,
+    /// je Anspruch verlangt und bezahlt, Ausschüttung.
+    pub budget: crate::economy::BudgetMonth,
+    /// Abgeschlossene Monate, die in `budget` stecken (höchstens zwölf).
+    pub budget_months: usize,
 }
 
 pub fn summarize(sim: &Headless) -> RunSummary {
@@ -444,6 +459,13 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 treasury: crate::economy::to_credits(economy.treasury(polity.id)),
                 war_weariness: finance.polity(polity.id).war_weariness,
                 cohesion: cohesion(polity.id),
+                budget: economy
+                    .budget(polity.id)
+                    .map(|budget| budget.year())
+                    .unwrap_or_default(),
+                budget_months: economy
+                    .budget(polity.id)
+                    .map_or(0, |budget| budget.history.len()),
             })
             .collect(),
         economy: economy_stats(sim.world()),

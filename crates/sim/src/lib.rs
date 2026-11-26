@@ -50,11 +50,10 @@ pub struct SimRoot;
 /// Befehle und Entscheidungen, dann Warenflüsse und Produktion, daraus Preise und
 /// Finanzen, daraus Zusammenhalt; danach Krieg und seine Folgen.
 ///
-/// Sie ist zugleich die Rangfolge der Ansprüche an die Staatskasse: Der Monatsabschluss
-/// (`Finance`) nimmt ein, kehrt den halben Überschuss über der Rücklage an die Haushalte
-/// aus und bedient die Schulden; dann zahlen die Flotten (`Fleets`) Sold, Nachschub,
-/// Instandsetzung und Werften, notfalls aus der Rücklage; erst danach forscht die
-/// Gemeinschaft (`Research`) mit dem, was noch über der Rücklage liegt.
+/// Wer wie viel aus der Staatskasse bekommt, entscheidet am Monatsersten der
+/// Staatshaushalt im Monatsabschluss (`Finance`, [`economy::settle_budget`]): Er bedient
+/// die Ansprüche in ihrer Rangfolge ([`economy::Claim`]) und bewilligt Flotte und Forschung,
+/// was sie später im selben Takt ausgeben (`Fleets`, `Research`).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Commands,

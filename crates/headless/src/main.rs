@@ -2,6 +2,7 @@
 //! Kommandozeile und Ausgabe.
 
 mod battle;
+mod budget;
 mod fleets;
 mod research;
 mod script;
@@ -10,6 +11,7 @@ mod war;
 use clap::{Parser, Subcommand};
 use sim::GameData;
 use sim::clock::{DAYS_PER_YEAR, date_of_tick};
+use sim::economy::{Claim, to_credits};
 use sim::harness::{Headless, RunSummary, run_scripted, summarize, sweep_scripted};
 use sim::state::{SaveGame, SimConfig};
 use std::path::PathBuf;
@@ -105,7 +107,7 @@ enum Command {
     Fleets(fleets::FleetsArgs),
 }
 
-fn parse_range(text: &str) -> Result<(u64, u64), String> {
+pub(crate) fn parse_range(text: &str) -> Result<(u64, u64), String> {
     let (start, end) = text
         .split_once("..")
         .ok_or("erwartet wird START..ENDE, z. B. 0..32")?;
@@ -238,9 +240,10 @@ fn main() -> ExitCode {
                 runs.iter().map(f).sum::<f64>() / runs.len().max(1) as f64
             };
             println!(
-                "Mittel: Bevölkerung {:.0} Mio., Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}, Zusammenhalt {:.1}, Abspaltungen {:.1}",
+                "Mittel: Bevölkerung {:.0} Mio., Versorgung {:.2}, Bedarf gedeckt {:.3}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}, Zusammenhalt {:.1}, Abspaltungen {:.1}",
                 mean(|r| r.economy.population),
                 mean(|r| r.economy.essentials_met),
+                mean(|r| r.economy.needs_met),
                 mean(|r| r.economy.utilization),
                 mean(|r| r.economy.employment),
                 mean(|r| r.economy.price_level),
@@ -268,6 +271,32 @@ fn main() -> ExitCode {
                 100.0 * per_polity(|p| p.arrears),
                 per_polity(|p| p.techs as f64)
             );
+            // Haushalt der letzten zwölf Monate über alle lebenden Gemeinschaften: je
+            // Anspruch der Anteil an den laufenden Einnahmen.
+            let (mut revenue, mut months) = (0i64, 0usize);
+            let mut paid: std::collections::BTreeMap<Claim, i64> = Default::default();
+            for polity in runs.iter().flat_map(|run| run.polities.iter()) {
+                if !polity.alive {
+                    continue;
+                }
+                revenue += polity.budget.revenue;
+                months += polity.budget_months;
+                for claim in Claim::ALL {
+                    *paid.entry(claim).or_default() += polity.budget.line(claim).paid;
+                }
+            }
+            let share = |claim: Claim| 100.0 * paid[&claim] as f64 / revenue.max(1) as f64;
+            println!(
+                "Haushalt der letzten zwölf Monate im Mittel: Einnahmen {:.0} je Monat; Schulden {:.1} %, Grundleistungen {:.1} %, Flotte {:.1} %, Beschaffung {:.1} %, Kontore {:.1} %, Forschung {:.1} %, Ausschüttung {:.1} %",
+                to_credits(revenue) / months.max(1) as f64,
+                share(Claim::DebtService),
+                share(Claim::Civil),
+                share(Claim::Fleet),
+                share(Claim::Procurement),
+                share(Claim::Markets),
+                share(Claim::Research),
+                share(Claim::Handout)
+            );
             println!(
                 "Gefechte je Lauf im Mittel: {:.1} mit {:.1} verlorenen Schiffen",
                 mean(|r| r.battles as f64),
@@ -282,12 +311,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -308,7 +337,12 @@ fn main() -> ExitCode {
                             polity.strength,
                             polity.arrears,
                             run.battles,
-                            polity.ships_lost
+                            polity.ships_lost,
+                            run.economy.needs_met,
+                            to_credits(polity.budget.revenue),
+                            to_credits(polity.budget.line(Claim::Fleet).paid),
+                            to_credits(polity.budget.line(Claim::Research).paid),
+                            to_credits(polity.budget.handout())
                         ));
                     }
                 }
@@ -351,7 +385,7 @@ fn main() -> ExitCode {
         } => {
             let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
             println!(
-                "{:>5} {:>9} {:>8} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>9}   Geld in Tsd.: {:>7} {:>7} {:>7} {:>7} {:>7}",
+                "{:>5} {:>9} {:>8} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>9}   Geld in Tsd.: {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
                 "Jahr",
                 "Bev. Mio",
                 "Kapital",
@@ -367,7 +401,8 @@ fn main() -> ExitCode {
                 "Firmen",
                 "Kontore",
                 "Häuser",
-                "Staat"
+                "Staat",
+                "Dienst"
             );
             for year in 0..=years {
                 if year > 0 {
@@ -375,7 +410,7 @@ fn main() -> ExitCode {
                 }
                 let stats = sim::harness::economy_stats(sim.world());
                 println!(
-                    "{:>5} {:>9.0} {:>8.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>7.2} {:>6.2} {:>6.2} {:>4}/{:<4}                 {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0}",
+                    "{:>5} {:>9.0} {:>8.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>7.2} {:>6.2} {:>6.2} {:>4}/{:<4}                 {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.1}",
                     year,
                     stats.population,
                     stats.capital,
@@ -392,7 +427,8 @@ fn main() -> ExitCode {
                     stats.firm_money / 1000.0,
                     stats.market_money / 1000.0,
                     stats.house_money / 1000.0,
-                    stats.treasuries / 1000.0
+                    stats.treasuries / 1000.0,
+                    stats.staff_money / 1000.0
                 );
                 println!(
                     "      Zusammenhalt {:>5.1}  unruhig {:>2}  autonom {:>2}  Abspaltungen {:>2}  Gemeinschaften {:>2}  Kolonien: lokal {:>4.2} Zentrum {:>4.2}  Eliten {:>6.0} Tsd.  Schulden {:>6.0} Tsd.",
@@ -674,5 +710,25 @@ fn print_summary(summary: &RunSummary) {
             polity.cohesion,
             100.0 * polity.arrears
         );
+        if polity.budget_months > 0 {
+            // Der Haushalt der letzten zwölf Monate: je Anspruch, was er von den laufenden
+            // Einnahmen bekam.
+            let budget = &polity.budget;
+            let share = |claim: Claim| {
+                100.0 * budget.line(claim).paid as f64 / budget.revenue.max(1) as f64
+            };
+            println!(
+                "  {:<24} Haushalt: Einnahmen {:>6.0} je Monat; Schulden {:.0} %, Grundleistungen {:.0} %, Flotte {:.0} %, Beschaffung {:.0} %, Kontore {:.0} %, Forschung {:.0} %, Ausschüttung {:.0} %",
+                "",
+                to_credits(budget.revenue) / polity.budget_months as f64,
+                share(Claim::DebtService),
+                share(Claim::Civil),
+                share(Claim::Fleet),
+                share(Claim::Procurement),
+                share(Claim::Markets),
+                share(Claim::Research),
+                share(Claim::Handout)
+            );
+        }
     }
 }

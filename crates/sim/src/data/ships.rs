@@ -404,7 +404,10 @@ pub struct TechDef {
 #[derive(Clone, Debug, Deserialize)]
 pub struct MilitaryBalance {
     pub starting_fleet: Vec<(String, u32)>,
+    /// Sold der Besatzungen je Monat als Anteil am Bauwert der Schiffe.
     pub upkeep_per_month: f64,
+    /// Ersatzteile für die Wartung je Monat, als Anteil der Bauteile jedes Schiffs.
+    pub maintenance_per_month: f64,
     /// Anteil der Lücke zwischen ausgebliebenem Sold und Rückstand, der je Monat
     /// geschlossen wird (Glättung des Soldrückstands).
     pub arrears_smoothing: f32,
