@@ -861,9 +861,25 @@ impl Sieges {
     }
 }
 
-/// Zustand bei Spielbeginn: jede Welt ohne Verteidigung, keine Belagerung.
-pub fn setup_sieges(_data: &GameData, galaxy: &Galaxy, _polities: &Polities) -> Sieges {
-    Sieges::new(galaxy.planets.len())
+/// Zustand bei Spielbeginn: Jede Heimatwelt hat die stehende Verteidigung aus
+/// `siege.home_start`, alle anderen Welten keine. Keine Belagerung.
+pub fn setup_sieges(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> Sieges {
+    let start = &data.balance.siege.home_start;
+    let mut sieges = Sieges::new(galaxy.planets.len());
+    for capital in polities.list.iter().filter_map(|polity| polity.capital) {
+        let defense = sieges.defense_mut(capital);
+        defense.guns = start.guns as f32;
+        defense.regulars = start.regulars;
+        defense.depot = start.depot_days as f64;
+        // Der Plan nennt, was steht: So wird später weder abgebaut noch nachgerüstet.
+        defense.plan = DefensePlan {
+            guns: start.guns,
+            regulars: start.regulars as f32,
+            depot_days: start.depot_days,
+            ..Default::default()
+        };
+    }
+    sieges
 }
 
 /// Invarianten der Belagerung: Stärken und Vorräte endlich und nicht negativ, Listen so
@@ -915,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_game_starts_without_defences_or_sieges() {
+    fn a_new_game_starts_with_defended_home_worlds_and_without_sieges() {
         let data = data();
         let state = SimState::generate(
             &data,
@@ -925,14 +941,39 @@ mod tests {
             },
         );
         assert_eq!(state.sieges.defenses.len(), state.galaxy.planets.len());
-        assert!(
-            state
-                .sieges
-                .defenses
-                .iter()
-                .all(|defense| *defense == PlanetDefense::default())
-        );
+        // Jede Heimatwelt beginnt mit den Startwerten aus den Spieldaten: Geschütze,
+        // reguläre Verbände und Vorräte, und ihr Plan nennt genau das.
+        let start = &data.balance.siege.home_start;
+        assert!(start.regulars > 0.0 && start.depot_days > 0);
+        let capitals: Vec<PlanetId> = state
+            .polities
+            .list
+            .iter()
+            .map(|polity| polity.capital.unwrap())
+            .collect();
+        assert_eq!(capitals.len(), data.galaxy.polities as usize);
+        for (index, defense) in state.sieges.defenses.iter().enumerate() {
+            if !capitals.contains(&PlanetId::from_index(index)) {
+                assert_eq!(*defense, PlanetDefense::default(), "Planet {index}");
+                continue;
+            }
+            assert_eq!(defense.guns, start.guns as f32);
+            assert_eq!(defense.regulars, start.regulars);
+            assert_eq!(defense.depot, start.depot_days as f64);
+            assert_eq!(defense.plan.guns, start.guns);
+            assert_eq!(defense.plan.regulars as f64, start.regulars);
+            assert_eq!(defense.plan.depot_days, start.depot_days);
+            let rest = PlanetDefense {
+                guns: 0.0,
+                regulars: 0.0,
+                depot: 0.0,
+                plan: DefensePlan::default(),
+                ..defense.clone()
+            };
+            assert_eq!(rest, PlanetDefense::default());
+        }
         assert!(state.sieges.active.is_empty() && state.sieges.pending.is_empty());
+        assert!(state.sieges.assign.is_empty() && state.sieges.embarked.is_empty());
         assert_eq!(state.sieges.find_anomaly(state.galaxy.planets.len()), None);
         // Die neuen Größen in Wirtschaft und Finanzen beginnen ohne Wirkung.
         assert!(
