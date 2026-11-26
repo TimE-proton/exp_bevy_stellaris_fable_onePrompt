@@ -417,7 +417,6 @@ impl<'a> Orbit<'a> {
 /// Invarianten zwischen Belagerung und Flotten: Zuordnungen zeigen auf bestehende
 /// Flotten, und eingeschiffte Truppen haben Platz an Bord ihrer Flotte.
 pub(super) fn check(world: &World) -> Result<(), String> {
-    let data = world.resource::<GameData>();
     let fleets = world.resource::<Fleets>();
     let sieges = world.resource::<Sieges>();
     for fleet in sieges.assign.keys() {
@@ -430,6 +429,10 @@ pub(super) fn check(world: &World) -> Result<(), String> {
             return Err(format!(
                 "Truppen an Bord der Flotte {id}, die nicht mehr besteht"
             ));
+        };
+        // Plätze nennt erst der Entwurf; ohne Spieldaten in der Welt bleibt es beim Bestand.
+        let Some(data) = world.get_resource::<GameData>() else {
+            continue;
         };
         let room = berths_of(data, fleet);
         if force.troops > room + 1e-9 {
