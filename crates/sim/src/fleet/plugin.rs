@@ -12,6 +12,7 @@ use crate::galaxy::Galaxy;
 use crate::logistics::Logistics;
 use crate::polity::Polities;
 use crate::state::SimConfig;
+use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -26,7 +27,8 @@ impl Plugin for FleetPlugin {
             sim_schedule(),
             (
                 // Erst der Marsch, dann der Sold (er geht dem Einkauf vor), dann Nachschub,
-                // Instandsetzung und Werften aus derselben Staatskasse.
+                // Instandsetzung und Werften aus derselben Staatskasse. Die Forschung folgt
+                // erst danach (`SimSet::Research`) und bekommt, was über der Rücklage bleibt.
                 (
                     movement.run_if(day_start),
                     upkeep.run_if(month_start),
@@ -41,8 +43,13 @@ impl Plugin for FleetPlugin {
     }
 }
 
-fn movement(data: Res<GameData>, galaxy: Res<Galaxy>, mut fleets: ResMut<Fleets>) {
-    move_fleets(&galaxy, &mut fleets, &data);
+fn movement(
+    data: Res<GameData>,
+    galaxy: Res<Galaxy>,
+    research: Res<Research>,
+    mut fleets: ResMut<Fleets>,
+) {
+    move_fleets(&galaxy, &mut fleets, &research, &data);
 }
 
 fn upkeep(
@@ -104,6 +111,7 @@ fn combat(
     mut fleets: ResMut<Fleets>,
     mut battles: ResMut<Battles>,
     mut finance: ResMut<Finance>,
+    mut research: ResMut<Research>,
     mut chronicle: ResMut<Chronicle>,
 ) {
     let day_start = clock.is_day_start();
@@ -120,6 +128,7 @@ fn combat(
             &mut battles,
             &diplomacy,
             &finance,
+            &research,
             &mut chronicle,
             &data,
             config.seed,
@@ -132,6 +141,7 @@ fn combat(
         &mut battles,
         &diplomacy,
         &mut finance,
+        &mut research,
         &logistics,
         &polities,
         &mut chronicle,

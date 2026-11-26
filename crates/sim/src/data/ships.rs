@@ -432,8 +432,6 @@ pub struct MilitaryBalance {
     pub morale_per_arrears: f32,
     /// Tage, die eine Flotte nach dem Abzug aus einem Gefecht braucht, um sich zu sammeln.
     pub regroup_days: u64,
-    /// Gefechtspause in einem System nach einem Gefecht ohne Entscheidung, in Tagen.
-    pub battle_pause_days: u64,
     /// Zuwachs der Kriegsmüdigkeit (0..100), wenn eine Gemeinschaft in einem Gefecht den
     /// Bauwert ihrer gesamten Flotte verlöre; kleinere Verluste zählen anteilig.
     pub weariness_per_navy_lost: f64,
@@ -699,6 +697,9 @@ pub struct ResearchBalance {
     /// Anteil, um den Einblick aus Ereignissen je Monat auf das Niveau der Verflechtung
     /// zurückfällt.
     pub intel_decay: f32,
+    /// Einblick (0..1), den ein Gefecht jeder der beiden Seiten in die Forschung der
+    /// anderen verschafft.
+    pub intel_per_battle: f32,
     /// Größte Unschärfe einer Schätzung in Stufen nach oben und nach unten.
     pub estimate_spread: u8,
     /// Wahrscheinlichkeit je Monat, dass ein Betrachter eine weitere Stufe bestätigt, die

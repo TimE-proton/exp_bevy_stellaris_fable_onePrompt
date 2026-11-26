@@ -256,16 +256,16 @@
         // Wer das Feld nicht hält, weicht in ein Nachbarsystem aus und sammelt sich so
         // viele Tage, der Marsch dorthin eingerechnet. Solange beginnt die Flotte kein
         // Gefecht, tritt keinem bei und zählt nicht für Blockade, Kaperfahrt und Geleit.
+        // Dasselbe gilt nach einem Gefecht ohne Entscheidung (Patt oder Zeitgrenze) für
+        // alle, die nicht im eigenen System stehen: Dort bleibt nur, wer zu Hause ist.
         regroup_days: 30,
-        // Endet ein Gefecht an der Zeitgrenze ohne Entscheidung, ruhen die Waffen in
-        // diesem System so viele Tage.
-        battle_pause_days: 20,
         // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
         // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
         weariness_per_navy_lost: 20.0,
         // Schwere Niederlage: Wer das Feld nicht hält und dabei mindestens diesen Anteil
         // am Bauwert seiner gesamten Flotte verliert, dessen Kurse fallen um den Faktor
-        // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock).
+        // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock). Ein Gefecht
+        // ohne Entscheidung ist keine Niederlage.
         heavy_defeat_share: 0.25,
         defeat_shock: 0.9,
         // Trümmerfelder verblassen je Monat um diesen Anteil (rund die Hälfte in drei Jahren).
@@ -489,6 +489,10 @@
         // Was Ereignisse (etwa beobachtete Gefechte) darüber hinaus einbringen, verliert je
         // Monat diesen Anteil.
         intel_decay: 0.02,
+        // Ein Gefecht zeigt beiden Seiten die Technik der anderen am Werk: Jede gewinnt
+        // so viel Einblick in die Forschung des Gegners. Bei 0,3 engt ein Gefecht die
+        // Schätzung um eine Stufe ein, drei machen sie fast genau.
+        intel_per_battle: 0.3,
         // Schätzungen fremder Stufen sind höchstens 2 * estimate_spread Stufen weit; bei
         // vollem Einblick sind sie genau. Die untere Grenze einer Schätzung ist bestätigt
         // und fällt nie.

@@ -8,7 +8,7 @@
 use crate::battle::{Doctrine, Formation};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
-use crate::data::GameData;
+use crate::data::{GameData, ShipClass};
 use crate::diplomacy::{self, Diplomacy};
 use crate::economy::{Economy, to_credits, to_money};
 use crate::finance::shares::ExpropriationScope;
@@ -94,7 +94,8 @@ pub enum SimCommand {
         amount: f64,
     },
     /// Bei der Werft einer eigenen Welt ein Schiff in Auftrag geben (`design` ist der
-    /// Index in `GameData::designs`).
+    /// Index in `GameData::designs`). Der Entwurf muss baubar sein: Die Gemeinschaft kennt
+    /// alle Technologien, die er voraussetzt.
     BuildShip {
         planet: PlanetId,
         design: u16,
@@ -124,6 +125,13 @@ pub enum SimCommand {
     /// Feld, und was entkommt, weicht in ein Nachbarsystem aus.
     Retreat {
         fleet: FleetId,
+    },
+    /// Bei der Werft einer eigenen Welt ein Schiff einer Klasse in Auftrag geben. Den
+    /// Entwurf wählt die Werft: den wertvollsten der Klasse, den die Gemeinschaft mit
+    /// ihrem Wissen bauen kann (`GameData::best_design`).
+    BuildClass {
+        planet: PlanetId,
+        class: ShipClass,
     },
 }
 
@@ -435,9 +443,6 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             Ok(())
         }
         SimCommand::BuildShip { planet, design } => {
-            // Bis die Forschung angeschlossen ist, gilt keine Technologie als bekannt:
-            // Baubar sind die Entwürfe ohne Voraussetzung.
-            let known: [bool; 0] = [];
             let day = ctx.clock.day();
             fleet::order_ship(
                 &ctx.data,
@@ -448,7 +453,30 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
                 polity,
                 *planet,
                 *design,
-                &known,
+                ctx.research.known(polity),
+                day,
+            )
+            .map(|_| ())
+        }
+        SimCommand::BuildClass { planet, class } => {
+            let day = ctx.clock.day();
+            let known = ctx.research.known(polity);
+            let design = ctx.data.best_design(*class, known).ok_or_else(|| {
+                format!(
+                    "für die Klasse {} beherrscht die Gemeinschaft keinen Entwurf",
+                    class.label()
+                )
+            })?;
+            fleet::order_ship(
+                &ctx.data,
+                &ctx.galaxy,
+                &ctx.economy,
+                &ctx.polities,
+                &mut ctx.fleets,
+                polity,
+                *planet,
+                design,
+                known,
                 day,
             )
             .map(|_| ())

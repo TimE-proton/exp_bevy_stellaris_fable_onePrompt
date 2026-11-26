@@ -166,7 +166,9 @@ pub fn new_game(world: &mut World, config: SimConfig) {
 
 /// Format 2: Flotten bestehen aus Schiffen und führen Bauaufträge.
 /// Format 3: Gefechte laufen im taktischen Rechner und gehören zum Spielstand.
-pub const SAVE_FORMAT: u32 = 3;
+/// Format 4: Forschung gehört zum Spielstand; Gefechte kennen das Patt und keine
+/// Gefechtspause mehr.
+pub const SAVE_FORMAT: u32 = 4;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]

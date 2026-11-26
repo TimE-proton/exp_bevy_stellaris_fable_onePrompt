@@ -9,6 +9,19 @@
 //! Treffen Flotten verfeindeter Gemeinschaften in einem System aufeinander, rechnet der
 //! taktische Rechner aus [`crate::battle`] das Gefecht Takt für Takt; `battles` stellt es
 //! auf und schreibt das Ergebnis in die Flotten zurück.
+//!
+//! Die Forschung einer Gemeinschaft greift an vier Stellen ein: Fahrt auf der Karte
+//! ([`map_speed`]), Aufschläge im Gefecht ([`combat_modifiers`]), baubare Entwürfe
+//! ([`design_buildable`], [`GameData::best_design`]) und Einblick in die Technik des
+//! Gegners nach einem Gefecht.
+//!
+//! Die Staatskasse bedient ihre Ansprüche in fester Reihenfolge, so wie die Systeme eines
+//! Takts aufeinander folgen ([`crate::SimSet`]): am Monatsersten zuerst der Monatsabschluss
+//! der Finanzen (Einnahmen, Auskehr des halben Überschusses über der Rücklage an die
+//! Haushalte, Schuldendienst), dann der Sold der Flotte, dann täglich Nachschub,
+//! Instandsetzung und Werften, zuletzt die Forschung. Sold und Einkäufe der Flotte
+//! greifen notfalls die Rücklage an; die Forschung bekommt nur, was danach noch über der
+//! Rücklage liegt.
 
 mod battles;
 mod movement;
@@ -17,8 +30,8 @@ mod supply;
 mod yard;
 
 pub use battles::{
-    BattlePause, BattleReport, Battles, Debris, SideReport, advance_battles, combat_modifiers,
-    crew_morale, open_battles, order_retreat, relay_orders, retreat_target,
+    BattleOutcome, BattleReport, Battles, Debris, SideReport, advance_battles, combat_modifiers,
+    combatant_setup, crew_morale, open_battles, order_retreat, relay_orders, retreat_target,
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
@@ -33,6 +46,7 @@ use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
 use crate::ids::{BattleId, FleetId, PlanetId, PolityId, ShipId, SystemId};
 use crate::polity::Polities;
+use crate::tech::Research;
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
@@ -178,6 +192,12 @@ pub fn material_value(data: &GameData, ship: &Ship) -> f64 {
     body + craft * fighters as f64
 }
 
+/// Fahrt der Flotten einer Gemeinschaft auf der Karte in Streckeneinheiten je Tag: der
+/// Grundwert `fleets.speed`, mal dem Aufschlag ihrer Antriebstechnik.
+pub fn map_speed(data: &GameData, research: &Research, owner: PolityId) -> f32 {
+    data.balance.fleets.speed * research.effects(owner).fleet_speed as f32
+}
+
 /// Stärke einer Flotte: Kampfwert ihrer Schiffe, geeicht an der Startflotte
 /// (`fleets.start_strength`).
 pub fn fleet_strength(data: &GameData, fleet: &Fleet) -> f32 {
@@ -261,13 +281,14 @@ impl Fleet {
         self.ships.iter().map(|ship| ship.fuel).fold(1.0, f32::min)
     }
 
-    /// Strecke, die die Flotte heute auf dem Marsch zurücklegen kann: volle Fahrt, solange
-    /// der knappste Tank reicht, danach nur noch die gedrosselte.
-    pub fn day_range(&self, data: &GameData) -> f32 {
+    /// Strecke, die die Flotte heute auf dem Marsch zurücklegen kann: volle Fahrt (mit
+    /// der Antriebstechnik ihrer Gemeinschaft), solange der knappste Tank reicht, danach
+    /// nur noch die gedrosselte.
+    pub fn day_range(&self, data: &GameData, research: &Research) -> f32 {
         let balance = &data.balance.military;
         day_travel(
             self.min_fuel(),
-            data.balance.fleets.speed,
+            map_speed(data, research, self.owner),
             balance.fuel_per_distance,
             balance.dry_speed,
             f32::INFINITY,
@@ -846,7 +867,8 @@ mod tests {
         let (data, _, _, mut fleets) = setup();
         let speed = data.balance.fleets.speed;
         assert_eq!(fleets.list[0].supply(&data), (1.0, 1.0));
-        assert_eq!(fleets.list[0].day_range(&data), speed);
+        let research = Research::default();
+        assert_eq!(fleets.list[0].day_range(&data, &research), speed);
         // Gewichtet mit dem Fassungsvermögen: Der Kreuzer fasst weit mehr als eine Korvette.
         let total: f32 = fleets.list[0]
             .ships
@@ -867,7 +889,7 @@ mod tests {
         fleets.list[0].ships[2].fuel = 0.0;
         assert_eq!(fleets.list[0].min_fuel(), 0.0);
         let crawl = speed * data.balance.military.dry_speed;
-        assert!((fleets.list[0].day_range(&data) - crawl).abs() < 1e-4);
+        assert!((fleets.list[0].day_range(&data, &research) - crawl).abs() < 1e-4);
     }
 
     #[test]
@@ -1008,16 +1030,17 @@ mod tests {
         assert!(merge_fleets(&data, &mut fleets, me, FleetId(1), FleetId(0)).is_err());
         let elsewhere = galaxy.neighbors(fleets.list[0].system)[0].system;
         order_move(&galaxy, &mut fleets, me, second, elsewhere).unwrap();
-        move_fleets(&galaxy, &mut fleets, &data);
+        let research = Research::default();
+        move_fleets(&galaxy, &mut fleets, &research, &data);
         assert!(merge_fleets(&data, &mut fleets, me, second, FleetId(0)).is_err());
         for _ in 0..200 {
-            move_fleets(&galaxy, &mut fleets, &data);
+            move_fleets(&galaxy, &mut fleets, &research, &data);
         }
         assert_eq!(fleets.list[second.index()].system, elsewhere);
         assert!(merge_fleets(&data, &mut fleets, me, second, FleetId(0)).is_err());
         order_move(&galaxy, &mut fleets, me, FleetId(0), elsewhere).unwrap();
         for _ in 0..200 {
-            move_fleets(&galaxy, &mut fleets, &data);
+            move_fleets(&galaxy, &mut fleets, &research, &data);
         }
 
         merge_fleets(&data, &mut fleets, me, second, FleetId(0)).unwrap();

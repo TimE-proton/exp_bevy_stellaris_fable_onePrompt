@@ -11,16 +11,16 @@
 //! ausdrücklich, was sie von ihrem Szenario erwarten.
 
 use sim::GameData;
-use sim::battle::{Battle, BattleShip, Doctrine, Formation, ShipStatus};
+use sim::battle::{Battle, BattleShip, CombatModifiers, Doctrine, Formation, ShipStatus};
 use sim::chronicle::Chronicle;
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR, TICKS_PER_DAY};
 use sim::command::{CommandOutcome, SimCommand};
-use sim::data::{Sector, ShipClass};
+use sim::data::{Sector, ShipClass, TechBranch};
 use sim::economy::{Economy, Money, to_credits};
 use sim::finance::{Finance, Secession, apply_secession, polity_of_issuer};
 use sim::fleet::{
-    BattleReport, Battles, Fleet, Fleets, Ship, SideReport, Stance, fleet_strength, material_value,
-    monthly_upkeep, yard_slots,
+    BattleOutcome, BattleReport, Battles, Fleet, Fleets, Ship, SideReport, Stance,
+    combat_modifiers, fleet_strength, material_value, monthly_upkeep, yard_slots,
 };
 use sim::galaxy::Galaxy;
 use sim::harness::{Headless, check_invariants, summarize};
@@ -29,6 +29,7 @@ use sim::logistics::Logistics;
 use sim::needs_fine_ticks;
 use sim::polity::{Polities, claimable_planets};
 use sim::state::{SaveGame, SimConfig, money_drift};
+use sim::tech::Research;
 use std::sync::OnceLock;
 
 /// Die drei Güter, aus denen jedes Schiff besteht.
@@ -332,12 +333,13 @@ fn the_military_balance_is_checked_when_the_data_is_loaded() {
     assert!(
         rejected("module", "module_weight: 0.5", "module_weight: 1.5").contains("module_weight")
     );
-    // Die Stellschrauben der Gefechte: Ohne Sammelfrist oder Gefechtspause begänne jedes
-    // Gefecht am nächsten Morgen von vorn.
+    // Die Stellschrauben der Gefechte: Ohne Sammelfrist begänne jedes Gefecht am nächsten
+    // Morgen von vorn.
     assert!(rejected("sammeln", "regroup_days: 30", "regroup_days: 0").contains("regroup_days"));
+    // Was ein Gefecht über die Technik des Gegners verrät, ist ein Anteil.
     assert!(
-        rejected("pause", "battle_pause_days: 20", "battle_pause_days: 0")
-            .contains("battle_pause_days")
+        rejected("einblick", "intel_per_battle: 0.3", "intel_per_battle: 1.5")
+            .contains("intel_per_battle")
     );
     assert!(rejected("schock", "defeat_shock: 0.9", "defeat_shock: 1.5").contains("defeat_shock"));
     assert!(
@@ -1141,12 +1143,17 @@ fn an_unaffordable_fleet_empties_the_treasury_and_leaves_arrears() {
     sim.run_days(1);
     control.run_days(1);
 
-    // Der Staat zahlt, was er hat, und keinen Credit mehr.
+    // Der Staat zahlt, was er hat, und keinen Credit mehr. Der Sold geht der Forschung
+    // vor: In der Gegenprobe bekommen die Forschenden nach dem Sold ihr Gehalt, hier bleibt
+    // für sie nichts übrig.
     assert_eq!(treasury(&sim, me), 0);
-    let available = treasury(&control, me) + usual;
+    let researched = control.research().get(me).unwrap().spent_last_month;
+    assert!(researched > 0, "in der Gegenprobe wird geforscht");
+    assert_eq!(sim.research().get(me).unwrap().spent_last_month, 0);
+    let available = treasury(&control, me) + usual + researched;
     assert_eq!(
         households(&sim, me) - households(&control, me),
-        available - usual,
+        available - usual - researched,
         "die ganze Kasse ging an die Haushalte"
     );
     // Der ausgebliebene Anteil steht geglättet als Rückstand in den Büchern …
@@ -1768,14 +1775,20 @@ fn free_neighbors(sim: &Headless) -> (SystemId, SystemId) {
     panic!("keine zwei freien Nachbarsysteme");
 }
 
-/// Überlebt ein Schiff das Gefecht? Verloren ist, was zerstört wurde oder am Ende treibt,
-/// ohne dass seine Partei das Feld hält.
-fn survived(ship: &BattleShip, held_field: bool) -> bool {
-    match ship.status {
-        ShipStatus::Destroyed => false,
-        ShipStatus::Disabled => held_field,
-        _ => true,
-    }
+/// Hat ein Schiff das Gefecht überstanden? Nach dem letzten Schritt des Rechners ist alles
+/// zerstört, was verloren ging, auch treibende Schiffe, die dem Gegner überlassen blieben.
+fn survived(ship: &BattleShip) -> bool {
+    ship.status != ShipStatus::Destroyed
+}
+
+/// Steht am Ende noch ein Schiff der Flotte auf dem Feld: kämpfend oder treibend? Wer
+/// entkommen ist, steht dort nicht mehr; Bordjäger zählen nicht.
+fn stands_on_the_field(battle: &Battle, side: usize) -> bool {
+    battle.ships.iter().any(|ship| {
+        ship.side as usize == side
+            && ship.source.is_some()
+            && matches!(ship.status, ShipStatus::Active | ShipStatus::Disabled)
+    })
 }
 
 #[test]
@@ -1825,10 +1838,10 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         assert_eq!(battles(&sim).next_id, 1);
         assert_eq!(battle.combatants.len(), 2);
         assert!(battle.is_hostile(0, 1));
-        // Welche Flotte die erste Partei ist, lost das Gefecht aus.
-        for fleet in &before {
+        // Die Parteien stehen in der Nummernfolge der Flotten.
+        for (place, fleet) in before.iter().enumerate() {
             let (found, side) = battles(&sim).of_fleet(fleet.id).unwrap();
-            assert_eq!(found.id, BattleId(0));
+            assert_eq!((found.id, side), (BattleId(0), place));
             let combatant = &battle.combatants[side];
             assert_eq!(
                 (combatant.fleet, combatant.owner),
@@ -1840,6 +1853,11 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
             );
             // Noch ist niemand kriegsmüde und der Sold bezahlt: die volle Ausgangsmoral.
             assert_eq!(combatant.morale, data.balance.battle.morale_start);
+            // Die Schiffe kämpfen mit der Technik ihrer Gemeinschaft.
+            assert_eq!(
+                combatant.modifiers,
+                combat_modifiers(sim.research(), fleet.owner)
+            );
             assert!(fleet.in_battle && fleet.battle == Some(BattleId(0)));
             // Jedes Schiff steht mit seiner Nummer im Gefecht.
             let sources: Vec<ShipId> = battle
@@ -1861,10 +1879,6 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
                 &before[1].name
             ]
         ));
-        assert_ne!(
-            battles(&sim).of_fleet(ours).unwrap().1,
-            battles(&sim).of_fleet(theirs).unwrap().1
-        );
         assert!(needs_fine_ticks(sim.world()));
     }
 
@@ -1899,7 +1913,7 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         (report.id, report.system, report.started, report.ended),
         (BattleId(0), target, began, ended)
     );
-    assert!(!report.timed_out);
+    assert_eq!(report.outcome, BattleOutcome::Decided);
     assert_eq!(report.days(), (ended - began).div_ceil(TICKS_PER_DAY));
     assert_eq!(report.sides.len(), 2);
 
@@ -1911,7 +1925,7 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
             .iter()
             .position(|combatant| combatant.fleet == Some(old.id))
             .unwrap();
-        let held = shadow.is_fighting(side);
+        let held = stands_on_the_field(&shadow, side);
         let after = fleet(&sim, old.id);
         let place_of = |ship: ShipId| {
             shadow
@@ -1924,7 +1938,7 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         let survivors: Vec<ShipId> = old
             .ships
             .iter()
-            .filter(|ship| survived(&shadow.ships[place_of(ship.id)], held))
+            .filter(|ship| survived(&shadow.ships[place_of(ship.id)]))
             .map(|ship| ship.id)
             .collect();
         let remaining: Vec<ShipId> = after.ships.iter().map(|ship| ship.id).collect();
@@ -1933,6 +1947,22 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         // Eine Flotte ohne Schiffe besteht nicht mehr.
         assert_eq!(after.alive, !survivors.is_empty());
         assert!(!after.in_battle && after.battle.is_none());
+        // Im Hangar steht, was nie gestartet war, dazu jeder Jäger der Flotte, der
+        // überlebt hat: Der Rechner hat sie auf die Träger verteilt.
+        let aloft = shadow
+            .ships
+            .iter()
+            .filter(|craft| {
+                craft.side as usize == side && craft.source.is_none() && survived(craft)
+            })
+            .count() as u32;
+        let hangars: u32 = after
+            .ships
+            .iter()
+            .map(|ship| shadow.ships[place_of(ship.id)].hangar)
+            .sum();
+        let on_board: u32 = after.ships.iter().map(|ship| ship.fighters).sum();
+        assert_eq!(on_board, hangars + aloft);
         for ship in &after.ships {
             let place = place_of(ship.id);
             let fought = &shadow.ships[place];
@@ -1953,14 +1983,8 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
             } else {
                 assert_eq!(ship.modules, modules);
             }
-            // Im Hangar steht, was nie gestartet war, dazu jeder Jäger, der überlebt hat;
-            // mehr als der Hangar fasst, kommt nicht an Bord.
-            let returned = shadow
-                .ships
-                .iter()
-                .filter(|craft| craft.carrier == Some(place as u32) && survived(craft, held))
-                .count() as u32;
-            assert_eq!(ship.fighters, fought.hangar + returned);
+            // Mehr als der Hangar fasst, kommt nicht an Bord.
+            assert!(ship.fighters >= fought.hangar);
             assert!(ship.fighters <= design.stats.fighters);
         }
 
@@ -1997,23 +2021,27 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         &["Gefecht bei", &place_name, "entschieden"]
     ));
 
-    // Dieses Szenario: Eine Flotte geht ganz verloren, die andere hält das Feld und trägt,
-    // was das Gefecht ihr zugefügt und abverlangt hat.
+    // Dieses Szenario: Eine Flotte hält das Feld und trägt, was das Gefecht ihr zugefügt
+    // und abverlangt hat; die andere räumt es mit dem, was ihr blieb, und sammelt sich.
     let (lost, won) = if side_of(&report, ours).held_field {
         (1, 0)
     } else {
         (0, 1)
     };
     let (loser, winner) = (fleet(&sim, before[lost].id), fleet(&sim, before[won].id));
-    assert!(
-        !loser.alive && winner.alive,
-        "Szenario neu wählen: Die unterlegene Flotte sollte alle Schiffe verlieren"
-    );
     assert!(!side_of(&report, loser.id).held_field && side_of(&report, winner.id).held_field);
+    assert!(
+        loser.alive && winner.alive,
+        "Szenario neu wählen: Die unterlegene Flotte sollte mit Schiffen entkommen"
+    );
+    assert!(side_of(&report, loser.id).retreated);
+    assert!(loser.ships.len() < before[lost].ships.len());
+    assert!(loser.is_regrouping() && loser.route.len() == 1);
+    assert!(winner.is_ready() && winner.system == target && winner.route.is_empty());
     assert!(chronicled(
         &sim,
         target,
-        &[&before[lost].name, "besteht nicht mehr"]
+        &[&before[lost].name, "weicht nach"]
     ));
     assert!(winner.ships.iter().any(|ship| ship.hull < 1.0));
     assert!(winner.ships.iter().any(|ship| !ship.modules.is_empty()));
@@ -2030,14 +2058,15 @@ fn fleets_at_war_fight_it_out_and_the_result_is_written_back() {
         carrier.fighters < data.designs[carrier.design as usize].stats.fighters,
         "verlorene Jäger kehren nicht zurück"
     );
-    // Wer seine ganze Flotte verliert, ist den Krieg leid; auch der Sieger hat verloren.
+    // Verluste machen kriegsmüde, den Sieger wie den Geschlagenen.
     let (beaten, victor) = (before[lost].owner, before[won].owner);
-    assert!(weariness(&sim, beaten) >= data.balance.military.weariness_per_navy_lost - 1e-9);
-    assert!(weariness(&sim, victor) > 0.0 && weariness(&sim, victor) < weariness(&sim, beaten));
+    assert!(side_of(&report, loser.id).lost_value > 0.0);
+    assert!(side_of(&report, winner.id).lost_value > 0.0);
+    assert!(weariness(&sim, beaten) > 0.0 && weariness(&sim, victor) > 0.0);
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
 
-    // Am nächsten Morgen beginnt nichts von vorn: Es ist niemand mehr da.
+    // Am nächsten Morgen beginnt nichts von vorn: Die Geschlagene sammelt sich und zieht ab.
     sim.run_days(2);
     assert_eq!(battles(&sim).next_id, 1);
     assert!(battles(&sim).active.is_empty());
@@ -2048,11 +2077,21 @@ fn the_inferior_fleet_falls_back_where_it_came_from_and_regroups() {
     let data = data();
     let (a, b) = (PolityId(0), PolityId(1));
     let mut sim = with_player(40);
-    // Abseits der Heimatwelten: drei Schlachtschiffe halten ein System, ein einzelnes
-    // marschiert aus dem Nachbarsystem heran.
+    // Abseits der Heimatwelten: Eine dreifach überlegene Flotte hält ein System, eine
+    // einfache marschiert aus dem Nachbarsystem heran.
     let (field, rear) = free_neighbors(&sim);
-    let strong = raise_fleet(&mut sim, b, field, &[("bastion", 3)]);
-    let weak = raise_fleet(&mut sim, a, rear, &[("bastion", 1)]);
+    let strong = raise_fleet(
+        &mut sim,
+        b,
+        field,
+        &[("speer", 3), ("waechter", 6), ("dolch", 9)],
+    );
+    let weak = raise_fleet(
+        &mut sim,
+        a,
+        rear,
+        &[("speer", 1), ("waechter", 2), ("dolch", 3)],
+    );
     sim.issue(a, SimCommand::DeclareWar { target: b });
     sim.issue(
         a,
@@ -2149,7 +2188,8 @@ struct Clash {
 }
 
 /// Zwei gleich starke Flotten kämpfen im Heimatsystem der Verteidiger. Mit `reinforce`
-/// bricht am zehnten Gefechtstag eine zweite Flotte der Angreifer aus dem Nachbarsystem auf.
+/// bricht eine zweite Flotte der Angreifer aus dem Nachbarsystem auf, sobald im Gefecht das
+/// erste Schiff verloren ist: Sie trifft also mitten im Kampf ein.
 fn clash(seed: u64, reinforce: bool) -> Clash {
     let (a, b) = (PolityId(0), PolityId(1));
     let mut sim = with_player(seed);
@@ -2163,11 +2203,19 @@ fn clash(seed: u64, reinforce: bool) -> Clash {
         &[("speer", 1), ("waechter", 2), ("dolch", 3)],
     );
     sim.issue(a, SimCommand::DeclareWar { target: b });
-    sim.run_days(10);
-    assert!(
-        battles(&sim).in_system(target).is_some(),
-        "Seed {seed}: nach zehn Tagen wird noch gekämpft"
-    );
+    for day in 0.. {
+        sim.run_days(1);
+        let battle = battles(&sim)
+            .in_system(target)
+            .unwrap_or_else(|| panic!("Seed {seed}: das Gefecht endete vor dem ersten Verlust"));
+        if battle.combatants.iter().any(|side| side.lost_value > 0.0) {
+            break;
+        }
+        assert!(
+            day < longest_battle_days(data()),
+            "Seed {seed}: kein Verlust"
+        );
+    }
     if reinforce {
         sim.issue(
             a,
@@ -2241,28 +2289,24 @@ fn reinforcements_join_a_running_battle_and_help_their_side() {
     // Bilanz der Verluste aus Sicht der Angreifer: was der Gegner verlor, minus was sie
     // selbst verloren, über alle Seeds.
     let (mut balance_alone, mut balance_helped) = (0.0, 0.0);
-    let mut joined_mid_fight = 0;
     for seed in seeds {
         let alone = clash(seed, false);
         let helped = clash(seed, true);
         assert_eq!((alone.sides, alone.joined), (2, None));
         assert_eq!(helped.sides, 3, "Seed {seed}: die Verstärkung nahm teil");
         let (time, lost_before) = helped.joined.expect("die Verstärkung traf im Gefecht ein");
-        // Aufgebrochen am zehnten Gefechtstag: Bei der Ankunft läuft das Gefecht seit
-        // mindestens zwanzig Sekunden Gefechtszeit.
+        // Aufgebrochen nach dem ersten Verlust: Bei der Ankunft wird seit mindestens
+        // zwanzig Sekunden Gefechtszeit gekämpft, und es sind schon Schiffe verloren.
         assert!(time >= 20.0, "Seed {seed}: eingetroffen nach {time} s");
-        if lost_before > 0.0 {
-            joined_mid_fight += 1;
-        }
+        assert!(
+            lost_before > 0.0,
+            "Seed {seed}: eingetroffen vor dem ersten Verlust"
+        );
         held_alone += alone.held as usize;
         held_helped += helped.held as usize;
         balance_alone += alone.lost_enemy - alone.lost_own;
         balance_helped += helped.lost_enemy - helped.lost_own;
     }
-    assert!(
-        joined_mid_fight * 2 >= count,
-        "nur {joined_mid_fight} von {count} Verstärkungen trafen ein, als schon Schiffe verloren waren"
-    );
     // Mit Verstärkung halten die Angreifer das Feld mindestens so oft wie ohne und in der
     // Mehrzahl der Fälle, und die Verluste verschieben sich deutlich zu ihren Gunsten: um
     // mehr als den halben Bauwert einer Startflotte.
@@ -2790,7 +2834,8 @@ fn peace_ends_a_running_battle() {
     sim.run_days(2);
     assert!(battles(&sim).active.is_empty());
     let report = battles(&sim).reports.last().unwrap().clone();
-    assert!(!report.timed_out && report.days() <= 6);
+    assert_eq!(report.outcome, BattleOutcome::CalledOff);
+    assert!(report.days() <= 6);
     for old in &before {
         let side = side_of(&report, old.id);
         assert!(side.held_field && !side.retreated);
@@ -2804,7 +2849,6 @@ fn peace_ends_a_running_battle() {
         target,
         &["eingestellt", "kein Krieg mehr"]
     ));
-    assert!(battles(&sim).paused_until(target).is_none());
     assert_eq!(battles(&sim).debris_in(target), 0.0);
     // Ohne Verluste keine zusätzliche Kriegsmüdigkeit, und im Frieden beginnt nichts Neues.
     assert!(weariness(&sim, a) <= weary[0] && weariness(&sim, b) <= weary[1]);
@@ -2816,16 +2860,25 @@ fn peace_ends_a_running_battle() {
 // --- 13. Determinismus im Krieg ------------------------------------------------------------
 
 /// Ein Krieg nach Drehbuch: ein Gefecht mit Trägern im Heimatsystem des Gegners, neue
-/// Befehle mitten im Gefecht, ein Dritter, der später eingreift, Heimkehr und Frieden.
-/// `run` lässt die Zeit laufen. Gibt die Prüfsumme mitten im ersten Gefecht zurück.
+/// Befehle mitten im Gefecht, ein Dritter, der später eingreift, Heimkehr und Frieden. Die
+/// Angreiferin ist technisch voraus und lässt ihre Werft den besten Kreuzer bauen, den sie
+/// kennt. `run` lässt die Zeit laufen. Gibt die Prüfsumme mitten im ersten Gefecht zurück.
 fn scripted_war(sim: &mut Headless, run: fn(&mut Headless, u64)) -> u64 {
     let (a, b, c) = (PolityId(0), PolityId(1), PolityId(2));
-    let (_, home) = home_of(sim, a);
+    let (capital, home) = home_of(sim, a);
     let target = home_of(sim, b).1;
     for id in [FleetId(0), FleetId(1)] {
         add_ships(sim, id, &[("horst", 1)]);
     }
+    grant(sim, a, &["waffen_2", "verteidigung_2", "antrieb_2"]);
     place(sim, FleetId(0), target);
+    sim.issue(
+        a,
+        SimCommand::BuildClass {
+            planet: capital,
+            class: ShipClass::Cruiser,
+        },
+    );
     sim.issue(a, SimCommand::DeclareWar { target: b });
     sim.issue(
         a,
@@ -2907,6 +2960,31 @@ fn a_scripted_war_is_deterministic() {
         entry.command,
         SimCommand::SetFleetOrders { .. }
     ) && entry.outcome == CommandOutcome::Applied));
+    // Auch die Forschung war im Spiel: Die Werft hat den Entwurf gewählt, den erst die
+    // Technik erlaubt, und die Gegner kennen einander seit dem Gefecht besser als zuvor.
+    let (a, b) = (PolityId(0), PolityId(1));
+    let ordered = log
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.command, SimCommand::BuildClass { .. }))
+        .expect("der Bauauftrag nach Klasse");
+    assert_eq!(ordered.outcome, CommandOutcome::Applied);
+    let improved = design("speer_2");
+    assert!(
+        fleets(&first)
+            .orders
+            .iter()
+            .any(|order| order.design == improved)
+            || fleets(&first)
+                .of(a)
+                .any(|fleet| fleet.ships.iter().any(|ship| ship.design == improved))
+    );
+    assert!(research(&first).intel(a, b) > data().balance.research.intel_base);
+    assert_eq!(
+        research(&first).intel(a, b),
+        research(&exact).intel(a, b),
+        "auch der Einblick ist in beiden Läufen derselbe"
+    );
     let mut passive = with_player(27);
     passive.run_days(first.clock().day());
     assert_ne!(passive.hash(), first.hash());
@@ -2924,6 +3002,9 @@ fn a_save_in_the_middle_of_a_battle_continues_identically() {
         for id in [FleetId(0), FleetId(1)] {
             add_ships(&mut sim, id, &[("horst", 1)]);
         }
+        // Die Angreiferin kämpft mit den Aufschlägen ihrer Technik: Auch sie stehen im
+        // Spielstand.
+        grant(&mut sim, a, &TIER_TWO);
         place(&mut sim, FleetId(0), target);
         sim.issue(a, SimCommand::DeclareWar { target: b });
         sim
@@ -2960,6 +3041,14 @@ fn a_save_in_the_middle_of_a_battle_continues_identically() {
     );
     assert_eq!(battles(&resumed).active.len(), 1);
     assert!(fleet(&resumed, FleetId(0)).in_battle);
+    {
+        let (battle, side) = battles(&resumed).of_fleet(FleetId(0)).unwrap();
+        assert_eq!(
+            battle.combatants[side].modifiers,
+            combat_modifiers(research(&resumed), a)
+        );
+        assert!(battle.combatants[side].modifiers.damage > 1.0);
+    }
     resumed.run_days(200);
     assert_eq!(resumed.clock(), straight.clock());
     assert_eq!(resumed.hash(), straight.hash());
@@ -3086,11 +3175,11 @@ fn a_fleet_in_battle_or_regrouping_does_not_blockade() {
 }
 
 #[test]
-fn a_battle_without_decision_ends_at_the_time_limit_and_the_system_gets_a_pause() {
+fn a_battle_without_decision_at_the_time_limit_sends_the_intruder_away() {
     // Mit einer Zeitgrenze von zwölf Sekunden kommen die Flotten einander nicht nahe.
     let mut short = data().clone();
     short.balance.battle.time_limit = 12.0;
-    let pause = short.balance.military.battle_pause_days;
+    let regroup = short.balance.military.regroup_days;
     let (a, b) = (PolityId(0), PolityId(1));
     let (ours, theirs) = (FleetId(0), FleetId(1));
     let mut sim = Headless::new(
@@ -3101,31 +3190,36 @@ fn a_battle_without_decision_ends_at_the_time_limit_and_the_system_gets_a_pause(
         },
     );
     let target = home_of(&sim, b).1;
-    place(&mut sim, ours, target);
+    let rear = sim.galaxy().neighbors(target)[0].system;
+    // Aus dem Nachbarsystem marschiert die Flotte in das Heimatsystem des Gegners.
+    place(&mut sim, ours, rear);
     sim.issue(a, SimCommand::DeclareWar { target: b });
-    sim.run_days(1);
+    sim.issue(
+        a,
+        SimCommand::MoveFleet {
+            fleet: ours,
+            to: target,
+        },
+    );
+    sail(&mut sim, ours, target);
+    assert!(fleet(&sim, ours).in_battle && fleet(&sim, theirs).in_battle);
     let before = [fleet(&sim, ours).clone(), fleet(&sim, theirs).clone()];
-    let mut days = 1;
-    while battles(&sim).in_system(target).is_some() {
-        sim.run_days(1);
-        days += 1;
-        assert!(days < 20, "die Zeitgrenze beendet das Gefecht");
-    }
-    let report = battles(&sim).reports.last().unwrap().clone();
-    assert!(report.timed_out);
+    let weary = [weariness(&sim, a), weariness(&sim, b)];
+    let report = fight_out(&mut sim, target);
+    assert_eq!(report.outcome, BattleOutcome::TimedOut);
+    assert!(report.outcome.undecided());
     assert_eq!(
         report.days(),
         6,
         "zwölf Sekunden Gefechtszeit sind sechs Tage"
     );
-    // Niemand hat etwas verloren, niemand zieht ab: Beide liegen weiter im System.
+    // Niemand hat etwas verloren; beide standen bis zuletzt auf dem Feld.
     for old in &before {
         let side = side_of(&report, old.id);
-        assert!(side.held_field && !side.retreated);
+        assert!(side.held_field && !side.retreated && !side.stalemate);
         assert_eq!(side.lost, [0; 6]);
         let now = fleet(&sim, old.id);
-        assert!(now.alive && now.system == target && now.route.is_empty());
-        assert!(now.is_ready() && !now.is_regrouping());
+        assert!(now.alive && !now.in_battle);
         assert_eq!(now.ships.len(), old.ships.len());
         assert!(now.ships.iter().all(|ship| ship.hull == 1.0));
     }
@@ -3133,47 +3227,154 @@ fn a_battle_without_decision_ends_at_the_time_limit_and_the_system_gets_a_pause(
     assert!(chronicled(
         &sim,
         target,
-        &[&place_name, "ohne Entscheidung"]
+        &[&place_name, "ohne Entscheidung", "weicht nach"]
     ));
     assert_eq!(battles(&sim).debris_in(target), 0.0);
+    // Ohne Verluste macht ein Gefecht niemanden kriegsmüder.
+    assert_eq!([weariness(&sim, a), weariness(&sim, b)], weary);
 
-    // Die Gefechtspause: Obwohl sich die Flotten weiter gegenüberliegen, beginnt so lange
-    // kein neues Gefecht.
-    let until = battles(&sim)
-        .paused_until(target)
-        .expect("das System hat eine Gefechtspause");
-    assert_eq!(until, end_day(&report) + pause);
-    let mut quiet_days = 0;
-    while battles(&sim).paused_until(target).is_some() {
-        assert!(battles(&sim).active.is_empty());
-        assert_eq!(battles(&sim).next_id, 1);
-        assert!(!fleet(&sim, ours).in_battle && !fleet(&sim, theirs).in_battle);
-        assert!(sim.clock().day() <= until);
-        sim.run_days(1);
-        quiet_days += 1;
-    }
-    assert!(quiet_days >= pause - 1, "nur {quiet_days} ruhige Tage");
-    // Danach beginnt es von vorn.
-    assert!(sim.clock().day() >= until);
-    assert_eq!(battles(&sim).next_id, 2);
-    assert!(fleet(&sim, ours).in_battle && fleet(&sim, theirs).in_battle);
+    // Ohne Entscheidung bleibt nur, wer zu Hause ist: Die Verteidigerin liegt weiter im
+    // System und ist einsatzbereit, die Eingedrungene weicht aus, woher sie kam, und
+    // sammelt sich.
+    let home = fleet(&sim, theirs);
+    assert!(home.system == target && home.route.is_empty() && home.is_ready());
+    let intruder = fleet(&sim, ours);
+    assert_eq!(intruder.route, vec![rear]);
+    assert_eq!(intruder.regroup_until, Some(end_day(&report) + regroup));
+    assert!(intruder.is_regrouping() && !intruder.is_ready());
+
+    // Dasselbe Gefecht beginnt nicht von vorn: weder solange beide noch im System liegen
+    // noch später.
+    sail(&mut sim, ours, rear);
+    sim.run_days(2 * regroup);
+    assert_eq!(battles(&sim).next_id, 1);
+    assert!(battles(&sim).active.is_empty());
+    assert!(fleet(&sim, ours).is_ready() && fleet(&sim, ours).system == rear);
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
 }
 
+/// Ersetzt die Schiffe einer Flotte (Aufbau eines Szenarios).
+fn rebuild_fleet(sim: &mut Headless, id: FleetId, ships: &[(&str, u32)]) {
+    {
+        let mut fleets = sim.world_mut().resource_mut::<Fleets>();
+        fleets.list[id.index()].ships.clear();
+    }
+    add_ships(sim, id, ships);
+}
+
+/// Zwei Flotten aus den genannten Schiffen treffen im Heimatsystem der Verteidiger
+/// aufeinander; die Angreiferin kommt aus dem Nachbarsystem. Gibt Partie, Heimatsystem,
+/// Nachbarsystem und die Bilanz des Gefechts zurück.
+fn standoff(seed: u64, ships: &[(&str, u32)]) -> (Headless, SystemId, SystemId, BattleReport) {
+    let (a, b) = (PolityId(0), PolityId(1));
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    let mut sim = with_player(seed);
+    let target = home_of(&sim, b).1;
+    let rear = sim.galaxy().neighbors(target)[0].system;
+    for id in [ours, theirs] {
+        rebuild_fleet(&mut sim, id, ships);
+    }
+    place(&mut sim, ours, rear);
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.issue(
+        a,
+        SimCommand::MoveFleet {
+            fleet: ours,
+            to: target,
+        },
+    );
+    sail(&mut sim, ours, target);
+    assert!(fleet(&sim, ours).in_battle && fleet(&sim, theirs).in_battle);
+    let report = fight_out(&mut sim, target);
+    (sim, target, rear, report)
+}
+
+#[test]
+fn a_stalemate_has_no_winner_and_does_not_start_over() {
+    let data = data();
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    let regroup = data.balance.military.regroup_days;
+    // Einzelne Korvetten kommen nicht durch die Schilde der anderen; Träger mit wenig
+    // Geleit zermürben einander, ohne dass eine Seite die andere vom Feld bringt. Früher
+    // liefen solche Gefechte an die Zeitgrenze und begannen nach einer Pause von vorn.
+    let pairings: [&[(&str, u32)]; 2] = [&[("dolch", 1)], &[("horst", 2), ("dolch", 2)]];
+    let mut stalemates = 0;
+    for (index, ships) in pairings.into_iter().enumerate() {
+        for seed in [61, 62, 63] {
+            let (mut sim, target, rear, report) = standoff(seed, ships);
+            assert_ne!(
+                report.outcome,
+                BattleOutcome::TimedOut,
+                "Paarung {index}, Seed {seed}: kein Gefecht läuft mehr an die Zeitgrenze"
+            );
+            assert!(
+                report.days() < longest_battle_days(data) / 2,
+                "Paarung {index}, Seed {seed}: {} Tage",
+                report.days()
+            );
+            if report.outcome == BattleOutcome::Stalemate {
+                stalemates += 1;
+                // Niemand hält das Feld, niemand hat gewonnen: Alle haben sich gelöst.
+                for side in &report.sides {
+                    assert!(side.stalemate && side.retreated && !side.held_field);
+                }
+                assert!(chronicled(&sim, target, &["im Patt"]));
+                // Wer zu Hause ist, bleibt und ist einsatzbereit; wer eingedrungen ist,
+                // weicht aus, woher er kam, und sammelt sich.
+                let home = fleet(&sim, theirs);
+                if home.alive {
+                    assert!(home.system == target && home.route.is_empty() && home.is_ready());
+                }
+                let intruder = fleet(&sim, ours);
+                if intruder.alive {
+                    assert_eq!(intruder.route, vec![rear]);
+                    assert_eq!(intruder.regroup_until, Some(end_day(&report) + regroup));
+                }
+                // Ein Patt ist keine Niederlage: Die Kurse bleiben, wo sie sind.
+                assert!(!chronicled(&sim, target, &["Niederlage"]));
+            }
+            assert_aftermath(&sim, &report);
+            // Was auch immer herauskam: Dasselbe Gefecht beginnt nicht von vorn.
+            sim.run_days(3 * regroup);
+            assert_eq!(
+                battles(&sim).next_id,
+                1,
+                "Paarung {index}, Seed {seed}: es blieb bei einem Gefecht"
+            );
+            assert!(battles(&sim).active.is_empty());
+            assert!(!fleet(&sim, ours).in_battle && !fleet(&sim, theirs).in_battle);
+            assert_eq!(money_drift(sim.world()), Some(0));
+            assert_eq!(check_invariants(sim.world()), Ok(()));
+        }
+    }
+    assert!(
+        stalemates >= 3,
+        "Szenario neu wählen: nur {stalemates} von 6 Gefechten endeten im Patt"
+    );
+}
+
 // --- 15. Mehr als zwei Parteien, Abspaltung, Erlöschen ---------------------------------------
 
-/// Nach einem Gefecht steht keine Flotte mehr darin. Wer das Feld hält, bleibt und ist
-/// einsatzbereit (an der Zeitgrenze bleibt jeder); wer es räumt und noch Schiffe hat,
-/// marschiert in ein Nachbarsystem und sammelt sich; wer keine Schiffe mehr hat, besteht
-/// nicht mehr.
+/// Nach einem Gefecht steht keine Flotte mehr darin. Entschieden: Wer das Feld hält,
+/// bleibt und ist einsatzbereit; wer es räumt und noch Schiffe hat, marschiert in ein
+/// Nachbarsystem und sammelt sich. Ohne Entscheidung (Patt, Zeitgrenze) bleibt nur, wer im
+/// eigenen System steht. Wer keine Schiffe mehr hat, besteht nicht mehr.
 fn assert_aftermath(sim: &Headless, report: &BattleReport) {
+    let home = sim.galaxy().system_owner(report.system);
     for side in &report.sides {
         let fleet = fleet(sim, side.fleet.expect("jede Partei ist eine Flotte"));
         assert!(!fleet.in_battle && fleet.battle.is_none(), "{}", fleet.name);
+        let drawn =
+            side.stalemate || (report.outcome == BattleOutcome::TimedOut && side.held_field);
+        let stays = if drawn {
+            home == Some(side.owner)
+        } else {
+            side.held_field
+        };
         if !fleet.alive {
             assert!(fleet.ships.is_empty());
-        } else if side.held_field || report.timed_out {
+        } else if stays {
             assert!(
                 fleet.system == report.system && fleet.is_ready(),
                 "{}",
@@ -3233,7 +3434,7 @@ fn three_communities_fight_in_one_system() {
     // Wo jeder jedem feind ist, hält am Ende höchstens einer das Feld.
     let holders = report.sides.iter().filter(|side| side.held_field).count();
     assert!(
-        report.timed_out || holders <= 1,
+        report.outcome.undecided() || holders <= 1,
         "{holders} Parteien halten das Feld"
     );
     assert!(
@@ -3319,6 +3520,12 @@ fn a_battle_outlasts_the_secession_and_the_end_of_a_participant() {
     for colony in colonies {
         assert_eq!(secede(colony, Some(free_state)), Some(free_state));
     }
+    // Wie im Monatsschritt der Partie: Der Freistaat nimmt das Wissen des alten Reichs mit.
+    state.research.inherit(data, b, free_state);
+    state.economy.sync_polities();
+    state
+        .research
+        .publish_effects(&mut state.economy, &mut state.logistics);
     state.polities.get_mut(b).alive = false;
     state.polities.get_mut(b).capital = None;
     state.install(sim.world_mut());
@@ -3332,7 +3539,7 @@ fn a_battle_outlasts_the_secession_and_the_end_of_a_participant() {
     let report = fight_out(&mut sim, target);
     assert_eq!(report.sides.len(), 2);
     assert_eq!(side_of(&report, theirs).owner, b);
-    assert!(report.sides.iter().any(|side| side.held_field) || report.timed_out);
+    assert!(report.sides.iter().any(|side| side.held_field) || report.outcome.undecided());
     assert_aftermath(&sim, &report);
     let place_name = sim.galaxy().system(target).name.clone();
     assert!(chronicled(
@@ -3347,5 +3554,294 @@ fn a_battle_outlasts_the_secession_and_the_end_of_a_participant() {
     assert_eq!(battles(&sim).next_id, 1);
     assert!(battles(&sim).active.is_empty());
     assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+// --- 16. Forschung und Flotte ----------------------------------------------------------------
+
+fn research(sim: &Headless) -> &Research {
+    sim.research()
+}
+
+/// Gewährt einer Gemeinschaft Technologien samt ihren Voraussetzungen (Aufbau eines
+/// Szenarios).
+fn grant(sim: &mut Headless, polity: PolityId, keys: &[&str]) {
+    let data = data();
+    let mut research = sim.world_mut().resource_mut::<Research>();
+    for key in keys {
+        research.grant(data, polity, data.tech_index(key).unwrap());
+    }
+}
+
+/// Waffen und Verteidigung der zweiten Stufe.
+const TIER_TWO: [&str; 2] = ["waffen_2", "verteidigung_2"];
+
+/// Zwei Startflotten treffen im Heimatsystem der Gemeinschaft 1 aufeinander. Mit `advanced`
+/// beherrscht die Angreiferin (Gemeinschaft 0) zusätzlich Waffen und Verteidigung der
+/// zweiten Stufe; alles andere ist gleich. Gibt die Bilanz zurück und die Aufschläge, mit
+/// denen beide Seiten kämpften.
+fn duel_of_equals(seed: u64, advanced: bool) -> (BattleReport, [CombatModifiers; 2]) {
+    let (a, b) = (PolityId(0), PolityId(1));
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    let mut sim = with_player(seed);
+    if advanced {
+        grant(&mut sim, a, &TIER_TWO);
+    }
+    let target = home_of(&sim, b).1;
+    place(&mut sim, ours, target);
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.run_days(1);
+    let modifiers = [ours, theirs].map(|id| {
+        let (battle, side) = battles(&sim)
+            .of_fleet(id)
+            .expect("das Gefecht hat begonnen");
+        battle.combatants[side].modifiers
+    });
+    (fight_out(&mut sim, target), modifiers)
+}
+
+#[test]
+fn better_weapons_and_defences_win_battles_between_equal_fleets() {
+    let data = data();
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    // Viele Partien: Ein einzelnes Gefecht unter Gleichen entscheidet der Zufall, und auch
+    // zwei Dutzend schwanken noch um mehrere Siege.
+    let seeds = 100..196u64;
+    let count = seeds.clone().count();
+    let won = |report: &BattleReport| {
+        report.outcome == BattleOutcome::Decided
+            && side_of(report, ours).held_field
+            && !side_of(report, theirs).held_field
+    };
+    // Was die beiden Technologien samt ihren Voraussetzungen bewirken, steht in den
+    // Spieldaten.
+    let mut lesson = Research::default();
+    for key in TIER_TWO {
+        lesson.grant(data, PolityId(0), data.tech_index(key).unwrap());
+    }
+    let effects = lesson.effects(PolityId(0));
+    assert!(effects.weapon_damage > 1.0 && effects.shields > 1.0);
+    let (mut plain_wins, mut advanced_wins) = (0, 0);
+    let (mut plain_lost, mut advanced_lost) = (0.0f64, 0.0f64);
+    for seed in seeds {
+        let (plain, base) = duel_of_equals(seed, false);
+        let (advanced, raised) = duel_of_equals(seed, true);
+        // Die Technik kommt im Gefecht an: Die Angreiferin kämpft mit genau den Aufschlägen
+        // ihrer Forschung, der Verteidiger wie in der Gegenprobe.
+        assert_eq!(
+            raised[0].damage, effects.weapon_damage as f32,
+            "Seed {seed}"
+        );
+        assert_eq!(raised[0].range, effects.weapon_range as f32, "Seed {seed}");
+        assert_eq!(raised[0].shields, effects.shields as f32, "Seed {seed}");
+        assert_eq!(raised[0].hull, effects.hull as f32, "Seed {seed}");
+        assert!(raised[0].damage > base[0].damage && raised[0].shields > base[0].shields);
+        assert_eq!(raised[1], base[1], "Seed {seed}");
+        // Gleiche Flotten: In beiden Partien beginnt jede Seite mit demselben Bauwert.
+        for report in [&plain, &advanced] {
+            assert_eq!(report.sides[0].initial, report.sides[1].initial);
+        }
+        plain_wins += won(&plain) as usize;
+        advanced_wins += won(&advanced) as usize;
+        plain_lost += side_of(&plain, ours).lost_value as f64;
+        advanced_lost += side_of(&advanced, ours).lost_value as f64;
+    }
+    // Ohne Vorsprung ist es ein Gefecht unter Gleichen, das jede Seite gewinnen kann. Mit
+    // ihm gewinnt die Angreiferin deutlich öfter (um mindestens ein Fünftel aller Gefechte
+    // mehr) und in der klaren Mehrzahl der Fälle, und sie verliert dabei weniger.
+    assert!(
+        plain_wins * 4 >= count && plain_wins * 4 <= count * 3,
+        "ohne Vorsprung {plain_wins} von {count} Siegen: kein Gefecht unter Gleichen"
+    );
+    assert!(
+        advanced_wins >= plain_wins + count / 5 && advanced_wins * 5 >= count * 3,
+        "mit Technik {advanced_wins}, ohne {plain_wins} von {count} Siegen"
+    );
+    assert!(
+        advanced_lost < 0.9 * plain_lost,
+        "Verluste mit Technik {advanced_lost:.0}, ohne {plain_lost:.0}"
+    );
+}
+
+#[test]
+fn a_design_needs_its_technology_and_the_yard_picks_the_best_known() {
+    let data = data();
+    let (me, other) = (PolityId(0), PolityId(1));
+    let mut sim = with_player(12);
+    let (capital, home) = home_of(&sim, me);
+    let (basic, improved) = (design("speer"), design("speer_2"));
+    let needed = data.designs[improved as usize].stats.techs.clone();
+    assert!(
+        !needed.is_empty(),
+        "der verbesserte Entwurf setzt Forschung voraus"
+    );
+    assert!(data.designs[basic as usize].stats.techs.is_empty());
+    assert!(
+        needed.iter().all(|tech| !research(&sim).knows(me, *tech)),
+        "Szenario neu wählen: Die Gemeinschaft beginnt schon mit dieser Technik"
+    );
+    let build = |planet: PlanetId, design: u16| SimCommand::BuildShip { planet, design };
+    let build_class = |planet: PlanetId, class: ShipClass| SimCommand::BuildClass { planet, class };
+
+    // Ohne die Technologie nimmt die Werft den Auftrag nicht an und nennt sie beim Namen.
+    let reason = rejection(&mut sim, me, build(capital, improved));
+    let missing = &data.techs[needed[0] as usize].name;
+    assert!(
+        reason.contains("Technologie") && reason.contains(missing.as_str()),
+        "{reason}"
+    );
+    assert!(fleets(&sim).orders.is_empty());
+    // Die Wahl nach Klasse nimmt den besten Entwurf, den die Gemeinschaft bauen kann.
+    assert_eq!(
+        data.best_design(ShipClass::Cruiser, research(&sim).known(me)),
+        Some(basic)
+    );
+    assert_eq!(
+        command(&mut sim, me, build_class(capital, ShipClass::Cruiser)),
+        CommandOutcome::Applied
+    );
+    assert_eq!(fleets(&sim).orders.len(), 1);
+    assert_eq!(fleets(&sim).orders[0].design, basic);
+    // Bordjäger gibt es auch auf diesem Weg nicht einzeln.
+    assert!(
+        rejection(&mut sim, me, build_class(capital, ShipClass::Fighter)).contains("Bordjäger")
+    );
+    assert_eq!(
+        command(&mut sim, me, SimCommand::CancelBuild { order: 0 }),
+        CommandOutcome::Applied
+    );
+
+    // Mit der Technologie ist der Entwurf baubar, und die Werft wählt ihn von selbst.
+    let keys: Vec<&str> = needed
+        .iter()
+        .map(|tech| data.techs[*tech as usize].key.as_str())
+        .collect();
+    grant(&mut sim, me, &keys);
+    assert!(needed.iter().all(|tech| research(&sim).knows(me, *tech)));
+    assert_eq!(
+        command(&mut sim, me, build(capital, improved)),
+        CommandOutcome::Applied
+    );
+    assert_eq!(
+        command(&mut sim, me, build_class(capital, ShipClass::Cruiser)),
+        CommandOutcome::Applied
+    );
+    let designs: Vec<u16> = fleets(&sim)
+        .orders
+        .iter()
+        .map(|order| order.design)
+        .collect();
+    assert_eq!(designs, vec![improved, improved]);
+    // Wissen gehört der Gemeinschaft: Eine andere baut den Entwurf weiterhin nicht.
+    let (their_capital, _) = home_of(&sim, other);
+    assert!(
+        needed
+            .iter()
+            .any(|tech| !research(&sim).knows(other, *tech))
+    );
+    assert!(rejection(&mut sim, other, build(their_capital, improved)).contains("Technologie"));
+    assert_eq!(
+        data.best_design(ShipClass::Cruiser, research(&sim).known(other)),
+        Some(basic)
+    );
+
+    // Der Auftrag wird gebaut wie jeder andere, und das Schiff stößt zur Flotte.
+    let build_days = data.designs[improved as usize].stats.build_days as u64;
+    let ships = fleets(&sim).ship_count(me);
+    for _ in 0..build_days + 30 {
+        set_stock(&mut sim, home, &PARTS, 100.0);
+        sim.run_days(1);
+        if fleets(&sim).ship_count(me) > ships {
+            break;
+        }
+    }
+    let built = fleet(&sim, FleetId(0)).ships.last().unwrap();
+    assert_eq!(built.design, improved, "das verbesserte Schiff ist fertig");
+    assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+#[test]
+fn a_battle_sharpens_the_picture_of_the_opponents_technology() {
+    let data = data();
+    let balance = &data.balance.research;
+    let (a, b, c) = (PolityId(0), PolityId(1), PolityId(2));
+    let mut sim = with_player(22);
+    let target = home_of(&sim, b).1;
+    place(&mut sim, FleetId(0), target);
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.run_days(1);
+    assert!(battles(&sim).in_system(target).is_some());
+    let intel = |sim: &Headless, viewer: PolityId, of: PolityId| research(sim).intel(viewer, of);
+    let pairs = [(a, b), (b, a), (a, c), (c, a), (b, c), (c, b)];
+    let width = |sim: &Headless, viewer: PolityId, of: PolityId| -> u32 {
+        research(sim)
+            .estimate(data, viewer, of)
+            .iter()
+            .map(|range| range.width() as u32)
+            .sum()
+    };
+    let wide = [width(&sim, a, b), width(&sim, b, a)];
+    assert!(
+        wide.iter().all(|sum| *sum > 0),
+        "noch ist das Bild unscharf"
+    );
+
+    // Takt für Takt bis zum Ende: Im letzten Takt gewinnen die Gegner Einblick.
+    let month = TICKS_PER_DAY * DAYS_PER_MONTH;
+    let limit = sim.clock().tick + longest_battle_days(data) * TICKS_PER_DAY;
+    let (before, ended) = loop {
+        let before = pairs.map(|(viewer, of)| intel(&sim, viewer, of));
+        let tick = sim.clock().tick;
+        sim.tick();
+        if battles(&sim).active.is_empty() {
+            break (before, tick);
+        }
+        assert!(sim.clock().tick < limit, "das Gefecht endet nie");
+    };
+    assert!(
+        !ended.is_multiple_of(month),
+        "Szenario neu wählen: Das Gefecht endet im Takt eines Monatsabschlusses"
+    );
+    let report = battles(&sim).reports.last().unwrap().clone();
+    assert!(
+        report.sides.iter().any(|side| side.lost_value > 0.0),
+        "Szenario neu wählen: Es sollte zum Kampf gekommen sein"
+    );
+    let after = pairs.map(|(viewer, of)| intel(&sim, viewer, of));
+    let gain = balance.intel_per_battle;
+    assert!(gain > 0.0);
+    // Beide Gegner kennen einander um genau den Hebel besser; Unbeteiligte erfahren nichts,
+    // und über Unbeteiligte erfährt niemand etwas.
+    for index in 0..2 {
+        assert_eq!(
+            after[index],
+            (before[index] + gain).min(1.0),
+            "Paar {index}"
+        );
+        assert!(after[index] > before[index]);
+    }
+    assert_eq!(after[2..], before[2..]);
+
+    // Am nächsten Monatsersten folgt das Bild dem Einblick: Die Spannen werden enger und
+    // enthalten weiter die Wahrheit.
+    sim.run_days(DAYS_PER_MONTH);
+    let sharp = [width(&sim, a, b), width(&sim, b, a)];
+    for (index, (viewer, of)) in pairs[..2].iter().enumerate() {
+        assert!(
+            sharp[index] < wide[index],
+            "Paar {index}: Spannen {} statt {}",
+            sharp[index],
+            wide[index]
+        );
+        let picture = research(&sim).estimate(data, *viewer, *of);
+        for (range, branch) in picture.iter().zip(TechBranch::ALL) {
+            assert!(range.contains(research(&sim).tier(data, *of, branch)));
+        }
+    }
+    // Ohne neue Gefechte verblasst der Einblick wieder, aber nicht sofort.
+    sim.run_days(DAYS_PER_YEAR);
+    let faded = intel(&sim, a, b);
+    assert!(faded < after[0] && faded > before[0], "{faded}");
     assert_eq!(check_invariants(sim.world()), Ok(()));
 }

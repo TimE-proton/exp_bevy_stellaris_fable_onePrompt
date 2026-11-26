@@ -507,9 +507,9 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
         ),
         (
             // Ohne Sammelfrist stünde eine geschlagene Flotte am nächsten Morgen wieder im
-            // Gefecht, ohne Gefechtspause begänne ein unentschiedenes sofort von vorn.
-            "regroup_days und battle_pause_days müssen mindestens 1 sein",
-            military.regroup_days >= 1 && military.battle_pause_days >= 1,
+            // Gefecht, und ein unentschiedenes begänne sofort von vorn.
+            "regroup_days muss mindestens 1 sein",
+            military.regroup_days >= 1,
         ),
         (
             "weariness_per_navy_lost muss in 0..100 liegen",

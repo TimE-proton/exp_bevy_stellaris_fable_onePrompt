@@ -49,6 +49,12 @@ pub struct SimRoot;
 /// Die eine, verkettete Reihenfolge eines Takts. Die Kausalität des Spiels steht hier:
 /// Befehle und Entscheidungen, dann Warenflüsse und Produktion, daraus Preise und
 /// Finanzen, daraus Zusammenhalt; danach Krieg und seine Folgen.
+///
+/// Sie ist zugleich die Rangfolge der Ansprüche an die Staatskasse: Der Monatsabschluss
+/// (`Finance`) nimmt ein, kehrt den halben Überschuss über der Rücklage an die Haushalte
+/// aus und bedient die Schulden; dann zahlen die Flotten (`Fleets`) Sold, Nachschub,
+/// Instandsetzung und Werften, notfalls aus der Rücklage; erst danach forscht die
+/// Gemeinschaft (`Research`) mit dem, was noch über der Rücklage liegt.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Commands,
@@ -59,8 +65,8 @@ pub enum SimSet {
     Prices,
     Finance,
     Cohesion,
-    Research,
     Fleets,
+    Research,
     SpaceCombat,
     Siege,
     Aftermath,
@@ -94,8 +100,8 @@ impl Plugin for CorePlugin {
                 SimSet::Prices,
                 SimSet::Finance,
                 SimSet::Cohesion,
-                SimSet::Research,
                 SimSet::Fleets,
+                SimSet::Research,
                 SimSet::SpaceCombat,
                 SimSet::Siege,
                 SimSet::Aftermath,

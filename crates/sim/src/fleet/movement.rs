@@ -1,9 +1,10 @@
 //! Tagesschritt auf der Karte: Marsch entlang der Routen und die Blockaderegel.
 
-use super::{Fleets, Stance};
+use super::{Fleets, Stance, map_speed};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
+use crate::tech::Research;
 
 /// Strecke, die eine Flotte an einem Tag zurücklegt, und ob sie damit das nächste System
 /// erreicht. `fuel` ist der knappste Tank der Flotte (0..1), `remaining` der Rest der
@@ -33,16 +34,15 @@ pub fn day_travel(
 }
 
 /// Flotten rücken entlang ihrer Route vor und verbrauchen dabei Treibstoff: je
-/// Streckeneinheit denselben Anteil jedes Tanks.
-pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData) {
-    // ANSCHLUSS FORSCHUNG: Der Aufschlag auf die Flottenfahrt einer Gemeinschaft
-    // (`TechEffect::FleetSpeed`) gehört hierher und in `Fleet::day_range`.
-    let speed = data.balance.fleets.speed;
+/// Streckeneinheit denselben Anteil jedes Tanks. Die Fahrt folgt der Antriebstechnik der
+/// Gemeinschaft ([`map_speed`]); der Verbrauch je Strecke bleibt gleich.
+pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, research: &Research, data: &GameData) {
     let balance = &data.balance.military;
     for fleet in &mut fleets.list {
         if !fleet.alive || fleet.route.is_empty() || fleet.in_battle {
             continue;
         }
+        let speed = map_speed(data, research, fleet.owner);
         let Some(lane) = galaxy.lane_between(fleet.system, fleet.route[0]) else {
             fleet.route.clear();
             fleet.progress = 0.0;
@@ -104,15 +104,27 @@ mod tests {
     use super::*;
     use crate::ids::{FleetId, PolityId};
 
-    /// Marschiert, bis die Flotte angekommen ist, und gibt die Tage zurück.
-    fn travel(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData, fleet: FleetId) -> u32 {
+    /// Marschiert mit der Technik aus `research`, bis die Flotte angekommen ist, und gibt
+    /// die Tage zurück.
+    fn travel_with(
+        galaxy: &Galaxy,
+        fleets: &mut Fleets,
+        research: &Research,
+        data: &GameData,
+        fleet: FleetId,
+    ) -> u32 {
         for day in 0..5000 {
             if fleets.list[fleet.index()].route.is_empty() {
                 return day;
             }
-            move_fleets(galaxy, fleets, data);
+            move_fleets(galaxy, fleets, research, data);
         }
         panic!("Flotte kam nie an");
+    }
+
+    /// Marschiert ohne Antriebstechnik, bis die Flotte angekommen ist.
+    fn travel(galaxy: &Galaxy, fleets: &mut Fleets, data: &GameData, fleet: FleetId) -> u32 {
+        travel_with(galaxy, fleets, &Research::default(), data, fleet)
     }
 
     #[test]
@@ -159,8 +171,54 @@ mod tests {
             );
         }
         // Wer liegt, verbraucht nichts.
-        move_fleets(&galaxy, &mut fleets, &data);
+        move_fleets(&galaxy, &mut fleets, &Research::default(), &data);
         assert!((fleets.list[0].min_fuel() - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn propulsion_technology_makes_a_fleet_faster_on_the_map() {
+        let (data, galaxy, _, fleets) = setup();
+        let me = PolityId(0);
+        let base = data.balance.fleets.speed;
+        let mut research = Research::default();
+        assert_eq!(map_speed(&data, &research, me), base);
+        assert!(research.grant(&data, me, data.tech_index("antrieb_1").unwrap()));
+        let factor = research.effects(me).fleet_speed as f32;
+        assert!(
+            factor > 1.0,
+            "die erste Antriebsstufe hebt die Flottenfahrt"
+        );
+        assert_eq!(map_speed(&data, &research, me), base * factor);
+        // Die Technik gehört der Gemeinschaft: Andere fahren weiter mit dem Grundwert.
+        assert_eq!(map_speed(&data, &research, PolityId(1)), base);
+
+        // Der längste Weg aus dem Heimatsystem zu einem Nachbarn, damit die Tage zählen.
+        let home = fleets.list[0].system;
+        let neighbor = *galaxy
+            .neighbors(home)
+            .iter()
+            .max_by(|a, b| {
+                galaxy
+                    .lane(a.lane)
+                    .length
+                    .total_cmp(&galaxy.lane(b.lane).length)
+            })
+            .unwrap();
+        let length = galaxy.lane(neighbor.lane).length;
+        let (mut slow, mut fast) = (fleets.clone(), fleets.clone());
+        for fleets in [&mut slow, &mut fast] {
+            order_move(&galaxy, fleets, me, FleetId(0), neighbor.system).unwrap();
+        }
+        let plain = travel(&galaxy, &mut slow, &data, FleetId(0));
+        let boosted = travel_with(&galaxy, &mut fast, &research, &data, FleetId(0));
+        assert_eq!(plain, (length / base).ceil() as u32);
+        assert_eq!(boosted, (length / (base * factor)).ceil() as u32);
+        assert!(boosted <= plain);
+        // Der Verbrauch hängt an der Strecke, nicht an der Fahrt.
+        assert!((slow.list[0].min_fuel() - fast.list[0].min_fuel()).abs() < 1e-4);
+        // Was die Flotte an einem Tag schafft, zeigt auch ihre Tagesreichweite.
+        assert_eq!(fast.list[0].day_range(&data, &research), base * factor);
+        assert_eq!(slow.list[0].day_range(&data, &Research::default()), base);
     }
 
     #[test]

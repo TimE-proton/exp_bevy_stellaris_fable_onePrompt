@@ -5,7 +5,7 @@
 use sim::clock::{DAYS_PER_YEAR, date_of_tick};
 use sim::command::CommandOutcome;
 use sim::data::ShipClass;
-use sim::fleet::{BattleReport, Battles};
+use sim::fleet::{BattleOutcome, BattleReport, Battles};
 use sim::harness::{Headless, ScriptedAct, ScriptedEvent, WarScript};
 use sim::ids::PolityId;
 
@@ -70,17 +70,13 @@ fn counts(values: &[u32; 6]) -> String {
 
 fn describe(sim: &Headless, report: &BattleReport) -> String {
     let mut text = format!(
-        "  {:<4} {:<14} {} bis {} ({} Tage){}",
+        "  {:<4} {:<14} {} bis {} ({} Tage), {}",
         report.id.to_string(),
         sim.galaxy().system(report.system).name,
         date_of_tick(report.started),
         date_of_tick(report.ended),
         report.days(),
-        if report.timed_out {
-            ", ohne Entscheidung"
-        } else {
-            ""
-        }
+        report.outcome.label()
     );
     for side in &report.sides {
         let share = if side.initial_value > 0.0 {
@@ -100,7 +96,13 @@ fn describe(sim: &Headless, report: &BattleReport) -> String {
             } else {
                 ", räumt das Feld"
             },
-            if side.retreated { " (Rückzug)" } else { "" }
+            if side.stalemate {
+                " (im Patt gelöst)"
+            } else if side.retreated {
+                " (Rückzug)"
+            } else {
+                ""
+            }
         );
     }
     text
@@ -136,6 +138,21 @@ pub fn print_aftermath(sim: &Headless) {
     }
     for report in &battles.reports {
         println!("{}", describe(sim, report));
+    }
+    // Wie die Gefechte ausgingen, soweit ihre Bilanzen noch aufbewahrt sind.
+    let endings: Vec<String> = BattleOutcome::ALL
+        .iter()
+        .filter_map(|outcome| {
+            let count = battles
+                .reports
+                .iter()
+                .filter(|report| report.outcome == *outcome)
+                .count();
+            (count > 0).then(|| format!("{count} {}", outcome.label()))
+        })
+        .collect();
+    if !endings.is_empty() {
+        println!("  Ausgang: {}.", endings.join(", "));
     }
     for debris in &battles.debris {
         println!(

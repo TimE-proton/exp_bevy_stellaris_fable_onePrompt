@@ -203,6 +203,9 @@ fn check_balance(research: &ResearchBalance) -> Result<(), String> {
     if !level(research.intel_decay) {
         return Err("research: intel_decay muss in 0..1 liegen".into());
     }
+    if !level(research.intel_per_battle) {
+        return Err("research: intel_per_battle muss in 0..1 liegen".into());
+    }
     if research.estimate_spread as u32 > MAX_TECH_TIER {
         return Err(format!(
             "research: estimate_spread darf höchstens {MAX_TECH_TIER} sein"
@@ -440,6 +443,10 @@ mod tests {
             (
                 "intel_decay",
                 Box::new(|data| data.balance.research.intel_decay = 2.0),
+            ),
+            (
+                "intel_per_battle",
+                Box::new(|data| data.balance.research.intel_per_battle = -0.1),
             ),
             (
                 "estimate_spread",

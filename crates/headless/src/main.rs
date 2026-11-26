@@ -230,14 +230,15 @@ fn main() -> ExitCode {
                 runs.iter().map(f).sum::<f64>() / runs.len().max(1) as f64
             };
             println!(
-                "Mittel: Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}",
+                "Mittel: Versorgung {:.2}, Auslastung {:.2}, Stellen besetzt {:.2}, Preisniveau {:.2}, Preisspanne {:.1}, Preise am Anschlag {:.0} %, Frachter {:.0}, Zusammenhalt {:.1}",
                 mean(|r| r.economy.essentials_met),
                 mean(|r| r.economy.utilization),
                 mean(|r| r.economy.employment),
                 mean(|r| r.economy.price_level),
                 mean(|r| r.economy.price_spread),
                 100.0 * mean(|r| r.economy.pinned_prices),
-                mean(|r| r.economy.freighters as f64)
+                mean(|r| r.economy.freighters as f64),
+                mean(|r| r.economy.cohesion)
             );
             let per_polity = |f: fn(&sim::harness::PolitySummary) -> f64| {
                 let (sum, count) = runs
@@ -250,11 +251,12 @@ fn main() -> ExitCode {
                 sum / count.max(1) as f64
             };
             println!(
-                "Je Gemeinschaft im Mittel: {:.1} Flotten, {:.1} Schiffe, Stärke {:.0}, Soldrückstand {:.1} %",
+                "Je Gemeinschaft im Mittel: {:.1} Flotten, {:.1} Schiffe, Stärke {:.0}, Soldrückstand {:.1} %, {:.1} Technologien",
                 per_polity(|p| p.fleets as f64),
                 per_polity(|p| p.ships as f64),
                 per_polity(|p| p.strength),
-                100.0 * per_polity(|p| p.arrears)
+                100.0 * per_polity(|p| p.arrears),
+                per_polity(|p| p.techs as f64)
             );
             println!(
                 "Gefechte je Lauf im Mittel: {:.1} mit {:.1} verlorenen Schiffen",
