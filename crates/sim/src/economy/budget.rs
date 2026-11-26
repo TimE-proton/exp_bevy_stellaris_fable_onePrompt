@@ -12,6 +12,8 @@
 //! 4. Beschaffung: Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft wird,
 //!    den ganzen Monat über; beim Abschluss wird dafür der Voranschlag zurückgelegt.
 //! 5. Kontore: Einlagen in Kontore, deren Kasse leer ist. Der Staat erhält dafür Anteile.
+//!    Sie stehen hinter Flotte und Beschaffung: Mehrere Kontore brauchen oft zugleich
+//!    Kapital, und stünden sie davor, bliebe in solchen Monaten der Sold aus.
 //! 6. Forschung.
 //! 7. Rücklage: Was übrig ist, füllt sie bis zu ihrem Ziel auf.
 //! 8. Ausschüttung: Erst vom Rest darüber geht ein Anteil an die Haushalte.
@@ -25,6 +27,17 @@
 //! Bewilligungen sind Ausgabeerlaubnisse, keine Konten: Das Geld bleibt bis zur Zahlung in
 //! der Staatskasse. Jeder Anspruch fragt mit [`Economy::allowance`], was er noch ausgeben
 //! darf, und verbucht mit [`Economy::spend`] oder [`Economy::book_paid`], was er gezahlt hat.
+//!
+//! Was Flotte, Beschaffung und Forschung kosten, ist Verbrauch und kein Transfer an die Haushalte:
+//! Einkäufe gehen an die Kontore, Sold und Gehälter an den Staatsdienst
+//! ([`Economy::pay_staff`]), der davon am Sitz der Gemeinschaft selbst einkauft. Nur
+//! Grundleistungen und Ausschüttung fließen an die Haushalte der Welten. Was Flotte und
+//! Forschung kosten, fehlt deshalb der Ausschüttung und dem Verbrauch der Haushalte.
+//!
+//! Ein neuer Anspruch (etwa die Verteidigung von Welten) bekommt eine Variante von
+//! [`Claim`] an der Stelle seines Rangs, meldet zum Monatsabschluss seinen Bedarf in
+//! [`Wants`] und gibt aus, was ihm bewilligt wurde: Einkäufe über [`Economy::allowance`]
+//! und [`Economy::spend`], Sold über [`Economy::pay_staff`].
 
 use super::{Economy, Money, market_capital_needs, pay, pay_households, state_reserve};
 use crate::data::GameData;
@@ -660,6 +673,52 @@ mod tests {
         assert_eq!(economy.allowance(ME, Claim::Fleet), 0);
         assert_eq!(month.unfunded, civil - to_money(1500.0) + to_money(1400.0));
         assert_eq!(economy.treasury(ME), 0);
+    }
+
+    #[test]
+    fn a_kontor_without_cash_gets_capital_after_the_fleet_and_before_research() {
+        let (data, galaxy, polities, mut economy) = start();
+        // Das Kontor des Heimatsystems hat keine Kasse mehr: Der Staat schießt Kapital nach,
+        // bis zum Sockel, und erhält dafür Anteile.
+        let home = galaxy.planet(polities.get(ME).capital.unwrap()).system;
+        economy.markets[home.index()].cash = to_money(100.0);
+        let fresh = economy.clone();
+        let needs = market_capital_needs(&galaxy, &economy, ME);
+        assert_eq!(needs.len(), 1);
+        let (system, needed) = needs[0];
+        assert_eq!(system, home);
+        assert!(needed > to_money(1000.0));
+        // Die Kasse deckt Grundleistungen, Flotte und die Einlage; für die Forschung bleibt
+        // nichts. Reichte sie nicht für alle drei, ginge die Flotte dem Kontor vor.
+        let civil = to_money(4000.0 * data.balance.economy.civil_share);
+        let treasury = civil + needed + to_money(500.0);
+        economy.treasuries[ME.index()] = treasury;
+        economy.state_income[ME.index()] = to_money(4000.0);
+        economy.open_budget_month(0, data.balance.economy.income_tax);
+        let injections = settle_budget(&galaxy, &mut economy, &data, ME, &wants(500.0, 0.0, 600.0));
+        assert_eq!(injections, vec![(home, needed)]);
+        let month = &economy.budget(ME).unwrap().current;
+        assert_eq!(month.line(Claim::Civil).paid, civil);
+        assert_eq!(
+            month.line(Claim::Markets),
+            Line {
+                wanted: needed,
+                paid: needed
+            }
+        );
+        assert_eq!(economy.market(home).cash, to_money(100.0) + needed);
+        assert_eq!(economy.allowance(ME, Claim::Fleet), to_money(500.0));
+        assert_eq!(economy.allowance(ME, Claim::Research), 0);
+        assert_eq!(month.unfunded, to_money(600.0));
+
+        // Fehlen 200, fehlen sie dem Kontor, nicht der Flotte.
+        let mut short = fresh.clone();
+        short.treasuries[ME.index()] = treasury - to_money(200.0);
+        short.state_income[ME.index()] = to_money(4000.0);
+        short.open_budget_month(0, data.balance.economy.income_tax);
+        let injections = settle_budget(&galaxy, &mut short, &data, ME, &wants(500.0, 0.0, 600.0));
+        assert_eq!(injections, vec![(home, needed - to_money(200.0))]);
+        assert_eq!(short.allowance(ME, Claim::Fleet), to_money(500.0));
     }
 
     #[test]
