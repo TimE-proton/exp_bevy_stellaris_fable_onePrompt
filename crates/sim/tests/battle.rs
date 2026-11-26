@@ -534,15 +534,18 @@ fn tech_share(modifiers: CombatModifiers, fleet_text: &str, seeds: std::ops::Ran
 
 #[test]
 fn one_tier_of_weapons_wins_a_clear_majority() {
-    // `waffen_2` gibt +8 % Schaden.
+    // `waffen_2` erhöht den Schaden; die Höhe steht in techs.ron.
     let tech = data().tech_index("waffen_2").expect("waffen_2");
-    assert!(
-        data().techs[tech as usize]
-            .effects
-            .contains(&sim::data::TechEffect::WeaponDamage(0.08))
-    );
+    let bonus = data().techs[tech as usize]
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            sim::data::TechEffect::WeaponDamage(bonus) => Some(*bonus as f32),
+            _ => None,
+        })
+        .expect("waffen_2 erhöht den Schaden");
     let modifiers = CombatModifiers {
-        damage: 1.08,
+        damage: 1.0 + bonus,
         ..Default::default()
     };
     let share = tech_share(modifiers, "speer:5", 0..20);
