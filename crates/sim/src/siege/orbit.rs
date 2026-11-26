@@ -703,6 +703,11 @@ pub(super) mod testing {
                 .collect()
         }
 
+        /// Lässt eine Flotte sich bis zum genannten Tag sammeln: Sie hält dann keinen Orbit.
+        pub fn regroup(&mut self, fleet: usize, until: u64) {
+            self.state.fleets.list[fleet].regroup_until = Some(until);
+        }
+
         /// Gibt einer Flotte den Blockadeauftrag.
         pub fn order_blockade(&mut self, fleet: usize) {
             self.state.fleets.list[fleet].stance = Stance::Blockade;

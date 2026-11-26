@@ -806,6 +806,105 @@ mod tests {
     }
 
     #[test]
+    fn fire_costs_people_capital_prices_and_goodwill() {
+        let mut scene = Scene::colony();
+        let money = scene.money();
+        let balance = scene.data.balance.siege.clone();
+        let planet = scene.planet;
+        let third = PolityId(2);
+        // Eine dritte Gemeinschaft hält Anteile an den Betrieben der Kolonie.
+        let firms = local_issuers(
+            &scene.state.finance,
+            &scene.state.galaxy,
+            &scene.state.logistics,
+            &scene.state.polities,
+            planet,
+        );
+        assert!(!firms.is_empty());
+        for id in &firms {
+            let issuer = scene.state.finance.issuers.get_mut(id).unwrap();
+            let shares = issuer
+                .holdings
+                .remove(&crate::ids::HolderId::Elite(planet))
+                .unwrap_or(0);
+            if shares > 0 {
+                issuer
+                    .holdings
+                    .insert(crate::ids::HolderId::State(third), shares);
+            }
+        }
+        scene.day();
+        let stake = scene.siege().stakes.get(&third).copied().unwrap_or(0.0);
+        assert!(stake > 0.05 && stake < 0.5, "Anteil der Dritten: {stake}");
+        // Ein Tag ohne Feuer als Vergleich: nichts davon bewegt sich.
+        let state = &scene.state;
+        let population = state.galaxy.planet(planet).population;
+        let capital = state.economy.planet(planet).total_capital();
+        let shock = state.finance.issuers[&firms[0]].shock;
+        let weariness =
+            |scene: &Scene, polity: PolityId| scene.state.finance.polity(polity).war_weariness;
+        let (weary_me, weary_foe) = (weariness(&scene, ME), weariness(&scene, FOE));
+        assert!(capital > 0.0 && scene.state.sieges.grievances.is_empty());
+        let militia = scene.state.sieges.defense(planet).militia;
+
+        // Flächenbeschuss für einen Tag.
+        scene
+            .state
+            .sieges
+            .active
+            .get_mut(&planet)
+            .unwrap()
+            .orders
+            .fire = crate::siege::Fire::Area;
+        let firms_before = firm_value(
+            &scene.data,
+            &scene.state.galaxy,
+            &scene.state.economy,
+            &scene.state.logistics,
+            planet,
+        );
+        scene.day();
+        let report = scene.siege().report.clone();
+        let damage = report.fire_damage;
+        assert!(damage > 0.0 && damage <= balance.area.1 * balance.bombard_cap + 1e-12);
+        let state = &scene.state;
+        // Bevölkerung und jeder Kapitalstock verlieren den Begleitschaden, die Kurse der
+        // Betriebe der Welt geben im selben Maß nach, die Welt trägt die Narbe.
+        let people = state.galaxy.planet(planet).population;
+        assert!((people - population * (1.0 - damage)).abs() < 1e-9);
+        let stock = state.economy.planet(planet).total_capital();
+        assert!((stock - capital * (1.0 - damage)).abs() < 1e-9 * capital);
+        for id in &firms {
+            let now = state.finance.issuers[id].shock;
+            assert!((now - shock * (1.0 - damage)).abs() < 1e-12);
+        }
+        let defense = state.sieges.defense(planet);
+        assert!((defense.scar - damage).abs() < 1e-12);
+        assert_eq!(defense.scar_by, Some(ME));
+        // Die Miliz ist getroffen, die Magazine leeren sich.
+        assert!(report.defender_bombed > 0.0 && defense.militia < militia);
+        assert!(scene.ships(0).iter().all(|ship| ship.ammo < 1.0));
+        assert!(state.sieges.stats.lost_defenders >= report.defender_bombed - 1e-12);
+        // Kriegsmüdigkeit: Opfer des Beschusses bei beiden, beim Verteidiger dazu die
+        // Verluste seiner Truppe.
+        let victims = population - people;
+        let (fire_me, fire_foe) = balance.wear_fire;
+        let gained_me = weariness(&scene, ME) - weary_me;
+        let gained_foe = weariness(&scene, FOE) - weary_foe;
+        assert!((gained_me - fire_me * victims).abs() < 1e-9, "{gained_me}");
+        let expected = fire_foe * victims + balance.wear_loss * report.defender_bombed;
+        assert!((gained_foe - expected).abs() < 1e-9, "{gained_foe}");
+        // Die Dritte merkt sich, was von ihrem Besitz vernichtet wurde.
+        let destroyed = firms_before * damage;
+        let grievance = state.sieges.grievances[&(ME, third)];
+        assert!(destroyed > 0.0);
+        assert!((grievance - destroyed * stake).abs() < 1e-9 * destroyed);
+        assert_eq!(state.sieges.grievances.len(), 1);
+        // Zerstört wird Vermögen, kein Geld.
+        assert_eq!(scene.money(), money);
+    }
+
+    #[test]
     fn a_verdict_waits_in_the_pending_list_and_the_siege_rests() {
         let mut scene = Scene::new();
         let balance = scene.data.balance.siege.clone();
