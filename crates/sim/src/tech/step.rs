@@ -6,7 +6,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
 use crate::data::{GameData, ResearchBalance};
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Claim, Economy, Money, pay_households, to_credits};
+use crate::economy::{Claim, Economy, Money, to_credits};
 use crate::finance::Finance;
 use crate::galaxy::Galaxy;
 use crate::ids::PolityId;
@@ -313,9 +313,8 @@ pub fn research_month(
         // selbst rührt die Forschung nicht an.
         let wanted = research_budget(economy, entry, id);
         let budget = wanted.min(economy.allowance(id, Claim::Research));
-        let spent = pay_households(galaxy, economy, id, budget);
         economy.want(id, Claim::Research, wanted);
-        economy.book_paid(id, Claim::Research, spent);
+        let spent = economy.pay_staff(id, Claim::Research, budget);
         let points = research_points(
             balance,
             to_credits(spent),

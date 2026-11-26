@@ -13,9 +13,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::DAYS_PER_MONTH;
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::{
-    Claim, Economy, Market, Money, pay, pay_households, procure, purchase, to_credits, to_money,
-};
+use crate::economy::{Claim, Economy, Market, Money, procure, purchase, to_credits, to_money};
 use crate::galaxy::Galaxy;
 use crate::ids::{GoodId, PlanetId, PolityId, SystemId};
 use crate::polity::{Polities, Polity};
@@ -274,15 +272,6 @@ pub fn maintenance_parts(
     parts
 }
 
-/// Die Welt, über die eine Gemeinschaft ihre Flotte versorgt und bezahlt: ihre Hauptwelt,
-/// solange sie ihr gehört, sonst ihre erste Welt.
-fn seat_of(galaxy: &Galaxy, polity: &Polity) -> Option<PlanetId> {
-    polity
-        .capital
-        .filter(|planet| galaxy.planet(*planet).owner == Some(polity.id))
-        .or_else(|| galaxy.planets_of(polity.id).next().map(|planet| planet.id))
-}
-
 /// Wert der Ersatzteile eines Monats zum heutigen Briefkurs am Markt des Sitzes.
 fn maintenance_cost(
     data: &GameData,
@@ -291,7 +280,7 @@ fn maintenance_cost(
     fleets: &Fleets,
     polity: &Polity,
 ) -> f64 {
-    let Some(seat) = seat_of(galaxy, polity) else {
+    let Some(seat) = polity.seat(galaxy) else {
         return 0.0;
     };
     let market = economy.market(galaxy.planet(seat).system);
@@ -420,7 +409,7 @@ pub fn maintain_fleets(
     let spread = data.balance.economy.spread;
     for polity in polities.alive() {
         let parts = maintenance_parts(data, fleets, polity.id);
-        let Some(seat) = seat_of(galaxy, polity) else {
+        let Some(seat) = polity.seat(galaxy) else {
             continue;
         };
         if parts.is_empty() {
@@ -463,22 +452,12 @@ pub fn pay_upkeep(
         let due = monthly_upkeep(data, fleets, polity.id);
         let claim = due + to_money(maintenance_cost(data, galaxy, economy, fleets, polity));
         let granted = economy.allowance(polity.id, Claim::Fleet);
-        // Der Sold wird nach Bevölkerung verteilt; der Rundungsrest geht an den Sitz, damit
-        // genau der gezahlte Betrag fließt.
-        let mut paid: Money = 0;
-        if let Some(seat) = seat_of(galaxy, polity)
-            && due > 0
-        {
-            let budget = due.min(granted);
-            paid = pay_households(galaxy, economy, polity.id, budget);
-            paid += pay(
-                &mut economy.treasuries[index],
-                &mut economy.planets[seat.index()].households,
-                budget - paid,
-            );
-        }
+        // Der Sold geht an die Besatzungen, nicht an die Haushalte der Welten: Sie geben
+        // ihn am Sitz der Gemeinschaft aus (`economy::staff_consume`).
         economy.want(polity.id, Claim::Fleet, due);
-        economy.book_paid(polity.id, Claim::Fleet, paid);
+        if polity.seat(galaxy).is_some() {
+            economy.pay_staff(polity.id, Claim::Fleet, due.min(granted));
+        }
         let missed = if claim > 0 {
             (1.0 - granted.min(claim) as f64 / claim as f64) as f32
         } else {
@@ -854,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn upkeep_moves_exactly_the_stated_amount_to_the_households() {
+    fn the_pay_moves_exactly_the_stated_amount_to_the_crews() {
         let (data, galaxy, polities, mut fleets) = setup();
         let mut economy = setup_economy(&data, &galaxy, &polities);
         let mut chronicle = Chronicle::default();
@@ -882,66 +861,33 @@ mod tests {
             &data,
             0,
         );
+        // Der Sold geht an die Besatzungen und an niemanden sonst: Die Haushalte der Welten
+        // bekommen davon nichts. Erst was die Besatzungen am Markt ausgeben, kommt bei
+        // anderen an.
         for polity in &polities.list {
             assert_eq!(
                 before.treasury(polity.id) - economy.treasury(polity.id),
                 due
             );
             assert_eq!(
-                households(&economy, polity.id) - households(&before, polity.id),
+                economy.staff_money(polity.id) - before.staff_money(polity.id),
                 due
             );
+            assert_eq!(
+                households(&economy, polity.id),
+                households(&before, polity.id)
+            );
             assert_eq!(fleets.arrears_of(polity.id), 0.0);
+            // Im Haushalt steht die Zahlung beim Anspruch der Flotte.
+            let line = economy
+                .budget(polity.id)
+                .unwrap()
+                .current
+                .line(Claim::Fleet);
+            assert_eq!((line.wanted, line.paid), (due, due));
         }
         assert_eq!(economy.money_in_accounts(), before.money_in_accounts());
         assert!(chronicle.entries.is_empty());
-
-        // Verteilt wird nach Bevölkerung. Mit mehreren Welten geht die Teilung nicht auf;
-        // der Rundungsrest fließt an die Hauptwelt, die Summe bleibt genau der Sold.
-        let mut galaxy = galaxy;
-        let capital = polities.list[0].capital.unwrap();
-        let colonies: Vec<_> = galaxy
-            .planets
-            .iter()
-            .filter(|planet| planet.owner.is_none())
-            .take(2)
-            .map(|planet| planet.id)
-            .collect();
-        for (colony, people) in colonies.iter().zip([333.3, 77.7]) {
-            galaxy.planet_mut(*colony).owner = Some(me);
-            galaxy.planet_mut(*colony).population = people;
-        }
-        let population = galaxy.population_of(me);
-        let before = economy.clone();
-        pay_upkeep(
-            &galaxy,
-            &mut economy,
-            &mut fleets,
-            &polities,
-            &mut chronicle,
-            &data,
-            0,
-        );
-        let gained = |planet: crate::ids::PlanetId| {
-            economy.planet(planet).households - before.planet(planet).households
-        };
-        let total: Money = galaxy.planets_of(me).map(|planet| gained(planet.id)).sum();
-        assert_eq!(total, due);
-        assert_eq!(before.treasury(me) - economy.treasury(me), due);
-        for colony in &colonies {
-            let share = due as f64 * galaxy.planet(*colony).population / population;
-            assert_eq!(gained(*colony), share as Money, "Anteil nach Bevölkerung");
-        }
-        let rounded: Money = galaxy
-            .planets_of(me)
-            .map(|planet| (due as f64 * planet.population / population) as Money)
-            .sum();
-        assert!(rounded < due, "die Teilung geht nicht auf");
-        assert_eq!(
-            gained(capital),
-            (due as f64 * galaxy.planet(capital).population / population) as Money + due - rounded
-        );
-        assert_eq!(fleets.arrears_of(me), 0.0);
 
         // Mehr Schiffe, mehr Sold.
         let cruiser = data.design_index("speer").unwrap();
@@ -964,15 +910,23 @@ mod tests {
             pay_upkeep(&galaxy, economy, fleets, &polities, chronicle, &data, 0)
         };
 
-        // Die Kasse deckt nur ein Viertel: Das fließt, der Rest bleibt aus.
+        // Die Kasse deckt nur ein Viertel des Solds: Das fließt, der Rest bleibt aus. Der
+        // Rückstand misst, was vom ganzen Anspruch der Flotte fehlt, Sold und Wartung.
         let rich = economy.treasuries[0];
         economy.treasuries[0] = due / 4;
-        let capital = polities.list[0].capital.unwrap();
-        let before = economy.planet(capital).households;
+        let claim = due
+            + to_money(maintenance_cost(
+                &data,
+                &galaxy,
+                &economy,
+                &fleets,
+                &polities.list[0],
+            ));
+        assert!(claim > due, "zur Flotte gehören auch die Ersatzteile");
         month(&mut economy, &mut fleets, &mut chronicle);
         assert_eq!(economy.treasury(me), 0);
-        assert_eq!(economy.planet(capital).households - before, due / 4);
-        let missed = 1.0 - (due / 4) as f32 / due as f32;
+        assert_eq!(economy.staff_money(me), due / 4);
+        let missed = (1.0 - (due / 4) as f64 / claim as f64) as f32;
         assert!((fleets.arrears_of(me) - smoothing * missed).abs() < 1e-6);
         assert_eq!(fleets.arrears_of(PolityId(1)), 0.0);
         assert_eq!(chronicle.entries.len(), 1);

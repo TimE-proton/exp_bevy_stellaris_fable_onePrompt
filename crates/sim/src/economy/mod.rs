@@ -17,7 +17,7 @@ pub use capital::{
 };
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
-    abandon_dead_colonies, grow_population, produce_and_consume, target_price,
+    abandon_dead_colonies, grow_population, produce_and_consume, staff_consume, target_price,
     update_prices_and_wages,
 };
 pub use setup::{seed_colony, setup_economy};
@@ -307,6 +307,12 @@ pub struct Economy {
     /// der laufende Monat und die letzten zwölf.
     #[serde(default)]
     pub budgets: Vec<Budget>,
+    /// Geld derer, die im Dienst des Staates stehen (Besatzungen der Flotte, Forschende),
+    /// je Gemeinschaft: Sold und Gehälter gehen hierhin, nicht an die Haushalte der
+    /// Welten. Ausgegeben wird es Tag für Tag am Markt des Sitzes der Gemeinschaft
+    /// ([`staff_consume`]); was der Staatsdienst verbraucht, fehlt den übrigen.
+    #[serde(default)]
+    pub staff: Vec<Money>,
 }
 
 /// Faktor einer Gemeinschaft aus einer Liste je Gemeinschaft; fehlt der Eintrag, 1.
@@ -363,6 +369,9 @@ impl Economy {
         if self.budgets.len() < count {
             self.budgets.resize_with(count, Budget::default);
         }
+        if self.staff.len() < count {
+            self.staff.resize(count, 0);
+        }
     }
 
     /// Verbucht eine laufende Einnahme des Staates. Das Geld selbst ist schon in der
@@ -384,6 +393,12 @@ impl Economy {
         }
     }
 
+    /// Geld derer, die im Dienst des Staates stehen (siehe [`Economy::staff`]).
+    #[inline]
+    pub fn staff_money(&self, polity: PolityId) -> Money {
+        self.staff.get(polity.index()).copied().unwrap_or(0)
+    }
+
     /// Summe aller Konten der Wirtschaft (ohne Handelshäuser).
     pub fn money_in_accounts(&self) -> Money {
         let markets: Money = self.markets.iter().map(|market| market.cash).sum();
@@ -395,7 +410,8 @@ impl Economy {
             })
             .sum();
         let states: Money = self.treasuries.iter().sum();
-        markets + planets + states
+        let staff: Money = self.staff.iter().sum();
+        markets + planets + states + staff
     }
 
     /// Prüft, dass kein Wert entgleist ist. Gibt die erste Auffälligkeit zurück.
@@ -426,12 +442,16 @@ impl Economy {
         if self.treasuries.iter().any(|cash| *cash < 0) {
             return Some("Staatskasse negativ".into());
         }
+        if self.staff.iter().any(|cash| *cash < 0) {
+            return Some("Kasse des Staatsdienstes negativ".into());
+        }
         let count = self.treasuries.len();
         if self.tech_yield.len() != count
             || self.state_income.len() != count
             || self.state_income_running.len() != count
             || self.wage_bill_running.len() != count
             || self.budgets.len() != count
+            || self.staff.len() != count
         {
             return Some("Listen je Gemeinschaft sind unvollständig".into());
         }

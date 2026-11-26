@@ -304,6 +304,19 @@ impl Economy {
         self.book_paid(polity, claim, amount);
     }
 
+    /// Zahlt Sold oder Gehälter an die, die im Dienst des Staates stehen
+    /// ([`Economy::staff`]), und verbucht die Zahlung beim Anspruch. Gezahlt wird nie mehr,
+    /// als die Staatskasse hergibt. Gibt den gezahlten Betrag zurück.
+    pub fn pay_staff(&mut self, polity: PolityId, claim: Claim, amount: Money) -> Money {
+        self.sync_polities();
+        let Some(treasury) = self.treasuries.get_mut(polity.index()) else {
+            return 0;
+        };
+        let paid = pay(treasury, &mut self.staff[polity.index()], amount);
+        self.book_paid(polity, claim, paid);
+        paid
+    }
+
     /// Schließt den Haushaltsmonat jeder Gemeinschaft und eröffnet den nächsten. Gehört an
     /// den Monatsabschluss, sobald die laufenden Einnahmen des Monats feststehen
     /// ([`Economy::close_income_month`]) und bevor Schuldendienst und Ansprüche bezahlt
@@ -479,4 +492,402 @@ pub fn settle_budget(
     budget.current.reserve_target = reserve;
     budget.current.unfunded = unfunded;
     injections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::economy::{setup_economy, staff_consume, to_credits, to_money};
+    use crate::fleet::testing::setup;
+    use crate::galaxy::Galaxy;
+    use crate::polity::Polities;
+
+    const ME: PolityId = PolityId(0);
+
+    fn start() -> (GameData, Galaxy, Polities, Economy) {
+        let (data, galaxy, polities, _) = setup();
+        let mut economy = setup_economy(&data, &galaxy, &polities);
+        // Kein Kontor braucht Kapital: Der Anspruch „Kontore“ bleibt in diesen Prüfungen leer.
+        for market in &mut economy.markets {
+            market.cash = to_money(10_000.0);
+        }
+        (data, galaxy, polities, economy)
+    }
+
+    fn households(galaxy: &Galaxy, economy: &Economy) -> Money {
+        galaxy
+            .planets_of(ME)
+            .map(|planet| economy.planet(planet.id).households)
+            .sum()
+    }
+
+    fn wants(fleet: f64, procurement: f64, research: f64) -> Wants {
+        Wants::from([
+            (Claim::Fleet, to_money(fleet)),
+            (Claim::Procurement, to_money(procurement)),
+            (Claim::Research, to_money(research)),
+        ])
+    }
+
+    /// Schließt für die Gemeinschaft 0 einen Monat ab, der `revenue` eingebracht hat und an
+    /// dessen Ende `treasury` in der Kasse liegt (die Einnahmen eingeschlossen).
+    fn close(
+        data: &GameData,
+        galaxy: &Galaxy,
+        economy: &mut Economy,
+        treasury: Money,
+        revenue: f64,
+        wants: &Wants,
+    ) -> BudgetMonth {
+        economy.treasuries[ME.index()] = treasury;
+        economy.state_income[ME.index()] = to_money(revenue);
+        let day = economy.budgets[ME.index()].history.len() as u64 * 30;
+        economy.open_budget_month(day, data.balance.economy.income_tax);
+        let injections = settle_budget(galaxy, economy, data, ME, wants);
+        assert!(injections.is_empty());
+        economy.budget(ME).unwrap().current.clone()
+    }
+
+    #[test]
+    fn claims_are_served_in_their_order_and_the_last_are_cut_first() {
+        let (data, galaxy, _, fresh) = start();
+        let balance = &data.balance.economy;
+        let reserve = state_reserve(&fresh, &data, ME, galaxy.population_of(ME));
+        assert!(reserve > 0);
+        assert_eq!(
+            Claim::ALL.to_vec(),
+            {
+                let mut sorted = Claim::ALL.to_vec();
+                sorted.sort();
+                sorted
+            },
+            "die Rangfolge ist die Reihenfolge der Varianten"
+        );
+        let asked = wants(500.0, 300.0, 600.0);
+        let civil = to_money(4000.0 * balance.civil_share);
+
+        // Ein guter Monat über einer vollen Rücklage: Jeder Anspruch bekommt, was er
+        // verlangt; vom Rest über der Rücklage geht der Anteil der Ausschüttung an die
+        // Haushalte, der andere bleibt in der Kasse.
+        let mut economy = fresh.clone();
+        let before = households(&galaxy, &economy);
+        let treasury = reserve + to_money(10_000.0);
+        let month = close(&data, &galaxy, &mut economy, treasury, 4000.0, &asked);
+        let handout = ((to_money(10_000.0 - 500.0 - 300.0 - 600.0) - civil) as f64
+            * balance.handout_share) as Money;
+        assert_eq!(
+            month.line(Claim::Civil),
+            Line {
+                wanted: civil,
+                paid: civil
+            }
+        );
+        assert_eq!(month.handout(), handout);
+        assert_eq!(households(&galaxy, &economy) - before, civil + handout);
+        assert_eq!(month.unfunded, 0);
+        assert_eq!(economy.allowance(ME, Claim::Fleet), to_money(500.0));
+        assert_eq!(economy.allowance(ME, Claim::Research), to_money(600.0));
+        // Die Beschaffung kauft den Monat über aus allem, was nicht anderen bewilligt ist.
+        let left = treasury - civil - handout;
+        assert_eq!(economy.treasury(ME), left);
+        assert_eq!(
+            economy.allowance(ME, Claim::Procurement),
+            left - to_money(500.0 + 600.0)
+        );
+        assert_eq!(month.treasury, left - to_money(500.0 + 600.0));
+        assert_eq!(month.reserve_target, reserve);
+        assert_eq!(month.line(Claim::Reserve), Line::default());
+        // Der Abschluss verschiebt Geld und schafft keines.
+        assert_eq!(
+            economy.money_in_accounts(),
+            fresh.money_in_accounts() - fresh.treasury(ME) + treasury
+        );
+
+        // Die Kasse reicht nicht für alle: Gekürzt wird von hinten. Grundleistungen und
+        // Flotte bekommen alles, die Beschaffung den Rest, die Forschung nichts; nichts
+        // füllt die Rücklage, nichts wird ausgeschüttet.
+        let mut economy = fresh.clone();
+        let month = close(
+            &data,
+            &galaxy,
+            &mut economy,
+            to_money(2600.0),
+            4000.0,
+            &asked,
+        );
+        assert_eq!(month.line(Claim::Civil).paid, civil);
+        assert_eq!(economy.allowance(ME, Claim::Fleet), to_money(500.0));
+        assert_eq!(economy.allowance(ME, Claim::Research), 0);
+        assert_eq!(month.unfunded, to_money(200.0 + 600.0));
+        assert_eq!(month.handout(), 0);
+        assert_eq!(
+            month.line(Claim::Reserve),
+            Line {
+                wanted: reserve,
+                paid: 0
+            }
+        );
+
+        // Noch weniger: Schon die Grundleistungen werden gekürzt, und die Flotte geht leer
+        // aus. Wie sie damit umgeht (Soldrückstand), ist ihre Sache.
+        let mut economy = fresh.clone();
+        let month = close(
+            &data,
+            &galaxy,
+            &mut economy,
+            to_money(1500.0),
+            4000.0,
+            &asked,
+        );
+        assert_eq!(
+            month.line(Claim::Civil),
+            Line {
+                wanted: civil,
+                paid: to_money(1500.0)
+            }
+        );
+        assert_eq!(economy.allowance(ME, Claim::Fleet), 0);
+        assert_eq!(month.unfunded, civil - to_money(1500.0) + to_money(1400.0));
+        assert_eq!(economy.treasury(ME), 0);
+    }
+
+    #[test]
+    fn research_lives_on_the_month_and_never_on_the_reserve() {
+        let (data, galaxy, _, fresh) = start();
+        let balance = &data.balance.economy;
+        let reserve = state_reserve(&fresh, &data, ME, galaxy.population_of(ME));
+        let asked = wants(300.0, 0.0, 600.0);
+
+        // Die Rücklage ist voll, der Monat bringt 1000: Nach Grundleistungen und Flotte
+        // bleiben davon 200. Mehr bekommt die Forschung nicht, obwohl die Kasse voll ist.
+        let mut economy = fresh.clone();
+        let treasury = reserve + to_money(1000.0);
+        let month = close(&data, &galaxy, &mut economy, treasury, 1000.0, &asked);
+        let civil = to_money(1000.0 * balance.civil_share);
+        assert_eq!(month.line(Claim::Civil).paid, civil);
+        let rest = to_money(1000.0 - 300.0) - civil;
+        assert!(rest > 0 && rest < to_money(600.0));
+        assert_eq!(economy.allowance(ME, Claim::Research), rest);
+        assert_eq!(month.unfunded, to_money(600.0) - rest);
+        assert_eq!(month.handout(), 0);
+
+        // Die Flotte dagegen greift die Rücklage an: Ohne jede Einnahme bekommt sie ihren
+        // Sold aus ihr, die Forschung nichts.
+        let mut economy = fresh.clone();
+        close(&data, &galaxy, &mut economy, reserve, 0.0, &asked);
+        assert_eq!(economy.allowance(ME, Claim::Fleet), to_money(300.0));
+        assert_eq!(economy.allowance(ME, Claim::Research), 0);
+
+        // Was vor dem Monat schon über der Rücklage lag, steht der Forschung offen. Eine
+        // angegriffene Rücklage füllt sich erst nach ihr wieder auf: Die Forschung geht
+        // der Rücklage vor, die Rücklage der Ausschüttung.
+        let mut economy = fresh.clone();
+        let treasury = reserve + to_money(1500.0);
+        close(&data, &galaxy, &mut economy, treasury, 1000.0, &asked);
+        assert_eq!(economy.allowance(ME, Claim::Research), to_money(600.0));
+        let mut economy = fresh.clone();
+        let short = reserve - to_money(400.0) + to_money(1000.0);
+        let month = close(&data, &galaxy, &mut economy, short, 1000.0, &asked);
+        assert_eq!(economy.allowance(ME, Claim::Research), rest);
+        assert_eq!(
+            month.line(Claim::Reserve),
+            Line {
+                wanted: to_money(400.0),
+                paid: 0
+            }
+        );
+        let month = close(
+            &data,
+            &galaxy,
+            &mut economy.clone(),
+            short,
+            1000.0,
+            &wants(0.0, 0.0, 0.0),
+        );
+        // Ohne Flotte und Forschung füllt derselbe Monat die Rücklage und schüttet vom Rest aus.
+        assert_eq!(month.line(Claim::Reserve).paid, to_money(400.0));
+        assert!(month.handout() > 0);
+    }
+
+    #[test]
+    fn the_read_model_keeps_twelve_months_and_sums_them() {
+        let (data, galaxy, _, mut economy) = start();
+        let reserve = state_reserve(&economy, &data, ME, galaxy.population_of(ME));
+        let asked = wants(0.0, 0.0, 0.0);
+        let mut revenues = Vec::new();
+        let mut handouts = Vec::new();
+        for index in 0..15u32 {
+            let revenue = 1000.0 + 100.0 * index as f64;
+            let treasury = economy.treasury(ME).max(reserve) + to_money(revenue);
+            let month = close(&data, &galaxy, &mut economy, treasury, revenue, &asked);
+            // Eine Zahlung mitten im Monat steht in der Zeile ihres Anspruchs.
+            economy.want(ME, Claim::Procurement, to_money(50.0));
+            economy.spend(ME, Claim::Procurement, to_money(40.0));
+            revenues.push(to_money(revenue));
+            handouts.push(month.handout());
+        }
+        let budget = economy.budget(ME).unwrap();
+        // Abgeschlossen sind alle Monate bis auf den laufenden; aufbewahrt die letzten zwölf.
+        assert_eq!(budget.history.len(), BUDGET_HISTORY);
+        let last = budget.last().unwrap();
+        assert_eq!(last.revenue, revenues[13]);
+        assert_eq!(budget.current.revenue, revenues[14]);
+        assert_eq!(
+            last.line(Claim::Procurement),
+            Line {
+                wanted: to_money(50.0),
+                paid: to_money(40.0)
+            }
+        );
+        let year = budget.year();
+        assert_eq!(year.revenue, revenues[2..14].iter().sum::<Money>());
+        assert_eq!(year.handout(), handouts[2..14].iter().sum::<Money>());
+        assert_eq!(year.line(Claim::Procurement).paid, to_money(12.0 * 40.0));
+        assert_eq!(
+            year.spending(),
+            year.line(Claim::Civil).paid + year.line(Claim::Procurement).paid
+        );
+        assert_eq!(year.remainder(), year.revenue - year.spending());
+        assert_eq!(year.unpaid(), to_money(12.0 * 10.0));
+        // Die Grundleistungen folgen dem Mittel der Einnahmen, nicht dem einzelnen Monat.
+        let mean = revenues[2..15].iter().sum::<Money>() as f64 / 13.0;
+        assert_eq!(
+            budget.current.line(Claim::Civil).wanted,
+            (mean * data.balance.economy.civil_share).round() as Money
+        );
+        assert_eq!(economy.find_anomaly(), None);
+    }
+
+    #[test]
+    fn other_movements_of_the_treasury_show_as_their_own_figure() {
+        let (data, galaxy, _, mut economy) = start();
+        let reserve = state_reserve(&economy, &data, ME, galaxy.population_of(ME));
+        let asked = wants(0.0, 0.0, 0.0);
+        close(&data, &galaxy, &mut economy, reserve, 0.0, &asked);
+        // Geld der Notenbank kommt hinzu, eine Koloniegründung geht ab: Beides läuft am
+        // Haushalt vorbei und steht im nächsten Monat als Saldo.
+        economy.treasuries[ME.index()] += to_money(700.0 - 250.0);
+        let treasury = economy.treasury(ME) + to_money(1000.0);
+        let month = close(&data, &galaxy, &mut economy, treasury, 1000.0, &asked);
+        assert_eq!(month.other, to_money(450.0));
+    }
+
+    #[test]
+    fn a_higher_tax_leaves_the_civil_base_where_it_was() {
+        let (data, galaxy, _, fresh) = start();
+        let standard = data.balance.economy.income_tax;
+        let run = |rate: f64| {
+            let mut economy = fresh.clone();
+            economy.tax_rates[ME.index()] = rate;
+            // Lohnsumme 10 000: Die Lohnsteuer bringt den Satz davon, dazu 500 an Zöllen.
+            let wages = 10_000.0;
+            economy.wage_bill_running[ME.index()] = to_money(wages);
+            let revenue = wages * rate + 500.0;
+            let treasury = fresh.treasury(ME) + to_money(revenue);
+            let month = close(
+                &data,
+                &galaxy,
+                &mut economy,
+                treasury,
+                revenue,
+                &wants(0.0, 0.0, 0.0),
+            );
+            (
+                month.revenue,
+                month.standard_revenue,
+                month.line(Claim::Civil).wanted,
+            )
+        };
+        let (usual, usual_standard, usual_civil) = run(standard);
+        let (raised, raised_standard, raised_civil) = run(standard + 0.10);
+        let (lowered, _, lowered_civil) = run(standard - 0.05);
+        assert_eq!(usual, usual_standard);
+        assert_eq!(raised - usual, to_money(1000.0));
+        assert_eq!(usual - lowered, to_money(500.0));
+        // Der Zuwachs aus der höheren Steuer steht für alles andere frei; wer sie senkt,
+        // muss anderswo kürzen.
+        assert_eq!(raised_standard, usual_standard);
+        assert_eq!(raised_civil, usual_civil);
+        assert_eq!(lowered_civil, usual_civil);
+    }
+
+    #[test]
+    fn pay_goes_to_the_staff_who_spend_it_at_the_seat() {
+        let (data, galaxy, polities, mut economy) = start();
+        let balance = &data.balance.economy;
+        let seat = polities.get(ME).seat(&galaxy).unwrap();
+        assert_eq!(Some(seat), polities.get(ME).capital);
+        let system = galaxy.planet(seat).system;
+        let seats: Vec<_> = polities.list.iter().map(|p| p.seat(&galaxy)).collect();
+        let before = economy.clone();
+
+        // Sold und Gehälter verlassen die Staatskasse und stehen beim Anspruch; die
+        // Haushalte der Welten bekommen davon nichts.
+        let paid = economy.pay_staff(ME, Claim::Research, to_money(900.0));
+        assert_eq!(paid, to_money(900.0));
+        assert_eq!(before.treasury(ME) - economy.treasury(ME), paid);
+        assert_eq!(economy.staff_money(ME), paid);
+        assert_eq!(
+            economy
+                .budget(ME)
+                .unwrap()
+                .current
+                .line(Claim::Research)
+                .paid,
+            paid
+        );
+        assert_eq!(households(&galaxy, &economy), households(&galaxy, &before));
+        // Mehr als die Kasse hergibt, wird nie gezahlt.
+        let mut poor = economy.clone();
+        poor.treasuries[ME.index()] = to_money(10.0);
+        assert_eq!(
+            poor.pay_staff(ME, Claim::Fleet, to_money(50.0)),
+            to_money(10.0)
+        );
+
+        // Am Markt des Sitzes kauft der Staatsdienst ein, was Haushalte kaufen, im
+        // Verhältnis des Grundbedarfs und je Tag für einen Teil seines Geldes.
+        for need in &balance.needs {
+            economy.markets[system.index()].stock[need.good_id.index()] = 500.0;
+        }
+        let stocked = economy.clone();
+        staff_consume(&galaxy, &mut economy, &data, &seats);
+        let spent = stocked.staff_money(ME) - economy.staff_money(ME);
+        let budget = to_credits(paid) * balance.spend_rate;
+        assert!((to_credits(spent) - budget).abs() < 0.01, "{spent}");
+        assert_eq!(
+            economy.market(system).cash - stocked.market(system).cash,
+            spent
+        );
+        let taken: Vec<f64> = balance
+            .needs
+            .iter()
+            .map(|need| {
+                stocked.market(system).stock_of(need.good_id)
+                    - economy.market(system).stock_of(need.good_id)
+            })
+            .collect();
+        for (need, amount) in balance.needs.iter().zip(&taken) {
+            assert!(*amount > 0.0);
+            let ratio = amount / taken[0] - need.per_million / balance.needs[0].per_million;
+            assert!(ratio.abs() < 1e-6, "{ratio}");
+            assert!(economy.market(system).demand_today[need.good_id.index()] > 0.0);
+        }
+        // Dieser Verbrauch ist nicht der der Haushalte: Ihr Geld und ihre Deckung bleiben.
+        assert_eq!(households(&galaxy, &economy), households(&galaxy, &stocked));
+        assert_eq!(
+            economy.planet(seat).needs_met,
+            stocked.planet(seat).needs_met
+        );
+        assert_eq!(economy.money_in_accounts(), before.money_in_accounts());
+
+        // Gibt der Markt nichts her, bleibt das Geld in der Kasse des Staatsdienstes.
+        for need in &balance.needs {
+            economy.markets[system.index()].stock[need.good_id.index()] = 0.0;
+        }
+        let waiting = economy.staff_money(ME);
+        staff_consume(&galaxy, &mut economy, &data, &seats);
+        assert_eq!(economy.staff_money(ME), waiting);
+        assert_eq!(economy.find_anomaly(), None);
+    }
 }
