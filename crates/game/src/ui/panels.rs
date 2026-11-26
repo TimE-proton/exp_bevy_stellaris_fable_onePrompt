@@ -742,6 +742,7 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
         .iter()
         .map(|planet| planet.population)
         .sum();
+    let mut truces: Vec<(PolityId, u64)> = Vec::new();
     egui::Grid::new("gemeinschaften")
         .striped(true)
         .num_columns(6)
@@ -800,9 +801,12 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                                 .truce_until(player, polity.id, sim.clock.day())
                         {
                             // Der Kern lehnte die Erklärung ab; die Frist nennt er selbst.
+                            // Der Knopf bleibt so schmal wie seine Spalte, die Tage stehen
+                            // unter der Liste: Eine längere Beschriftung liefe aus dem Fenster.
                             let days = until - sim.clock.day();
-                            ui.add_enabled(false, egui::Button::new(truce_label(days)).small())
+                            ui.add_enabled(false, egui::Button::new("Krieg").small())
                                 .on_disabled_hover_text(truce_text(days));
+                            truces.push((polity.id, days));
                         } else if ui
                             .small_button("Krieg")
                             .on_hover_text(
@@ -825,6 +829,9 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
     for (a, b) in &sim.diplomacy.wars {
         ui.label(detail(war_line(sim, *a, *b)).color(MUTED));
     }
+    for (polity, days) in truces {
+        ui.label(detail(truce_line(&sim.polities.get(polity).name, days)).color(MUTED));
+    }
 }
 
 /// Eine Zeile je Krieg: Wer mit wem im Krieg liegt, sieht auch, wer nicht beteiligt ist.
@@ -844,9 +851,9 @@ pub fn truce_text(days: u64) -> String {
     )
 }
 
-/// Beschriftung des gesperrten Knopfs während der Waffenruhe.
-pub fn truce_label(days: u64) -> String {
-    format!("Krieg in {days} T.")
+/// Eine Zeile je Waffenruhe des Spielers unter der Liste: mit wem und wie lange noch.
+pub fn truce_line(name: &str, days: u64) -> String {
+    format!("Waffenruhe mit {name}: noch {days} Tage")
 }
 
 fn pause_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {

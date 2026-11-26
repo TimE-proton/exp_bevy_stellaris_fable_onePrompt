@@ -161,9 +161,9 @@ Mit Meilenstein 4 führt der Spieler Flotten und Werften, sieht den Staatshausha
 die Forschung, verfolgt die Gefechte der Partie in 3D und kann Schiffe stilllegen; die
 anderen Gemeinschaften rüsten, führen ihre Flotten und legen Schiffe still, ohne dass
 jemand sie lenkt. „Krieg“ und „Frieden“ stehen in der Übersicht bei den Gemeinschaften;
-nach einem Friedensschluss gilt eine Waffenruhe, so lange nennt der gesperrte Knopf die
-verbleibenden Tage. Die Liste nennt je Gemeinschaft die Zahl ihrer Schiffe und darunter
-jeden laufenden Krieg.
+nach einem Friedensschluss gilt eine Waffenruhe, so lange ist der Knopf „Krieg“ gesperrt,
+und eine Zeile unter der Liste nennt die verbleibenden Tage. Die Liste nennt je
+Gemeinschaft die Zahl ihrer Schiffe und darunter jeden laufenden Krieg.
 
 Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
 siehe unten.

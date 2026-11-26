@@ -1172,7 +1172,8 @@ mod tests {
 
     #[test]
     fn a_truce_locks_the_war_button_and_the_core_names_its_reason() {
-        use crate::ui::panels::truce_label;
+        use crate::ui::panels::truce_line;
+        use bevy::prelude::Vec2;
         let (mut game, me) = campaign_with_window();
         game.click_on(TITLE);
         let enemy = game
@@ -1191,12 +1192,42 @@ mod tests {
             .resource::<sim::diplomacy::Diplomacy>()
             .truce_until(me, enemy, day)
             .expect("nach dem Frieden gilt eine Waffenruhe");
-        // Der Knopf ist gesperrt und nennt die Tage, die der Kern führt.
-        assert!(
-            game.disabled_button(&truce_label(until - day)).is_some(),
-            "kein gesperrter Knopf „{}“",
-            truce_label(until - day)
-        );
+        // Der Knopf ist gesperrt, die Tage des Kerns stehen unter der Liste. Knopf und Zeile
+        // liegen in beiden Fenstergrößen ganz im Fenster: Der gesperrte Knopf steht in der
+        // Spalte der übrigen und ist nicht breiter als sie.
+        let name = game.resource::<Polities>().get(enemy).name.clone();
+        let line = truce_line(&name, until - day);
+        for size in [Vec2::new(1280.0, 720.0), Vec2::new(1600.0, 900.0)] {
+            game.resize(size);
+            game.frames(4);
+            let locked = game
+                .disabled_button("Krieg")
+                .expect("kein gesperrter Knopf „Krieg“");
+            let open = game.button("Krieg").expect("kein offener Knopf „Krieg“");
+            assert!(
+                (locked.x - open.x).abs() < 0.5,
+                "gesperrt bei {}, offen bei {}",
+                locked.x,
+                open.x
+            );
+            assert!(
+                locked.x + 24.0 < size.x,
+                "Knopf bei {} von {}",
+                locked.x,
+                size.x
+            );
+            let (_, rect) = game
+                .labels()
+                .into_iter()
+                .find(|(text, _)| *text == line)
+                .unwrap_or_else(|| panic!("keine Zeile „{line}“"));
+            assert!(
+                rect.right() <= size.x,
+                "Zeile bis {} von {}",
+                rect.right(),
+                size.x
+            );
+        }
         // Solange der Krieg lief, stand er bei den Gemeinschaften; jetzt nicht mehr.
         assert!(
             !game
