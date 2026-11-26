@@ -1,5 +1,6 @@
 //! Läufe ohne Grafik: Grundlage für Tests und das `headless`-Programm.
 
+use crate::ai::{AiState, MilitaryMode};
 use crate::clock::{DAYS_PER_MONTH, SimClock, TICKS_PER_DAY};
 use crate::command::{CommandLog, CommandQueue, CommandSource, ReplayScript, SimCommand};
 use crate::data::GameData;
@@ -88,6 +89,23 @@ impl Headless {
             CommandSource::Player,
             command,
         );
+    }
+
+    /// Legt fest, wie weit die KI eine Gemeinschaft militärisch führt; ohne `who` gilt es
+    /// für alle, auch für solche, die erst entstehen. Eine Einstellung der Partie wie
+    /// `SimConfig::player`, kein Befehl: für Drehbücher und Prüfungen, die Flotten selbst
+    /// führen, und für den Vergleich mit einer Flotte, die untätig bleibt.
+    pub fn set_military_mode(&mut self, who: Option<PolityId>, mode: MilitaryMode) {
+        let mut ai = self.world_mut().resource_mut::<AiState>();
+        match who {
+            Some(polity) => {
+                ai.modes.insert(polity, mode);
+            }
+            None => {
+                ai.modes.clear();
+                ai.default_mode = mode;
+            }
+        }
     }
 
     /// Spielt ein Befehlsprotokoll ab (Wiedergabe einer früheren Partie).
@@ -371,6 +389,19 @@ pub struct RunSummary {
     pub ships_lost: u64,
     /// Erster Invariantenverstoß, falls es einen gab.
     pub violation: Option<String>,
+    /// Beendete Gefechte je Ausgang, in der Reihenfolge von `BattleOutcome::ALL`:
+    /// entschieden, Patt, Zeitgrenze, eingestellt, niemand hält das Feld.
+    pub battle_outcomes: [u32; 5],
+    /// Befehle der KI, die angenommen und die abgelehnt wurden.
+    pub ai_applied: u64,
+    pub ai_rejected: u64,
+}
+
+impl RunSummary {
+    /// Anteil der KI-Befehle, die abgelehnt wurden (0..1).
+    pub fn ai_rejected_share(&self) -> f64 {
+        self.ai_rejected as f64 / (self.ai_applied + self.ai_rejected).max(1) as f64
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -405,6 +436,23 @@ pub struct PolitySummary {
     pub budget: crate::economy::BudgetMonth,
     /// Abgeschlossene Monate, die in `budget` stecken (höchstens zwölf).
     pub budget_months: usize,
+    /// Über die ganze Partie: Schiffe, die die Werften ausgeliefert haben, und Schiffe,
+    /// die stillgelegt wurden.
+    pub ships_built: u32,
+    pub ships_laid_up: u32,
+    /// Flotten, die in einem Gefecht mit allen Schiffen verloren gingen.
+    pub fleets_lost: u32,
+    /// Monatserste im Krieg und Monatserste mit Soldrückstand.
+    pub months_at_war: u32,
+    pub months_in_arrears: u32,
+    /// Bauwert aller Schiffe in Credits.
+    pub fleet_value: f64,
+    /// Tage, an denen eine eigene Flotte ein fremdes System gesperrt hielt, und begonnene
+    /// Angriffe der KI-Führung (Jagd auf die gegnerische Hauptflotte oder Blockade).
+    pub blockade_days: u32,
+    pub offensives: u32,
+    /// Entschiedene Gefechte, in denen die Gemeinschaft am Ende das Feld hielt.
+    pub battles_won: u32,
 }
 
 pub fn summarize(sim: &Headless) -> RunSummary {
@@ -416,6 +464,7 @@ pub fn summarize(sim: &Headless) -> RunSummary {
     let battles = sim.world().resource::<crate::fleet::Battles>();
     let economy = sim.world().resource::<crate::economy::Economy>();
     let finance = sim.world().resource::<crate::finance::Finance>();
+    let ai = sim.world().resource::<AiState>();
     let cohesion = |polity: PolityId| {
         let (mut weight, mut weighted) = (0.0, 0.0);
         for planet in galaxy.planets_of(polity) {
@@ -466,12 +515,26 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 budget_months: economy
                     .budget(polity.id)
                     .map_or(0, |budget| budget.history.len()),
+                ships_built: fleets.tally_of(polity.id).built,
+                ships_laid_up: fleets.tally_of(polity.id).laid_up,
+                fleets_lost: battles.fleets_lost_by(polity.id),
+                months_at_war: fleets.tally_of(polity.id).months_at_war,
+                months_in_arrears: fleets.tally_of(polity.id).months_in_arrears,
+                fleet_value: fleets
+                    .of(polity.id)
+                    .fold(0.0, |sum, fleet| sum + fleet.build_value(data)),
+                blockade_days: fleets.tally_of(polity.id).blockade_days,
+                offensives: ai.plan(polity.id).offensives,
+                battles_won: battles.won_by(polity.id),
             })
             .collect(),
         economy: economy_stats(sim.world()),
         battles: battles.next_id as u64,
         ships_lost: battles.total_ships_lost() as u64,
         violation: check_invariants(sim.world()).err(),
+        battle_outcomes: battles.outcomes,
+        ai_applied: sim.command_log().ai_applied,
+        ai_rejected: sim.command_log().ai_rejected,
     }
 }
 
@@ -495,8 +558,9 @@ pub enum YardChoice {
 /// Was ein Ereignis eines Drehbuchs auslöst.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptedAct {
-    /// A erklärt B den Krieg und schickt alle seine Flotten im Blockadeauftrag in das
-    /// Heimatsystem von B.
+    /// A erklärt B den Krieg. Ruht die militärische Führung von A
+    /// ([`MilitaryMode::Resting`]), schickt das Drehbuch außerdem alle Flotten von A im
+    /// Blockadeauftrag in das Heimatsystem von B; sonst führt die KI sie selbst.
     War { a: PolityId, b: PolityId },
     /// A schließt mit B Frieden.
     Peace { a: PolityId, b: PolityId },
@@ -507,6 +571,19 @@ pub enum ScriptedAct {
         ships: Vec<(u16, u32)>,
         yard: YardChoice,
     },
+    /// Grenzkrieg: A erklärt seinem nächsten Nachbarn den Krieg ([`nearest_neighbour`]).
+    /// Wer das ist, entscheidet sich an dem Tag in der Partie.
+    BorderWar { a: PolityId },
+    /// A schließt Frieden mit allen, mit denen es im Krieg liegt.
+    PeaceWithAll { a: PolityId },
+    /// Legt fest, wie weit die KI eine Gemeinschaft militärisch führt (ohne `who` alle):
+    /// siehe [`Headless::set_military_mode`].
+    Mode {
+        who: Option<PolityId>,
+        mode: MilitaryMode,
+    },
+    /// Wie `Mode`, aber für den nächsten Nachbarn von `of` ([`nearest_neighbour`]).
+    NeighbourMode { of: PolityId, mode: MilitaryMode },
     /// Ein Flottenprogramm: Von diesem Tag an hält die Gemeinschaft ihre Marine auf dem
     /// `factor`-fachen der Startflotte und bestellt zu jedem Monatsbeginn nach, was fehlt.
     /// Faktor 0 beendet das Programm. Ohne `who` gilt es für jede lebende Gemeinschaft.
@@ -514,13 +591,14 @@ pub enum ScriptedAct {
 }
 
 impl ScriptedAct {
-    /// Reihenfolge am selben Tag: erst Frieden, dann Krieg, dann Bestellungen.
+    /// Reihenfolge am selben Tag: erst die Führung, dann Frieden, Krieg, Bestellungen.
     fn rank(&self) -> u8 {
         match self {
-            ScriptedAct::Peace { .. } => 0,
-            ScriptedAct::War { .. } => 1,
-            ScriptedAct::Order { .. } => 2,
-            ScriptedAct::Navy { .. } => 3,
+            ScriptedAct::Mode { .. } | ScriptedAct::NeighbourMode { .. } => 0,
+            ScriptedAct::Peace { .. } | ScriptedAct::PeaceWithAll { .. } => 1,
+            ScriptedAct::War { .. } | ScriptedAct::BorderWar { .. } => 2,
+            ScriptedAct::Order { .. } => 3,
+            ScriptedAct::Navy { .. } => 4,
         }
     }
 }
@@ -544,6 +622,18 @@ impl ScriptedEvent {
         Self {
             day,
             act: ScriptedAct::Peace { a, b },
+        }
+    }
+
+    /// Vom ersten Tag an ruht die militärische Führung aller Gemeinschaften durch die KI:
+    /// für Drehbücher, die Flotten und Rüstung selbst führen.
+    pub fn rest_military() -> Self {
+        Self {
+            day: 0,
+            act: ScriptedAct::Mode {
+                who: None,
+                mode: MilitaryMode::Resting,
+            },
         }
     }
 }
@@ -582,6 +672,27 @@ impl WarScript {
         match &event.act {
             ScriptedAct::Peace { a, b } => sim.issue(*a, SimCommand::MakePeace { target: *b }),
             ScriptedAct::War { a, b } => Self::open_war(sim, *a, *b),
+            ScriptedAct::BorderWar { a } => {
+                if let Some(b) = nearest_neighbour(sim.galaxy(), sim.polities(), *a) {
+                    Self::open_war(sim, *a, b);
+                }
+            }
+            ScriptedAct::PeaceWithAll { a } => {
+                let enemies: Vec<PolityId> = sim
+                    .world()
+                    .resource::<crate::diplomacy::Diplomacy>()
+                    .enemies_of(*a)
+                    .collect();
+                for target in enemies {
+                    sim.issue(*a, SimCommand::MakePeace { target });
+                }
+            }
+            ScriptedAct::Mode { who, mode } => sim.set_military_mode(*who, *mode),
+            ScriptedAct::NeighbourMode { of, mode } => {
+                if let Some(neighbour) = nearest_neighbour(sim.galaxy(), sim.polities(), *of) {
+                    sim.set_military_mode(Some(neighbour), *mode);
+                }
+            }
             ScriptedAct::Order { who, ships, yard } => {
                 for polity in Self::scope(sim, *who) {
                     let Some(planet) = Self::yard(sim, polity, *yard) else {
@@ -636,6 +747,10 @@ impl WarScript {
                 .is_some_and(|found| found.alive)
         };
         if !exists(a) || !exists(b) {
+            return;
+        }
+        // Flotten führt das Drehbuch nur, wo es die KI nicht tut.
+        if sim.world().resource::<AiState>().mode(a) != MilitaryMode::Resting {
             return;
         }
         let target = sim
@@ -778,6 +893,44 @@ impl WarScript {
         }
         advance(sim, day);
     }
+}
+
+/// Der nächste Nachbar einer Gemeinschaft: die lebende andere, deren Sitz dem eigenen im
+/// Routennetz am nächsten liegt (nach Sprüngen, bei Gleichstand die kleinere Nummer).
+pub fn nearest_neighbour(galaxy: &Galaxy, polities: &Polities, of: PolityId) -> Option<PolityId> {
+    let seat = |polity: &crate::polity::Polity| {
+        polity
+            .seat(galaxy)
+            .map(|planet| galaxy.planet(planet).system)
+    };
+    let own = polities
+        .list
+        .get(of.index())
+        .filter(|polity| polity.alive)?;
+    let hops = galaxy.hops_from(seat(own)?);
+    polities
+        .alive()
+        .filter(|polity| polity.id != of)
+        .filter_map(|polity| Some((hops[seat(polity)?.index()], polity.id)))
+        .min()
+        .map(|(_, id)| id)
+}
+
+/// Das Drehbuch „Grenzkrieg“ für Sweeps: Die erste Gemeinschaft erklärt zu Beginn des
+/// Jahres 25 ihrem nächsten Nachbarn den Krieg und schließt zu Beginn des Jahres 45
+/// Frieden.
+pub fn border_war() -> Vec<ScriptedEvent> {
+    let year = crate::clock::DAYS_PER_YEAR;
+    vec![
+        ScriptedEvent {
+            day: 25 * year,
+            act: ScriptedAct::BorderWar { a: PolityId(0) },
+        },
+        ScriptedEvent {
+            day: 45 * year,
+            act: ScriptedAct::PeaceWithAll { a: PolityId(0) },
+        },
+    ]
 }
 
 /// Wie [`run_ai_game`], prüft aber jährlich die Invarianten und meldet den ersten Verstoß.
@@ -1020,7 +1173,9 @@ mod tests {
     fn a_scripted_war_leads_to_battles_and_is_the_same_with_every_tick() {
         let data = data();
         // Angegeben in beliebiger Reihenfolge; gespielt nach Tagen.
+        // Das Drehbuch führt die Flotten selbst; die militärische Führung der KI ruht.
         let script = WarScript::new(vec![
+            ScriptedEvent::rest_military(),
             ScriptedEvent::peace(700, PolityId(0), PolityId(1)),
             ScriptedEvent::war(40, PolityId(0), PolityId(1)),
             ScriptedEvent::war(40, PolityId(2), PolityId(1)),
@@ -1092,6 +1247,8 @@ mod tests {
             .map(|(_, count)| *count as usize)
             .sum();
         let script = WarScript::new(vec![
+            // Rüstung und Flotten führt hier das Drehbuch, nicht die KI.
+            ScriptedEvent::rest_military(),
             // Jede Gemeinschaft bestellt eine Korvette bei ihrer Hauptwelt …
             ScriptedEvent {
                 day: 30,

@@ -1,6 +1,7 @@
 //! Börse, Besitz und Zusammenhalt als Ganzes.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::Sector;
@@ -559,6 +560,11 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
     let victim = PolityId(1);
     let mut blockaded = observer(7);
     let mut control = observer(7);
+    // Die Blockade stellt die Prüfung selbst; die militärische Führung der KI ruht in
+    // beiden Partien.
+    for sim in [&mut blockaded, &mut control] {
+        sim.set_military_mode(None, MilitaryMode::Resting);
+    }
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let colony = largest_colony(&blockaded, victim);

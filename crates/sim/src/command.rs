@@ -133,6 +133,14 @@ pub enum SimCommand {
         planet: PlanetId,
         class: ShipClass,
     },
+    /// Schiffe einer eigenen Flotte für immer stilllegen. Die Flotte muss in einem System
+    /// mit eigener Werft liegen. Die Schiffe verlassen das Spiel, Sold und Wartung enden;
+    /// einen Teil ihrer Bauteile (`military.layup_salvage`) verkauft der Staat am Markt
+    /// des Systems.
+    LayUpShips {
+        fleet: FleetId,
+        ships: Vec<ShipId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,5 +515,18 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         SimCommand::Retreat { fleet } => {
             fleet::order_retreat(&ctx.fleets, &mut ctx.battles, polity, *fleet)
         }
+        SimCommand::LayUpShips { fleet, ships } => fleet::lay_up(
+            &ctx.data,
+            &ctx.galaxy,
+            &mut ctx.economy,
+            &ctx.polities,
+            &mut ctx.fleets,
+            &mut ctx.chronicle,
+            tick,
+            polity,
+            *fleet,
+            ships,
+        )
+        .map(|_| ()),
     }
 }

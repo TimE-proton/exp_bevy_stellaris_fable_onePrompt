@@ -18,7 +18,7 @@ use crate::data::{GameData, Sector, ShipClass};
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Claim, Economy, Money, pay, purchase, recipes_of, to_credits, to_money};
 use crate::galaxy::Galaxy;
-use crate::ids::{GoodId, PlanetId, PolityId};
+use crate::ids::{FleetId, GoodId, PlanetId, PolityId, ShipId};
 use crate::polity::Polities;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -261,6 +261,114 @@ pub fn cancel_order(fleets: &mut Fleets, polity: PolityId, order: u32) -> Result
     Ok(())
 }
 
+/// Legt Schiffe einer eigenen Flotte für immer still. Die Flotte muss in einem System
+/// liegen, in dem ihre Gemeinschaft eine Werft hat, und darf weder marschieren noch im
+/// Gefecht stehen. Die Schiffe verlassen das Spiel; Sold und Wartung enden mit ihnen. Den
+/// Anteil `layup_salvage` ihrer Bauteile verkauft der Staat am Markt des Systems zum
+/// Geldkurs, soweit die Kasse des Kontors reicht; der Rest ist Schrott. Gibt den Erlös
+/// zurück.
+#[allow(clippy::too_many_arguments)]
+pub fn lay_up(
+    data: &GameData,
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    polities: &Polities,
+    fleets: &mut Fleets,
+    chronicle: &mut Chronicle,
+    tick: u64,
+    polity: PolityId,
+    fleet: FleetId,
+    ships: &[ShipId],
+) -> Result<Money, String> {
+    let found = super::own_fleet(fleets, polity, fleet)?;
+    if found.in_battle {
+        return Err(format!("{} steht im Gefecht", found.name));
+    }
+    if !found.route.is_empty() {
+        return Err(format!(
+            "{} ist unterwegs; stilllegen lässt sich nur im Dock",
+            found.name
+        ));
+    }
+    if ships.is_empty() {
+        return Err("keine Schiffe zum Stilllegen genannt".into());
+    }
+    for (index, ship) in ships.iter().enumerate() {
+        if found.ship(*ship).is_none() {
+            return Err(format!("Schiff {ship} gehört nicht zu {}", found.name));
+        }
+        if ships[..index].contains(ship) {
+            return Err(format!("Schiff {ship} ist mehrfach genannt"));
+        }
+    }
+    let (system, name) = (found.system, found.name.clone());
+    let has_yard = galaxy.planets_in(system).any(|planet| {
+        planet.owner == Some(polity)
+            && yard_slots(data, galaxy, economy, polities, fleets, planet.id) > 0
+    });
+    if !has_yard {
+        return Err(format!(
+            "{name} liegt in keinem System mit eigener Werft; nur dort lassen sich Schiffe stilllegen"
+        ));
+    }
+    let salvage = data.balance.military.layup_salvage;
+    let spread = data.balance.economy.spread;
+    let mut parts: BTreeMap<GoodId, f64> = BTreeMap::new();
+    let found = &mut fleets.list[fleet.index()];
+    found.ships.retain(|ship| {
+        let leaves = ships.contains(&ship.id);
+        if leaves {
+            for (good, amount) in &data.designs[ship.design as usize].stats.parts {
+                *parts.entry(*good).or_default() += *amount as f64 * salvage;
+            }
+        }
+        !leaves
+    });
+    // Verkauft wird wie von einem Frachter: zum Geldkurs, soweit das Kontor zahlen kann.
+    // Das Geld wird nur verschoben, vom Kontor in die Staatskasse.
+    economy.sync_polities();
+    let mut proceeds: Money = 0;
+    let market = &mut economy.markets[system.index()];
+    for (good, quantity) in parts {
+        let bid = market.bid(good, spread);
+        let sold = quantity
+            .min(to_credits(market.cash) / bid.max(1e-9))
+            .max(0.0);
+        if sold <= 0.0 {
+            continue;
+        }
+        let paid = pay(
+            &mut market.cash,
+            &mut economy.treasuries[polity.index()],
+            to_money(sold * bid),
+        );
+        market.stock[good.index()] += sold;
+        market.supply_today[good.index()] += sold;
+        market.turnover_today += to_credits(paid);
+        proceeds += paid;
+    }
+    fleets.tally_mut(polity).laid_up += ships.len() as u32;
+    fleets.refresh(data);
+    chronicle.push(
+        tick,
+        ChronicleKind::Finance,
+        Some(polity),
+        Some(system),
+        format!(
+            "{} legt bei {} {} der {name} still; der Verkauf der Bauteile bringt {:.0} Credits.",
+            polities.get(polity).name,
+            galaxy.system(system).name,
+            if ships.len() == 1 {
+                "ein Schiff".to_string()
+            } else {
+                format!("{} Schiffe", ships.len())
+            },
+            to_credits(proceeds)
+        ),
+    );
+    Ok(proceeds)
+}
+
 /// Warum ein Auftrag verfällt.
 enum Lapse {
     /// Die Welt gehört jetzt einer anderen Gemeinschaft.
@@ -494,6 +602,7 @@ pub fn advance_yards(
         let ship = fleets.next_ship_id();
         let fleet = host.unwrap_or_else(|| fleets.new_fleet(polities, polity, system));
         delivered = true;
+        fleets.tally_mut(polity).built += 1;
         let fleet = &mut fleets.list[fleet.index()];
         fleet.ships.push(Ship::from_yard(data, ship, order.design));
         let design = &data.designs[order.design as usize];

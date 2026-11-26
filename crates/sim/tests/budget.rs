@@ -7,6 +7,7 @@
 //! Rüstung, und ein langer Krieg nach Drehbuch.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::chronicle::Chronicle;
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR};
 use sim::economy::{Budget, Claim, Economy, Money};
@@ -91,10 +92,20 @@ fn needs_met(sim: &Headless) -> f64 {
     met / people
 }
 
+/// Eine Partie, in der die militärische Führung der KI ruht: Diese Prüfungen messen den
+/// Haushalt an Flotten fester Größe, die das Drehbuch vorgibt. Eine KI, die selbst rüstet,
+/// stilllegt und ihren Forschungsetat kürzt, würde genau das verändern, was verglichen
+/// wird. Wie sie mit dem Haushalt umgeht, prüft `tests/ai.rs`.
+fn staged(data: GameData, config: SimConfig) -> Headless {
+    let mut sim = Headless::new(data, config);
+    sim.set_military_mode(None, MilitaryMode::Resting);
+    sim
+}
+
 /// Spielt eine Partie ohne Eingriff und summiert jedes Jahr die abgeschlossenen
 /// Haushaltsmonate aller Gemeinschaften.
 fn play(data: &GameData, seed: u64, years: u64) -> (Headless, Totals) {
-    let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+    let mut sim = staged(data.clone(), SimConfig { seed, player: None });
     let mut totals = Totals::default();
     for _ in 0..years {
         sim.run_days(DAYS_PER_YEAR);
@@ -198,7 +209,7 @@ fn four_times_the_starting_fleet_runs_a_deficit_within_a_few_years() {
     let large = with_fleets(4);
     for seed in [3, 5] {
         let measure = |data: &GameData| -> Vec<Strain> {
-            let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+            let mut sim = staged(data.clone(), SimConfig { seed, player: None });
             let count = sim.polities().list.len();
             let mut strain = vec![Strain::default(); count];
             for month in 1..=5 * 12 {
@@ -299,8 +310,8 @@ fn arrears_occur_in_a_long_scripted_war() {
     // zweien muss eine Kriegspartei ihrer Flotte spürbar Sold schuldig bleiben.
     let mut struck = 0;
     for seed in [1, 4, 5] {
-        let mut war = Headless::new(data().clone(), SimConfig { seed, player: None });
-        let mut peace = Headless::new(data().clone(), SimConfig { seed, player: None });
+        let mut war = staged(data().clone(), SimConfig { seed, player: None });
+        let mut peace = staged(data().clone(), SimConfig { seed, player: None });
         // Je Kriegspartei: der höchste Rückstand und die Moral ihrer Besatzungen in dem
         // Monat, in dem er erreicht wurde, gegen die Moral, die ihre Kriegsmüdigkeit
         // allein ergäbe.
@@ -382,7 +393,7 @@ fn cutting_the_tax_does_not_cut_the_civil_base() {
     // üblichen Satz: Sie bleiben, und wer die Steuer streicht, muss anderswo kürzen.
     let me = PolityId(0);
     let play = |rate: Option<f64>| {
-        let mut sim = Headless::new(
+        let mut sim = staged(
             data().clone(),
             SimConfig {
                 seed: 3,

@@ -453,6 +453,15 @@ pub struct MilitaryBalance {
     pub defeat_shock: f64,
     /// Anteil, um den ein Trümmerfeld je Monat verblasst.
     pub debris_fade_per_month: f32,
+    /// Anteil der Bauteile eines stillgelegten Schiffs, den der Staat am Markt des
+    /// Werftsystems verkauft.
+    pub layup_salvage: f64,
+    /// Kontertabelle, 6 × 6 in der Reihenfolge von [`ShipClass::ALL`]: wie gut die Klasse
+    /// der Zeile gegen die Klasse der Spalte bei gleichem Bauwert abschneidet (1 =
+    /// gleichwertig). Lesen mit [`MilitaryBalance::counter_of`].
+    pub counter: Vec<Vec<f32>>,
+    /// Stellschrauben der KI-Führung in militärischen Dingen.
+    pub ai: MilitaryAiBalance,
     #[serde(skip)]
     pub starting_fleet_ids: Vec<(u16, u32)>,
     /// Bauwert der Startflotte in Credits: der Maßstab, an dem Verluste mindestens
@@ -467,6 +476,68 @@ pub struct MilitaryBalance {
     /// `fleets.start_strength` erreicht.
     #[serde(skip)]
     pub strength_per_value: f64,
+}
+
+impl MilitaryBalance {
+    /// Wie gut `class` gegen `enemy` abschneidet (1 = gleichwertig).
+    pub fn counter_of(&self, class: ShipClass, enemy: ShipClass) -> f32 {
+        self.counter[class.index()][enemy.index()]
+    }
+}
+
+/// `balance.ron: military.ai`: wie die KI-Gemeinschaften rüsten und ihre Flotten führen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MilitaryAiBalance {
+    /// Anteil der laufenden Staatseinnahmen, den Sold und Wartung der Flotte im Frieden
+    /// kosten sollen.
+    pub peace_share: f64,
+    /// Bedrohung zählt, was fremde Flotten innerhalb so vieler Sprünge um eigene Systeme
+    /// an Bauwert zeigen.
+    pub threat_jumps: u32,
+    /// Flotten von Gemeinschaften, mit denen Krieg herrscht, wiegen in der Bedrohung so
+    /// viel schwerer.
+    pub war_weight: f64,
+    /// Aufschlag auf den Zielanteil je ganzer eigener Flotte, um die die bedrohlichste
+    /// fremde die eigene übertrifft (höchstens zwei).
+    pub threat_gain: f64,
+    /// Faktor auf den Zielanteil, solange Krieg herrscht.
+    pub war_factor: f64,
+    /// Obergrenze des Zielanteils.
+    pub max_share: f64,
+    /// So viele Monate Sold und Wartung hält eine Gemeinschaft, die rüstet, zusätzlich als
+    /// Rücklage: Bestellt wird nur, solange die Rücklage gefüllt ist.
+    pub reserve_months: f64,
+    /// Anteil dessen, was der Haushalt nach allen Ansprüchen im Mittel übrig lässt, den
+    /// neue Schiffe (laufende Kosten und Bau) binden dürfen.
+    pub room_use: f64,
+    /// Abschlag für eine Klasse, aus der die eigene Flotte schon ganz bestünde: Erst wenn
+    /// eine Klasse nach der Kontertabelle um mehr als das besser ist, baut die KI nur sie.
+    pub mix_weight: f64,
+    /// Geschätztes Kräfteverhältnis, ab dem sich eine Flotte einem Eindringling stellt.
+    pub defend_odds: f64,
+    /// Geschätztes Kräfteverhältnis, ab dem eine Flotte angreift.
+    pub offensive_odds: f64,
+    /// Kräfteverhältnis im laufenden Gefecht, unter dem die Flotte den Rückzug befiehlt.
+    pub retreat_odds: f64,
+    /// Vorrat (Munition oder Treibstoff, 0..1), unter dem eine Flotte abbricht und nach
+    /// Hause geht.
+    pub break_off_supply: f32,
+    /// Anteil am Bauwert bei Beginn einer Unternehmung, nach dessen Verlust sie abbricht.
+    pub break_off_loss: f64,
+    /// Vorrat und Zustand, mit dem eine Flotte ihren Stützpunkt wieder verlässt.
+    pub ready_supply: f32,
+    /// Anteil des Tanks, den der Hinweg zu einem Angriffsziel höchstens kosten darf.
+    pub offensive_reach: f32,
+    /// Aufschlag auf die eigene Kampfkraft je Stufe Vorsprung in Waffen und Verteidigung
+    /// (im Mittel beider Zweige) gegenüber der Schätzung des Gegners.
+    pub tech_edge: f64,
+    /// Im Krieg zählt eine Technologie, die einen neuen Schiffsentwurf freischaltet, bei
+    /// der Wahl des Forschungsziels um diesen Faktor mehr.
+    pub research_design_bonus: f64,
+    /// Faktor auf den Forschungsetat je Monat, in dem der Haushalt nicht aufgeht.
+    pub research_cut: f64,
+    /// Monate mit Soldrückstand im Frieden, nach denen die KI Schiffe stilllegt.
+    pub layup_after_months: u32,
 }
 
 /// Drei Werte je Doktrin: offensiv, ausgewogen, defensiv.

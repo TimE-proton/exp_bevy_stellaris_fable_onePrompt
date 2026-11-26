@@ -317,6 +317,82 @@
         defeat_shock: 0.9,
         // Trümmerfelder verblassen je Monat um diesen Anteil (rund die Hälfte in drei Jahren).
         debris_fade_per_month: 0.02,
+
+        // --- Stilllegen ---
+        // Ein Schiff, das im System einer eigenen Werft stillgelegt wird, verlässt das
+        // Spiel. Diesen Anteil seiner Bauteile verkauft der Staat am Markt des Systems zum
+        // Geldkurs, soweit die Kasse des Kontors reicht; der Rest ist Schrott.
+        layup_salvage: 0.25,
+
+        // --- Kräfte schätzen ---
+        // Kontertabelle: Zeile gegen Spalte in der Reihenfolge Jäger, Korvette, Fregatte,
+        // Kreuzer, Schlachtschiff, Träger. 1 heißt gleichwertig bei gleichem Bauwert, über
+        // 1 ist die Zeile überlegen. Abgeleitet mit `headless battle --matrix --ron
+        // --seeds 0..16` bei Bauwert 22804 je Partei: je Zelle die Wurzel aus dem
+        // Verhältnis der Verlustanteile. Jäger kämpfen nur mit ihrem Träger.
+        counter: [
+            [1.00, 1.00, 1.00, 1.00, 1.00, 1.00], // Jäger
+            [1.00, 1.00, 0.68, 0.66, 1.47, 1.67], // Korvette
+            [1.00, 1.48, 1.00, 0.62, 0.60, 1.38], // Fregatte
+            [1.00, 1.51, 1.61, 1.00, 0.60, 1.84], // Kreuzer
+            [1.00, 0.68, 1.65, 1.68, 1.00, 0.57], // Schlachtschiff
+            [1.00, 0.60, 0.72, 0.54, 1.76, 1.00], // Träger
+        ],
+
+        // --- Militärische Führung der KI-Gemeinschaften ---
+        ai: (
+            // Rüstung: Sold und Wartung sollen im Frieden diesen Anteil der laufenden
+            // Staatseinnahmen kosten.
+            peace_share: 0.09,
+            // Bedrohung: der Bauwert fremder Flotten innerhalb so vieler Sprünge um
+            // eigene Systeme; Kriegsgegner wiegen um war_weight schwerer. Übertrifft die
+            // bedrohlichste Gemeinschaft die eigene Flotte, steigt der Zielanteil je
+            // ganzer eigener Flotte Vorsprung um threat_gain (höchstens zwei).
+            threat_jumps: 4,
+            war_weight: 2.0,
+            threat_gain: 0.25,
+            // Im Krieg gilt das war_factor-Fache, nie mehr als max_share.
+            war_factor: 1.4,
+            max_share: 0.16,
+            // Rücklage: Die Staatseinnahmen schwanken von Monat zu Monat stark. Wer
+            // rüstet, hält deshalb so viele Monate Sold und Wartung über dem Sockel seiner
+            // Rücklage zurück, und bestellt nur, solange die Rücklage gefüllt ist.
+            reserve_months: 6.0,
+            // Bestellt wird nur, solange laufende Kosten und Bau der neuen Schiffe in
+            // diesen Anteil dessen passen, was der Haushalt im Mittel der letzten Monate
+            // nach allen Ansprüchen übrig ließ.
+            room_use: 0.6,
+            // Mischung: Eine Klasse, aus der die Flotte schon ganz bestünde, zählt bei der
+            // Wahl um diesen Anteil weniger.
+            mix_weight: 0.5,
+            // Flotten im Krieg: Ab defend_odds stellt sich eine Flotte einem Eindringling,
+            // ab offensive_odds greift sie an; fällt das Kräfteverhältnis im Gefecht
+            // unter retreat_odds, befiehlt sie den Rückzug.
+            defend_odds: 1.0,
+            offensive_odds: 1.3,
+            retreat_odds: 0.6,
+            // Eine Unternehmung bricht ab unter diesem Vorrat an Munition oder Treibstoff
+            // oder nach diesem Verlust am Bauwert; die Flotte läuft erst wieder aus, wenn
+            // Vorrat und Zustand ready_supply erreichen. Der Hinweg zu einem Ziel darf
+            // höchstens offensive_reach des Tanks kosten: Der Rückweg kostet dasselbe,
+            // und was dazwischen bleibt, ist die Zeit vor Ort (fuel_per_day). Bei 0,4
+            // sind das noch gut fünf Wochen.
+            break_off_supply: 0.3,
+            break_off_loss: 0.35,
+            ready_supply: 0.8,
+            offensive_reach: 0.4,
+            // Technik in der Schätzung: Aufschlag je Stufe Vorsprung in Waffen und
+            // Verteidigung gegenüber dem, was vom Gegner bekannt ist.
+            tech_edge: 0.08,
+            // Forschung im Krieg: Eine Technologie, die einen neuen Schiffsentwurf
+            // freischaltet, zählt bei der Wahl des Ziels um diesen Faktor mehr.
+            research_design_bonus: 2.0,
+            // Haushalt: Geht er nicht auf, kürzt die KI ihren Forschungsetat je Monat um
+            // diesen Faktor; bleibt im Frieden trotzdem so viele Monate Sold aus, legt
+            // sie Schiffe still.
+            research_cut: 0.7,
+            layup_after_months: 3,
+        ),
     ),
     battle: (
         // Gefechtszeit je Takt in Sekunden. 20 Takte sind ein Kalendertag.

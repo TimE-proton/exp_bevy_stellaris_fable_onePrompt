@@ -40,7 +40,7 @@ pub use supply::{
     procurement_estimate, repair_fleets, resupply_fleets, supply_base,
 };
 pub use yard::{
-    BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable,
+    BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable, lay_up,
     order_ship, update_yards, yard_slots,
 };
 
@@ -355,6 +355,24 @@ pub struct Fleets {
     /// nachgeführt ([`update_yards`]); die Hauptwelten haben ihre Werft unabhängig davon.
     #[serde(default)]
     pub yards: Vec<PlanetId>,
+    /// Zähler je Gemeinschaft über die ganze Partie. Lesen mit [`Fleets::tally_of`].
+    #[serde(default)]
+    pub tally: Vec<FleetTally>,
+}
+
+/// Was die Marine einer Gemeinschaft über die ganze Partie erlebt hat, für Berichte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTally {
+    /// Schiffe, die ihre Werften ausgeliefert haben.
+    pub built: u32,
+    /// Schiffe, die sie stillgelegt hat.
+    pub laid_up: u32,
+    /// Monatserste, an denen sie im Krieg stand.
+    pub months_at_war: u32,
+    /// Monatserste, an denen sie Sold schuldig war.
+    pub months_in_arrears: u32,
+    /// Tage, an denen eine ihrer Flotten ein fremdes System gesperrt hielt (je System).
+    pub blockade_days: u32,
 }
 
 impl Fleets {
@@ -409,6 +427,19 @@ impl Fleets {
     /// Soldrückstand einer Gemeinschaft (0 = alles gezahlt, 1 = nichts).
     pub fn arrears_of(&self, polity: PolityId) -> f32 {
         self.arrears.get(polity.index()).copied().unwrap_or(0.0)
+    }
+
+    /// Zähler einer Gemeinschaft über die ganze Partie.
+    pub fn tally_of(&self, polity: PolityId) -> FleetTally {
+        self.tally.get(polity.index()).copied().unwrap_or_default()
+    }
+
+    /// Zähler einer Gemeinschaft zum Fortschreiben.
+    pub fn tally_mut(&mut self, polity: PolityId) -> &mut FleetTally {
+        if self.tally.len() <= polity.index() {
+            self.tally.resize(polity.index() + 1, FleetTally::default());
+        }
+        &mut self.tally[polity.index()]
     }
 
     /// Vergibt die nächste Schiffsnummer.

@@ -11,6 +11,7 @@
 //! ausdrücklich, was sie von ihrem Szenario erwarten.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::battle::{Battle, BattleShip, CombatModifiers, Doctrine, Formation, ShipStatus};
 use sim::chronicle::Chronicle;
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR, TICKS_PER_DAY};
@@ -43,13 +44,24 @@ fn data() -> &'static GameData {
     DATA.get_or_init(|| GameData::load_workspace().unwrap())
 }
 
+/// Eine Partie, in der die militärische Führung der KI ruht. Die Prüfungen hier führen die
+/// Flotten und Werften mehrerer Gemeinschaften selbst, wie ein Drehbuch: Sie prüfen die
+/// Regeln von Marsch, Werft, Nachschub und Gefecht, nicht die Entscheidungen der KI (die
+/// stehen in `tests/ai.rs`). Mit aktiver Führung würden deren Flotten ausweichen,
+/// nachrüsten oder angreifen und die gestellte Lage auflösen.
+fn staged(data: GameData, config: SimConfig) -> Headless {
+    let mut sim = Headless::new(data, config);
+    sim.set_military_mode(None, MilitaryMode::Resting);
+    sim
+}
+
 fn observer(seed: u64) -> Headless {
-    Headless::new(data().clone(), SimConfig { seed, player: None })
+    staged(data().clone(), SimConfig { seed, player: None })
 }
 
 /// Partie, in der Gemeinschaft 0 vom Menschen geführt wird: Die KI greift dort nicht ein.
 fn with_player(seed: u64) -> Headless {
-    Headless::new(
+    staged(
         data().clone(),
         SimConfig {
             seed,
@@ -2667,7 +2679,7 @@ struct Defeat {
 fn heavy_defeat(data: &GameData) -> Defeat {
     let me = PolityId(0);
     let ours = FleetId(0);
-    let mut sim = Headless::new(
+    let mut sim = staged(
         data.clone(),
         SimConfig {
             seed: 28,
@@ -3540,7 +3552,7 @@ fn a_battle_without_decision_at_the_time_limit_sends_the_intruder_away() {
     let regroup = short.balance.military.regroup_days;
     let (a, b) = (PolityId(0), PolityId(1));
     let (ours, theirs) = (FleetId(0), FleetId(1));
-    let mut sim = Headless::new(
+    let mut sim = staged(
         short,
         SimConfig {
             seed: 23,
@@ -4143,7 +4155,7 @@ fn a_fleet_that_leaves_the_field_is_free_at_once_and_shares_the_fate_of_its_side
     let mut outcomes = [0; 2];
     for seed in 24..30 {
         let (a_side, b, c) = (a, PolityId(1), PolityId(2));
-        let mut sim = Headless::new(
+        let mut sim = staged(
             patient.clone(),
             SimConfig {
                 seed,

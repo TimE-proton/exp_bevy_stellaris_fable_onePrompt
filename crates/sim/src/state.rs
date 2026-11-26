@@ -3,6 +3,7 @@
 //! Jedes Teilsystem hält seinen Zustand als eigene Resource. Die Liste hier ist die eine
 //! Stelle, die festlegt, was zum Spielstand gehört; neue Teilsysteme tragen sich ein.
 
+use crate::ai::AiState;
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::command::{CommandLog, CommandQueue};
@@ -83,6 +84,7 @@ sim_state! {
     queue: CommandQueue,
     log: CommandLog,
     chronicle: Chronicle,
+    ai: AiState,
 }
 
 /// Abweichung der Geldmenge vom Soll (Anfangsbestand plus ausgewiesene Schöpfung).
@@ -148,6 +150,7 @@ impl SimState {
             queue: CommandQueue::default(),
             log: CommandLog::default(),
             chronicle,
+            ai: AiState::default(),
         }
     }
 

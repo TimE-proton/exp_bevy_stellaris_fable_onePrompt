@@ -80,6 +80,7 @@ fn upkeep(
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
     polities: Res<Polities>,
+    diplomacy: Res<Diplomacy>,
     mut economy: ResMut<Economy>,
     mut fleets: ResMut<Fleets>,
     mut chronicle: ResMut<Chronicle>,
@@ -93,6 +94,16 @@ fn upkeep(
         &data,
         clock.tick,
     );
+    // Für die Berichte: Monate im Krieg und Monate mit Soldrückstand.
+    for polity in polities.alive() {
+        let (at_war, behind) = (
+            diplomacy.is_at_war(polity.id),
+            fleets.arrears_of(polity.id) > 0.0,
+        );
+        let tally = fleets.tally_mut(polity.id);
+        tally.months_at_war += at_war as u32;
+        tally.months_in_arrears += behind as u32;
+    }
 }
 
 /// Was der Staat täglich für seine Flotten einkauft, in fester Reihenfolge: Ersatzteile

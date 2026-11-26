@@ -215,6 +215,18 @@ pub struct Battles {
     /// ihres Ausscheidens. Mit dem Ende des Gefechts fallen sie heraus.
     #[serde(default)]
     pub departed: Vec<Departed>,
+    /// Beendete Gefechte je Ausgang über die ganze Partie, in der Reihenfolge von
+    /// [`BattleOutcome::ALL`].
+    #[serde(default)]
+    pub outcomes: [u32; 5],
+    /// Flotten je Gemeinschaft, die in einem Gefecht mit allen Schiffen verloren gingen.
+    /// Lesen mit [`Battles::fleets_lost_by`].
+    #[serde(default)]
+    pub fleets_lost: Vec<u32>,
+    /// Entschiedene Gefechte je Gemeinschaft, in denen sie am Ende das Feld hielt. Lesen
+    /// mit [`Battles::won_by`].
+    #[serde(default)]
+    pub won: Vec<u32>,
 }
 
 /// Ist die Partei aus dem Gefecht ausgeschieden?
@@ -282,6 +294,24 @@ impl Battles {
     /// Schiffe, die eine Gemeinschaft in Gefechten verloren hat (ohne Bordjäger).
     pub fn ships_lost_by(&self, polity: PolityId) -> u32 {
         self.ships_lost.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Flotten, die eine Gemeinschaft in Gefechten mit allen Schiffen verloren hat.
+    pub fn fleets_lost_by(&self, polity: PolityId) -> u32 {
+        self.fleets_lost.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Entschiedene Gefechte, in denen die Gemeinschaft am Ende das Feld hielt.
+    pub fn won_by(&self, polity: PolityId) -> u32 {
+        self.won.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Beendete Gefechte mit diesem Ausgang über die ganze Partie.
+    pub fn ended_with(&self, outcome: BattleOutcome) -> u32 {
+        BattleOutcome::ALL
+            .iter()
+            .position(|other| *other == outcome)
+            .map_or(0, |index| self.outcomes[index])
     }
 
     /// Schiffe, die in allen Gefechten der Partie verloren gingen (ohne Bordjäger).
@@ -1511,6 +1541,36 @@ fn conclude(
         );
     }
     battles.departed.retain(|entry| entry.battle != battle.id);
+    if let Some(index) = BattleOutcome::ALL
+        .iter()
+        .position(|other| *other == outcome)
+    {
+        battles.outcomes[index] += 1;
+    }
+    if outcome == BattleOutcome::Decided {
+        let winners: BTreeSet<PolityId> = report
+            .sides
+            .iter()
+            .filter(|side| side.held_field)
+            .map(|side| side.owner)
+            .collect();
+        for winner in winners {
+            if battles.won.len() <= winner.index() {
+                battles.won.resize(winner.index() + 1, 0);
+            }
+            battles.won[winner.index()] += 1;
+        }
+    }
+    for side in &report.sides {
+        let ships = |counts: &[u32; 6]| counts.iter().sum::<u32>() - counts[0];
+        if ships(&side.initial) > 0 && ships(&side.lost) >= ships(&side.initial) {
+            let index = side.owner.index();
+            if battles.fleets_lost.len() <= index {
+                battles.fleets_lost.resize(index + 1, 0);
+            }
+            battles.fleets_lost[index] += 1;
+        }
+    }
     if battles.reports.len() >= Battles::REPORTS {
         battles.reports.remove(0);
     }
