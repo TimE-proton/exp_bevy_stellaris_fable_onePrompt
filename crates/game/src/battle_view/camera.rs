@@ -38,6 +38,9 @@ pub const LAYOUT_GAP: f32 = 10.0;
 const SIDE_VIEW_MIN: f32 = 150.0;
 /// Markierungen kleiner Schiffe lassen sich in diesem Umkreis (Pixel) anklicken.
 const PICK_PIXELS: f32 = 11.0;
+/// Grenzen der Fluggeschwindigkeit, als Vielfaches der Grundgeschwindigkeit.
+const FLY_SPEED_MIN: f32 = 0.04;
+const FLY_SPEED_MAX: f32 = 12.0;
 
 #[derive(Component)]
 pub struct BattleCamera;
@@ -657,30 +660,27 @@ fn hold_mouse_look(
     }
 }
 
-/// Hält die Freiflugkamera im Zaum: Tempo in Grenzen, kein Tempowechsel durch das Mausrad
-/// über einer Tafel oder Leiste, keine Bewegung beim Tippen in ein Textfeld, nicht zu weit
-/// weg.
+/// Hält die Freiflugkamera im Zaum: Tempo in Grenzen, keine Bewegung beim Tippen in ein
+/// Textfeld, nicht zu weit weg.
+///
+/// Das Tempo selbst steht an genau einer Stelle, im Zustand der Freiflugsteuerung: Die
+/// Engine ändert es mit dem Mausrad, und mit der Kamera wird es zurückgesetzt
+/// ([`set_active`]). Das Mausrad über einer Tafel oder Leiste bekommt die Engine gar nicht
+/// zu sehen (`pointer::keep_wheel_from_world`); hier wird deshalb nichts zurückgenommen
+/// und kein zweites Tempo mitgeführt, das ein neues Gefecht überdauern könnte.
 fn tame_free_camera(
     wants: Res<EguiWantsInput>,
-    mouse: WorldMouse,
     feed: Res<BattleFeed>,
     data: Res<sim::GameData>,
     layout: Res<HudLayout>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
-    mut kept_speed: Local<Option<f32>>,
 ) {
     let (transform, flight) = &mut *camera;
-    // Die Engine hat das Mausrad schon verrechnet; über der Oberfläche gilt das nicht.
-    let speed = if mouse.wheel_is_free() {
-        flight.speed_multiplier.clamp(0.04, 12.0)
-    } else {
-        kept_speed.unwrap_or(1.0)
-    };
+    let speed = flight.speed_multiplier.clamp(FLY_SPEED_MIN, FLY_SPEED_MAX);
     if flight.speed_multiplier != speed {
         flight.speed_multiplier = speed;
     }
-    *kept_speed = Some(speed);
     let enabled = !wants.wants_any_keyboard_input();
     if flight.enabled != enabled {
         flight.enabled = enabled;
@@ -1850,12 +1850,18 @@ mod tests {
         game.frames(2);
         game.press(MouseButton::Right);
         game.frames(2);
-        assert!(game.pointer_grabbed(), "die rechte Maustaste fängt den Zeiger");
+        assert!(
+            game.pointer_grabbed(),
+            "die rechte Maustaste fängt den Zeiger"
+        );
         for point in [button, ON_SIDE_PANEL, OPEN_SCENE] {
             game.move_pointer(point);
             game.frames(1);
             click_in_place(&mut game);
-            untouched(&game, &format!("rechte Maustaste gehalten, Zeiger bei {point}"));
+            untouched(
+                &game,
+                &format!("rechte Maustaste gehalten, Zeiger bei {point}"),
+            );
         }
         game.release(MouseButton::Right);
         game.frames(2);
@@ -1939,7 +1945,10 @@ mod tests {
         game.frames(15);
         assert_eq!(game.resource::<ViewFrame>().fly_speed, speed);
         let rolled = game.text(&first).expect("erste Zeile der Modulliste");
-        assert!(rolled.y < top.y - 20.0, "die Liste rollt: {rolled} statt {top}");
+        assert!(
+            rolled.y < top.y - 20.0,
+            "die Liste rollt: {rolled} statt {top}"
+        );
     }
 
     #[test]
