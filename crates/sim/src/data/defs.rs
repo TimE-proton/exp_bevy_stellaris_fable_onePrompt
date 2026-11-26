@@ -150,6 +150,14 @@ pub struct PolityDef {
     pub start_techs: Vec<String>,
     #[serde(skip)]
     pub start_tech_ids: Vec<u16>,
+    /// Vorlieben der Forschung: Faktor je Zweig auf die Gewichte der automatischen
+    /// Zielwahl. Ohne Angabe wiegen alle Zweige gleich.
+    #[serde(default = "super::ships::BranchWeights::even")]
+    pub research_focus: super::ships::BranchWeights,
+    /// Anteil der laufenden Staatseinnahmen, den die Gemeinschaft für Forschung ansetzt.
+    /// Ohne Angabe gilt `balance.ron: research.budget_share`.
+    #[serde(default)]
+    pub research_share: Option<f64>,
 }
 
 /// `names.ron`

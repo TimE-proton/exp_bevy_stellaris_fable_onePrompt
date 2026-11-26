@@ -5,11 +5,12 @@ use clap::Args;
 use sim::GameData;
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR};
 use sim::data::TechBranch;
-use sim::economy::to_credits;
-use sim::finance::Finance;
+use sim::diplomacy::Diplomacy;
+use sim::economy::{Economy, to_credits};
 use sim::harness::{Headless, RunSummary, check_invariants, summarize};
 use sim::ids::PolityId;
 use sim::state::SimConfig;
+use sim::tech::contact_weights;
 use std::process::ExitCode;
 
 #[derive(Args)]
@@ -39,7 +40,8 @@ pub fn run(data: &GameData, args: ResearchArgs) -> ExitCode {
 /// Monatsmittel einer Gemeinschaft seit dem letzten Zwischenstand.
 #[derive(Clone, Copy, Default)]
 struct Sums {
-    revenue: f64,
+    /// Laufende Staatseinnahmen: die Bemessungsgrundlage des Etats.
+    income: f64,
     spent: f64,
     points: f64,
     months: u32,
@@ -54,12 +56,22 @@ fn tiers(sim: &Headless, data: &GameData, polity: PolityId) -> String {
 fn print_rows(sim: &Headless, data: &GameData, year: u64, sums: &[Sums]) {
     let research = sim.research();
     let galaxy = sim.galaxy();
+    // Lage: Summe der Kontaktgewichte zu allen anderen. Wer mitten unter den anderen
+    // sitzt, hat mehr Kontakt und lernt mehr von dem, was er bei ihnen erkennt.
+    let contact = contact_weights(
+        galaxy,
+        sim.polities(),
+        sim.world().resource::<Diplomacy>(),
+        &data.balance.research,
+    );
     println!("\nJahr {year}");
     println!(
-        "  {:<24} {:>8} {:>9} {:>9} {:>10} {:>7}  {:<9} {:>8}  Ziel",
+        "  {:<24} {:>8} {:>7} {:>9} {:>5} {:>9} {:>10} {:>7}  {:<9} {:>8}  Ziel",
         "Gemeinschaft",
         "Bev. Mio",
+        "Kontakt",
         "Einnahmen",
+        "Etat",
         "Forschung",
         "Punkte/Mon",
         "bekannt",
@@ -88,10 +100,14 @@ fn print_rows(sim: &Headless, data: &GameData, year: u64, sums: &[Sums]) {
             None => ("–".to_string(), "–".to_string()),
         };
         println!(
-            "  {:<24} {:>8.0} {:>9.0} {:>9.1} {:>10.1} {:>7}  {:<9} {:>8}  {}",
+            "  {:<24} {:>8.0} {:>7.2} {:>9.0} {:>3.0} % {:>9.1} {:>10.1} {:>7}  {:<9} {:>8}  {}",
             polity.name,
             galaxy.population_of(polity.id),
-            mean.revenue / months,
+            contact
+                .get(polity.id.index())
+                .map_or(0.0, |row| row.iter().sum::<f64>()),
+            mean.income / months,
+            100.0 * entry.budget_share,
             mean.spent / months,
             mean.points / months,
             research.known_count(polity.id),
@@ -106,10 +122,15 @@ fn print_rows(sim: &Headless, data: &GameData, year: u64, sums: &[Sums]) {
 fn history(data: &GameData, seed: u64, years: u64, every: u64) -> ExitCode {
     let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
     println!(
-        "Seed {seed}, {years} Jahre. Einnahmen (geglättete Staatseinnahmen), Forschung \
-         (Gehälter) und Punkte sind Monatsmittel seit dem vorigen Zwischenstand."
+        "Seed {seed}, {years} Jahre. Einnahmen (laufende Staatseinnahmen: Lohnsteuer, Zölle, \
+         Dividenden), Forschung (Gehälter) und Punkte sind Monatsmittel seit dem vorigen \
+         Zwischenstand; Etat ist der geltende Anteil der Einnahmen."
     );
     println!("Stufen je Zweig: Wirtschaft, Antrieb, Waffen, Verteidigung, Bodenkrieg.");
+    println!(
+        "Kontakt: Summe der Kontaktgewichte zu den anderen (Lage). Nachlass: auf das laufende \
+         Ziel, aus dem erkennbaren Wissen der anderen."
+    );
     let mut sums: Vec<Sums> = Vec::new();
     let mut known: Vec<Vec<bool>> = Vec::new();
     let mut completions: Vec<Vec<(f64, u16)>> = Vec::new();
@@ -117,7 +138,7 @@ fn history(data: &GameData, seed: u64, years: u64, every: u64) -> ExitCode {
     for month in 1..=years * 12 {
         sim.run_days(DAYS_PER_MONTH);
         let research = sim.research();
-        let finance = sim.world().resource::<Finance>();
+        let economy = sim.world().resource::<Economy>();
         for (index, entry) in research.polities.iter().enumerate() {
             if index >= sums.len() {
                 // Neu (Spielbeginn oder Abspaltung): Was sie mitbringt, ist kein Abschluss.
@@ -126,7 +147,8 @@ fn history(data: &GameData, seed: u64, years: u64, every: u64) -> ExitCode {
                 completions.push(Vec::new());
             }
             let sum = &mut sums[index];
-            sum.revenue += finance.polities.get(index).map_or(0.0, |s| s.revenue);
+            let polity = PolityId::from_index(index);
+            sum.income += to_credits(economy.state_income_of(polity));
             sum.spent += to_credits(entry.spent_last_month);
             sum.points += entry.points_last_month;
             sum.months += 1;
@@ -163,7 +185,6 @@ fn history(data: &GameData, seed: u64, years: u64, every: u64) -> ExitCode {
 
     // Was die erste Gemeinschaft über die anderen weiß: Einblick, Schätzung, Wahrheit.
     let research = sim.research();
-    let year = sim.clock().day() / DAYS_PER_YEAR;
     let Some(viewer) = sim.polities().list.first() else {
         return ExitCode::SUCCESS;
     };
@@ -172,7 +193,7 @@ fn history(data: &GameData, seed: u64, years: u64, every: u64) -> ExitCode {
         viewer.name
     );
     for target in sim.polities().list.iter().skip(1) {
-        let estimate = research.estimate(data, viewer.id, target.id, seed, year);
+        let estimate = research.estimate(data, viewer.id, target.id);
         let parts: Vec<String> = TechBranch::ALL
             .iter()
             .zip(estimate)
@@ -199,24 +220,34 @@ struct Snapshot {
     year: u64,
     /// Je Gemeinschaft: Zahl der Technologien und höchste Stufe je Zweig.
     polities: Vec<(usize, [u8; 5])>,
+    /// Je Gemeinschaft: seit Spielbeginn erarbeitete Forschungspunkte.
+    points: Vec<f64>,
 }
 
 fn snapshot(sim: &Headless, data: &GameData, year: u64) -> Snapshot {
     let research = sim.research();
     let galaxy = sim.galaxy();
+    let living: Vec<PolityId> = sim
+        .polities()
+        .list
+        .iter()
+        .filter(|polity| polity.alive && galaxy.population_of(polity.id) > 0.0)
+        .map(|polity| polity.id)
+        .collect();
     Snapshot {
         year,
-        polities: sim
-            .polities()
-            .list
+        polities: living
             .iter()
-            .filter(|polity| polity.alive && galaxy.population_of(polity.id) > 0.0)
-            .map(|polity| {
+            .map(|id| {
                 (
-                    research.known_count(polity.id),
-                    TechBranch::ALL.map(|branch| research.tier(data, polity.id, branch)),
+                    research.known_count(*id),
+                    TechBranch::ALL.map(|branch| research.tier(data, *id, branch)),
                 )
             })
+            .collect(),
+        points: living
+            .iter()
+            .map(|id| research.get(*id).map_or(0.0, |entry| entry.points_total))
             .collect(),
     }
 }
@@ -255,6 +286,26 @@ fn mean_tiers(entries: &[(usize, [u8; 5])]) -> [f64; 5] {
         }
     }
     sums.map(|sum| sum / entries.len().max(1) as f64)
+}
+
+/// Wie oft liegen in einem Zweig wie viele Stufen zwischen der besten und der schwächsten
+/// Gemeinschaft einer Partie? Index = Abstand in Stufen.
+fn lead_histogram<'a>(games: impl Iterator<Item = &'a [(usize, [u8; 5])]>) -> Vec<usize> {
+    let mut histogram = vec![0usize; 4];
+    for polities in games {
+        if polities.len() < 2 {
+            continue;
+        }
+        for branch in 0..5 {
+            let tiers = polities.iter().map(|(_, tiers)| tiers[branch]);
+            let gap = (tiers.clone().max().unwrap_or(0) - tiers.min().unwrap_or(0)) as usize;
+            if histogram.len() <= gap {
+                histogram.resize(gap + 1, 0);
+            }
+            histogram[gap] += 1;
+        }
+    }
+    histogram
 }
 
 /// Viele Seeds: der Forschungsstand im Verlauf und am Ende, daneben die Kennzahlen, an
@@ -368,12 +419,23 @@ fn overview(
         mean(|r| r.economy.freighters as f64)
     );
 
-    // Verlauf über alle Seeds: Wie weit sind die Gemeinschaften wann?
+    // Verlauf über alle Seeds: Wie weit sind die Gemeinschaften wann, und wie weit liegen
+    // sie auseinander?
     let total = data.techs.len();
     println!(
-        "\nVerlauf über alle Gemeinschaften aller Läufe ({total} Technologien im Baum):\n\
-         {:>5} {:>15}  {:<24} {:>12} {:>10}",
-        "Jahr", "Techs min/Ø/max", "Ø Stufen W A Wa V B", "höchste Stufe", "Baum fertig"
+        "\nVerlauf über alle Gemeinschaften aller Läufe ({total} Technologien im Baum).\n\
+         Vorsprung: Stufen zwischen der besten und der schwächsten Gemeinschaft einer Partie \
+         in einem Zweig; gezählt wird, wie oft 0, 1, 2 und 3 oder mehr Stufen dazwischen liegen.\n\
+         Punkte: seit Spielbeginn erarbeitet, in Tausend.\n\
+         {:>5} {:>15}  {:<24} {:>12} {:>10}  {:<18} {:>10}  {:>20}",
+        "Jahr",
+        "Techs min/Ø/max",
+        "Ø Stufen W A Wa V B",
+        "höchste Stufe",
+        "Baum fertig",
+        "Vorsprung 0/1/2/3+",
+        "Ø Abstand",
+        "Punkte min/Ø/max"
     );
     let steps = runs.first().map_or(0, |(_, snapshots)| snapshots.len());
     for step in 0..steps {
@@ -384,8 +446,20 @@ fn overview(
             .collect();
         let counts: Vec<usize> = entries.iter().map(|(techs, _)| *techs).collect();
         let tiers = mean_tiers(&entries);
+        let gaps = lead_histogram(
+            runs.iter()
+                .filter_map(|(_, snapshots)| snapshots.get(step))
+                .map(|snapshot| snapshot.polities.as_slice()),
+        );
+        let spread: usize = gaps.iter().enumerate().map(|(gap, n)| gap * n).sum();
+        let points: Vec<f64> = runs
+            .iter()
+            .filter_map(|(_, snapshots)| snapshots.get(step))
+            .flat_map(|snapshot| snapshot.points.iter().copied())
+            .collect();
+        let mean_of = |values: &[f64]| values.iter().sum::<f64>() / values.len().max(1) as f64;
         println!(
-            "{:>5} {:>6}/{:>4.1}/{:<3}  {:<24} {:>12} {:>10}",
+            "{:>5} {:>6}/{:>4.1}/{:<3}  {:<24} {:>12} {:>10}  {:<18} {:>10.2}  {:>20}",
             runs[0].1[step].year,
             counts.iter().min().copied().unwrap_or(0),
             counts.iter().sum::<usize>() as f64 / counts.len().max(1) as f64,
@@ -399,7 +473,21 @@ fn overview(
                 .flat_map(|(_, tiers)| tiers.iter().copied())
                 .max()
                 .unwrap_or(0),
-            counts.iter().filter(|count| **count >= total).count()
+            counts.iter().filter(|count| **count >= total).count(),
+            format!(
+                "{}/{}/{}/{}",
+                gaps[0],
+                gaps[1],
+                gaps[2],
+                gaps[3..].iter().sum::<usize>()
+            ),
+            spread as f64 / gaps.iter().sum::<usize>().max(1) as f64,
+            format!(
+                "{:.0}/{:.0}/{:.0}",
+                points.iter().copied().fold(f64::INFINITY, f64::min) / 1000.0,
+                mean_of(&points) / 1000.0,
+                points.iter().copied().fold(0.0, f64::max) / 1000.0
+            )
         );
     }
 

@@ -1,6 +1,8 @@
 //! Tagesschritt: Produktion, Konsum, Bevölkerung, Preise, Löhne.
 
-use super::{Economy, Money, energy_factor, factor_of, lift_cost, local_yield, pay, to_money};
+use super::{
+    Economy, Money, book_income, energy_factor, factor_of, lift_cost, local_yield, pay, to_money,
+};
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
 use crate::galaxy::Galaxy;
@@ -16,12 +18,14 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
     let balance = &data.balance.economy;
     let spread = balance.spread;
     let fuel = balance.fuel_id;
+    economy.sync_polities();
     let Economy {
         markets,
         planets,
         treasuries,
         tax_rates,
         tech_yield,
+        state_income_running,
         ..
     } = economy;
 
@@ -168,6 +172,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 let tax = (wages as f64 * tax_rate).round() as Money;
                 firm.cash -= wages;
                 *treasury += tax;
+                book_income(state_income_running, owner, tax);
                 local.households += wages - tax;
                 local.income_today += super::to_credits(wages - tax);
 

@@ -223,9 +223,18 @@ pub struct Economy {
     /// Seit Spielbeginn ausgewiesene Geldschöpfung.
     pub minted: Money,
     /// Ertragsfaktor der Technik je Gemeinschaft (1 = Grundstand; fehlende Einträge
-    /// gelten als 1). Das Wirtschafts-Plugin übernimmt ihn täglich aus der Forschung.
+    /// gelten als 1). Folgt der Forschung: gesetzt bei Spielbeginn, nach jedem
+    /// Forschungsschritt und bei einer Abspaltung, täglich aufgefrischt.
     #[serde(default)]
     pub tech_yield: Vec<f64>,
+    /// Laufende Einnahmen des Staates im letzten abgeschlossenen Monat, je Gemeinschaft:
+    /// Lohnsteuer, Zölle der Kontore und Dividenden auf staatliche Anteile. Geld der
+    /// Notenbank, Anleihen und Verkäufe zählen nicht. Daran bemisst sich der Forschungsetat.
+    #[serde(default)]
+    pub state_income: Vec<Money>,
+    /// Dieselben Einnahmen des laufenden Monats, bis der Monatsabschluss sie übernimmt.
+    #[serde(default)]
+    pub state_income_running: Vec<Money>,
 }
 
 /// Faktor einer Gemeinschaft aus einer Liste je Gemeinschaft; fehlt der Eintrag, 1.
@@ -254,6 +263,47 @@ impl Economy {
     #[inline]
     pub fn yield_factor(&self, polity: PolityId) -> f64 {
         factor_of(&self.tech_yield, polity)
+    }
+
+    /// Laufende Einnahmen des Staates im letzten abgeschlossenen Monat (siehe
+    /// [`Economy::state_income`]).
+    #[inline]
+    pub fn state_income_of(&self, polity: PolityId) -> Money {
+        self.state_income.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Sorgt dafür, dass jede Liste je Gemeinschaft für jede Staatskasse einen Eintrag
+    /// hat, auch für eben erst gegründete Gemeinschaften.
+    pub fn sync_polities(&mut self) {
+        let count = self.treasuries.len();
+        if self.tech_yield.len() < count {
+            self.tech_yield.resize(count, 1.0);
+        }
+        if self.state_income.len() < count {
+            self.state_income.resize(count, 0);
+        }
+        if self.state_income_running.len() < count {
+            self.state_income_running.resize(count, 0);
+        }
+    }
+
+    /// Verbucht eine laufende Einnahme des Staates. Das Geld selbst ist schon in der
+    /// Staatskasse; hier wird nur mitgeschrieben, woraus sie sich speist.
+    #[inline]
+    pub fn book_state_income(&mut self, polity: PolityId, amount: Money) {
+        book_income(&mut self.state_income_running, polity, amount);
+    }
+
+    /// Monatsabschluss der Einnahmenrechnung: Der laufende Monat wird zum letzten.
+    pub fn close_income_month(&mut self) {
+        self.sync_polities();
+        for (last, running) in self
+            .state_income
+            .iter_mut()
+            .zip(&mut self.state_income_running)
+        {
+            *last = std::mem::take(running);
+        }
     }
 
     /// Summe aller Konten der Wirtschaft (ohne Handelshäuser).
@@ -298,8 +348,42 @@ impl Economy {
         if self.treasuries.iter().any(|cash| *cash < 0) {
             return Some("Staatskasse negativ".into());
         }
+        let count = self.treasuries.len();
+        if self.tech_yield.len() != count
+            || self.state_income.len() != count
+            || self.state_income_running.len() != count
+        {
+            return Some("Listen je Gemeinschaft sind unvollständig".into());
+        }
+        if self
+            .state_income
+            .iter()
+            .chain(&self.state_income_running)
+            .any(|income| *income < 0)
+        {
+            return Some("Staatseinnahmen negativ".into());
+        }
+        if self
+            .tech_yield
+            .iter()
+            .any(|factor| !factor.is_finite() || *factor <= 0.0)
+        {
+            return Some("Ertragsfaktor der Technik entgleist".into());
+        }
         None
     }
+}
+
+/// Schreibt eine laufende Einnahme in die Liste je Gemeinschaft; sie wächst bei Bedarf.
+#[inline]
+pub(crate) fn book_income(running: &mut Vec<Money>, polity: PolityId, amount: Money) {
+    if amount <= 0 {
+        return;
+    }
+    if running.len() <= polity.index() {
+        running.resize(polity.index() + 1, 0);
+    }
+    running[polity.index()] += amount;
 }
 
 /// Kapitalbewegungen, die die Börse verbuchen muss. Das Geld ist dem Emittenten bereits

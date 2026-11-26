@@ -38,14 +38,9 @@ fn production(
     mut economy: ResMut<Economy>,
 ) {
     // Der Ertragsfaktor der Technik gilt ab dem Tag nach dem Abschluss einer Technologie
-    // und bis zum Monatsabschluss auch für die Investitionsrechnung.
-    economy.tech_yield.clear();
-    economy.tech_yield.extend(
-        research
-            .polities
-            .iter()
-            .map(|entry| entry.effects.yield_factor),
-    );
+    // und bis zum Monatsabschluss auch für die Investitionsrechnung. Der Forschungsschritt
+    // hat ihn schon übergeben; hier wird er aufgefrischt, falls Wissen von außen kam.
+    research.publish_yield(&mut economy);
     produce_and_consume(&mut galaxy, &mut economy, &data);
 }
 

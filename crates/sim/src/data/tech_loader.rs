@@ -1,6 +1,6 @@
 //! Prüfen der Forschungsdaten: Technologiebaum, Starttechnologien, Stellschrauben.
 
-use super::ships::BranchWeights;
+use super::ships::{BranchWeights, ResearchBalance};
 use super::{DataError, GameData};
 
 /// Höchste Stufe, die ein Zweig haben darf.
@@ -25,10 +25,10 @@ pub(super) fn resolve_research(data: &mut GameData) -> Result<(), DataError> {
                 ),
             ));
         }
-        if !tech.cost.is_finite() {
+        if !tech.cost.is_finite() || tech.cost <= 0.0 {
             return Err(invalid(
                 file,
-                format!("`{}`: Kosten sind keine Zahl", tech.key),
+                format!("`{}`: Kosten müssen eine positive Zahl sein", tech.key),
             ));
         }
         for effect in &tech.effects {
@@ -75,8 +75,47 @@ pub(super) fn resolve_research(data: &mut GameData) -> Result<(), DataError> {
         ));
     }
 
-    // --- Starttechnologien der Vorlagen ---
+    check_balance(&data.balance.research).map_err(|message| invalid("balance.ron", message))?;
+
+    // --- Vorlagen der Gemeinschaften ---
     let file = "polities.ron";
+    let max_share = data.balance.research.max_budget_share;
+    // Eine Gemeinschaft wird an Schlüssel und Namen ihrer Vorlage wiedererkannt: Trügen
+    // zwei Vorlagen denselben, bekäme eine davon stillschweigend das Startwissen der anderen.
+    for (index, template) in data.polities.iter().enumerate() {
+        for earlier in &data.polities[..index] {
+            if earlier.key == template.key {
+                return Err(invalid(
+                    file,
+                    format!("Schlüssel `{}` doppelt", template.key),
+                ));
+            }
+            if earlier.name == template.name {
+                return Err(invalid(
+                    file,
+                    format!(
+                        "`{}` und `{}` tragen denselben Namen »{}«",
+                        earlier.key, template.key, template.name
+                    ),
+                ));
+            }
+        }
+        check_weights("research_focus", &template.research_focus)
+            .map_err(|message| invalid(file, format!("`{}`: {message}", template.key)))?;
+        if let Some(share) = template.research_share
+            && !(share.is_finite() && (0.0..=max_share).contains(&share))
+        {
+            return Err(invalid(
+                file,
+                format!(
+                    "`{}`: research_share muss zwischen 0 und max_budget_share ({max_share}) \
+                     aus balance.ron liegen",
+                    template.key
+                ),
+            ));
+        }
+    }
+    // Starttechnologien.
     for index in 0..data.polities.len() {
         let mut ids = Vec::new();
         for key in &data.polities[index].start_techs {
@@ -111,104 +150,79 @@ pub(super) fn resolve_research(data: &mut GameData) -> Result<(), DataError> {
         ids.sort_unstable();
         data.polities[index].start_tech_ids = ids;
     }
+    Ok(())
+}
 
-    // --- Stellschrauben ---
-    let file = "balance.ron";
-    let research = &data.balance.research;
+/// Stellschrauben unter `balance.ron: research`. Die Meldung nennt die Schraube.
+fn check_balance(research: &ResearchBalance) -> Result<(), String> {
     let share = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
     if !share(research.max_budget_share) || !share(research.budget_share) {
-        return Err(invalid(
-            file,
-            "research: budget_share und max_budget_share müssen in 0..1 liegen".into(),
-        ));
+        return Err("research: budget_share und max_budget_share müssen in 0..1 liegen".into());
     }
     if research.budget_share > research.max_budget_share {
-        return Err(invalid(
-            file,
-            "research: budget_share liegt über max_budget_share".into(),
-        ));
+        return Err("research: budget_share liegt über max_budget_share".into());
     }
     if !research.efficiency.is_finite() || research.efficiency <= 0.0 {
-        return Err(invalid(
-            file,
-            "research: efficiency muss positiv sein".into(),
-        ));
+        return Err("research: efficiency muss positiv sein".into());
     }
     if !share(research.population_exponent) {
-        return Err(invalid(
-            file,
-            "research: population_exponent muss in 0..1 liegen".into(),
-        ));
+        return Err("research: population_exponent muss in 0..1 liegen".into());
     }
     if !research.spillover_max.is_finite() || !(0.0..=0.9).contains(&research.spillover_max) {
-        return Err(invalid(
-            file,
-            "research: spillover_max muss in 0..0,9 liegen".into(),
-        ));
+        return Err("research: spillover_max muss in 0..0,9 liegen".into());
     }
     if !research.spillover_half_hops.is_finite() || research.spillover_half_hops <= 0.0 {
-        return Err(invalid(
-            file,
-            "research: spillover_half_hops muss positiv sein".into(),
-        ));
+        return Err("research: spillover_half_hops muss positiv sein".into());
     }
     for (name, weights) in [
         ("auto_peace", &research.auto_peace),
         ("auto_war", &research.auto_war),
     ] {
-        check_weights(name, weights).map_err(|message| invalid(file, message))?;
+        check_weights(name, weights).map_err(|message| format!("research: {message}"))?;
+    }
+    if !research.ai_war_factor.is_finite() || !(0.0..=10.0).contains(&research.ai_war_factor) {
+        return Err("research: ai_war_factor muss in 0..10 liegen".into());
     }
     let level = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
     if !level(research.intel_base)
         || !level(research.intel_ties_max)
         || research.intel_ties_max < research.intel_base
     {
-        return Err(invalid(
-            file,
+        return Err(
             "research: intel_base und intel_ties_max müssen in 0..1 liegen, intel_ties_max \
              nicht unter intel_base"
                 .into(),
-        ));
+        );
     }
     if !research.intel_ties_share.is_finite()
         || research.intel_ties_share <= 0.0
         || research.intel_ties_share > 1.0
     {
-        return Err(invalid(
-            file,
-            "research: intel_ties_share muss über 0 und höchstens bei 1 liegen".into(),
-        ));
+        return Err("research: intel_ties_share muss über 0 und höchstens bei 1 liegen".into());
     }
     if !level(research.intel_decay) {
-        return Err(invalid(
-            file,
-            "research: intel_decay muss in 0..1 liegen".into(),
-        ));
+        return Err("research: intel_decay muss in 0..1 liegen".into());
     }
     if research.estimate_spread as u32 > MAX_TECH_TIER {
-        return Err(invalid(
-            file,
-            format!("research: estimate_spread darf höchstens {MAX_TECH_TIER} sein"),
+        return Err(format!(
+            "research: estimate_spread darf höchstens {MAX_TECH_TIER} sein"
         ));
+    }
+    if !share(research.sighting_per_month) {
+        return Err("research: sighting_per_month muss in 0..1 liegen".into());
     }
     Ok(())
 }
 
 fn check_weights(name: &str, weights: &BranchWeights) -> Result<(), String> {
-    let values = [
-        weights.economy,
-        weights.propulsion,
-        weights.weapons,
-        weights.defense,
-        weights.ground,
-    ];
+    let values = weights.values();
     if values
         .iter()
         .any(|value| !value.is_finite() || *value < 0.0)
         || values.iter().all(|value| *value <= 0.0)
     {
         return Err(format!(
-            "research: {name} braucht Gewichte ab 0 und mindestens ein positives"
+            "{name} braucht Gewichte ab 0 und mindestens ein positives"
         ));
     }
     Ok(())
@@ -275,6 +289,15 @@ mod tests {
             data.techs[3].effects = vec![crate::data::TechEffect::Yield(f64::NAN)];
         });
         assert!(message.contains("Aufschlag"), "{message}");
+        // Eine Technologie ohne Kosten wäre im selben Monat erforscht, in dem sie
+        // erforschbar wird.
+        for cost in [0.0, -5.0, f64::INFINITY] {
+            let message = error_after(|data| data.techs[7].cost = cost);
+            assert!(
+                message.contains("techs.ron") && message.contains("Kosten"),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -301,6 +324,69 @@ mod tests {
     }
 
     #[test]
+    fn templates_must_be_told_apart() {
+        // Zwei Vorlagen mit demselben Namen: Die Gemeinschaft wäre nicht mehr eindeutig
+        // ihrer Vorlage zuzuordnen und bekäme das Startwissen der falschen.
+        let message = error_after(|data| {
+            let name = data.polities[0].name.clone();
+            data.polities[1].name = name;
+        });
+        assert!(
+            message.contains("polities.ron")
+                && message.contains("denselben Namen")
+                && message.contains(&data().polities[0].name)
+                && message.contains(&data().polities[1].key),
+            "{message}"
+        );
+        let message = error_after(|data| {
+            let key = data.polities[2].key.clone();
+            data.polities[5].key = key;
+        });
+        assert!(
+            message.contains("polities.ron")
+                && message.contains("doppelt")
+                && message.contains(&data().polities[2].key),
+            "{message}"
+        );
+        // Die ausgelieferten Vorlagen sind eindeutig.
+        let data = data();
+        for (index, template) in data.polities.iter().enumerate() {
+            for other in &data.polities[index + 1..] {
+                assert_ne!(template.key, other.key);
+                assert_ne!(template.name, other.name);
+            }
+        }
+    }
+
+    #[test]
+    fn research_traits_of_templates_are_checked() {
+        let message = error_after(|data| data.polities[3].research_focus.weapons = -0.5);
+        assert!(
+            message.contains("polities.ron")
+                && message.contains("research_focus")
+                && message.contains(&data().polities[3].key),
+            "{message}"
+        );
+        let message =
+            error_after(|data| data.polities[3].research_focus = BranchWeights::default());
+        assert!(message.contains("research_focus"), "{message}");
+        let message = error_after(|data| {
+            data.polities[4].research_share = Some(data.balance.research.max_budget_share + 0.01)
+        });
+        assert!(
+            message.contains("polities.ron") && message.contains("research_share"),
+            "{message}"
+        );
+        let message = error_after(|data| data.polities[4].research_share = Some(f64::NAN));
+        assert!(message.contains("research_share"), "{message}");
+        // Ohne eigene Angaben gelten gleiche Gewichte und der übliche Etat.
+        let mut data = data();
+        data.polities[0].research_share = None;
+        data.polities[0].research_focus = BranchWeights::EVEN;
+        resolve_research(&mut data).unwrap();
+    }
+
+    #[test]
     fn research_balance_is_checked() {
         let cases: Vec<(&str, Box<dyn Fn(&mut GameData)>)> = vec![
             (
@@ -318,6 +404,14 @@ mod tests {
             (
                 "population_exponent",
                 Box::new(|data| data.balance.research.population_exponent = 1.5),
+            ),
+            (
+                "ai_war_factor",
+                Box::new(|data| data.balance.research.ai_war_factor = f64::NAN),
+            ),
+            (
+                "sighting_per_month",
+                Box::new(|data| data.balance.research.sighting_per_month = 1.5),
             ),
             (
                 "spillover_max",

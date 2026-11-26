@@ -47,6 +47,8 @@ macro_rules! sim_state {
             /// Setzt den Zustand in die Welt ein und ersetzt eine laufende Partie.
             pub fn install(mut self, world: &mut World) {
                 self.galaxy.rebuild_index();
+                // Ältere Spielstände kennen neuere Listen je Gemeinschaft noch nicht.
+                self.economy.sync_polities();
                 $( world.insert_resource(self.$field); )*
             }
 
@@ -122,11 +124,13 @@ impl SimState {
             ),
         );
         let mut economy = setup_economy(data, &galaxy, &polities);
-        let logistics = setup_logistics(data, &galaxy, &polities);
+        let mut logistics = setup_logistics(data, &galaxy, &polities);
         economy.initial_money += logistics.money();
         // Die Eliten erhalten ihr Geld aus dem der Haushalte: Die Summe bleibt gleich.
         let finance = setup_finance(data, &galaxy, &polities, &mut economy, &logistics);
         let research = setup_research(data, &polities);
+        // Das Startwissen wirkt vom ersten Takt an, auch für Befehle vor dem ersten Tag.
+        research.publish_effects(&mut economy, &mut logistics);
         let fleets = setup_fleets(data, &galaxy, &polities);
         Self {
             config,

@@ -2,8 +2,8 @@
 //! werden ausgeglichen.
 
 use super::{
-    Economy, EquityFlows, Money, expected_return, factor_of, pay, recipes_of, to_credits, to_money,
-    unit_economics_at,
+    Economy, EquityFlows, Money, book_income, expected_return, factor_of, pay, recipes_of,
+    to_credits, to_money, unit_economics_at,
 };
 use crate::data::{GameData, Sector};
 use crate::galaxy::Galaxy;
@@ -349,6 +349,7 @@ pub fn settle_public_accounts(
     flows: &mut EquityFlows,
 ) {
     let balance = &data.balance.economy;
+    economy.sync_polities();
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
             continue;
@@ -393,6 +394,7 @@ pub fn settle_public_accounts(
             flows
                 .dividends
                 .push((IssuerId::Kontor(system.id), dividend));
+            book_income(&mut economy.state_income_running, owner, tariff);
         }
     }
     for polity in 0..economy.treasuries.len() {

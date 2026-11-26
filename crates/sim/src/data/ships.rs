@@ -451,7 +451,7 @@ pub struct BattleBalance {
 }
 
 /// Ein Wert je Forschungszweig.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BranchWeights {
     pub economy: f64,
     pub propulsion: f64,
@@ -461,6 +461,20 @@ pub struct BranchWeights {
 }
 
 impl BranchWeights {
+    /// Alle Zweige gleich: als Faktor ohne Wirkung.
+    pub const EVEN: BranchWeights = BranchWeights {
+        economy: 1.0,
+        propulsion: 1.0,
+        weapons: 1.0,
+        defense: 1.0,
+        ground: 1.0,
+    };
+
+    /// [`BranchWeights::EVEN`], für fehlende Angaben in Datendateien und Spielständen.
+    pub fn even() -> Self {
+        Self::EVEN
+    }
+
     pub fn of(&self, branch: TechBranch) -> f64 {
         match branch {
             TechBranch::Economy => self.economy,
@@ -470,12 +484,18 @@ impl BranchWeights {
             TechBranch::Ground => self.ground,
         }
     }
+
+    /// Die fünf Werte in der Reihenfolge von [`TechBranch::ALL`].
+    pub fn values(&self) -> [f64; 5] {
+        TechBranch::ALL.map(|branch| self.of(branch))
+    }
 }
 
 /// `balance.ron: research`
 #[derive(Clone, Debug, Deserialize)]
 pub struct ResearchBalance {
-    /// Anteil der Staatseinnahmen, mit dem jede Gemeinschaft beginnt.
+    /// Anteil der laufenden Staatseinnahmen, mit dem eine Gemeinschaft beginnt, deren
+    /// Vorlage keinen eigenen nennt.
     pub budget_share: f64,
     /// Höchster Anteil, den eine Gemeinschaft einstellen kann.
     pub max_budget_share: f64,
@@ -483,13 +503,17 @@ pub struct ResearchBalance {
     pub efficiency: f64,
     /// Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
     pub population_exponent: f64,
-    /// Größter Nachlass auf eine Technologie, die Gemeinschaften in Kontakt schon beherrschen.
+    /// Größter Nachlass auf eine Technologie, die Gemeinschaften in Kontakt erkennbar
+    /// beherrschen.
     pub spillover_max: f64,
     /// Sprünge im Routennetz, nach denen das Gewicht eines Nachbarn halbiert ist.
     pub spillover_half_hops: f64,
     /// Vorlieben der automatischen Zielwahl im Frieden und im Krieg.
     pub auto_peace: BranchWeights,
     pub auto_war: BranchWeights,
+    /// KI: Faktor auf den üblichen Etat ihrer Vorlage, solange sie im Krieg steht
+    /// (gedeckelt bei `max_budget_share`).
+    pub ai_war_factor: f64,
     /// Einblick in fremde Forschung (0..1) ohne jede Verflechtung.
     pub intel_base: f32,
     /// Einblick, den Besitz an den Betrieben der anderen höchstens verschafft.
@@ -501,6 +525,9 @@ pub struct ResearchBalance {
     pub intel_decay: f32,
     /// Größte Unschärfe einer Schätzung in Stufen nach oben und nach unten.
     pub estimate_spread: u8,
+    /// Wahrscheinlichkeit je Monat, dass ein Betrachter eine weitere Stufe bestätigt, die
+    /// eine fremde Gemeinschaft in einem Zweig schon beherrscht.
+    pub sighting_per_month: f64,
 }
 
 fn one() -> f32 {

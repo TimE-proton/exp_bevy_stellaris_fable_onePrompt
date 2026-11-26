@@ -175,8 +175,12 @@ fn traded_goods(sim: &Headless, system: SystemId) -> (Vec<usize>, Vec<usize>) {
 fn a_blockade_raises_prices_and_idles_factories() {
     let attacker = PolityId(0);
     let victim = PolityId(1);
-    let mut blockaded = observer(7);
-    let mut control = observer(7);
+    // Der Seed bestimmt, welche Kolonie getroffen wird. Die Prüfung braucht eine, die
+    // Güter von außen bezieht und im Frieden gut versorgt ist; das gilt für etwa jede
+    // zweite Partie. Ändert sich der Verlauf der ersten Jahrzehnte (hier: Forschung
+    // bemisst sich an den laufenden Staatseinnahmen), passt ein anderer Seed.
+    let mut blockaded = observer(4);
+    let mut control = observer(4);
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let target = largest_colony_system(&blockaded, victim);

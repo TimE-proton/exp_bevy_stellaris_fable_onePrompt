@@ -33,7 +33,8 @@ pub enum SimCommand {
     SetResearchTarget {
         tech: Option<u16>,
     },
-    /// Anteil der Staatseinnahmen, der in die Forschung fließt (0,1 = 10 %).
+    /// Anteil der laufenden Staatseinnahmen, der in die Forschung fließt (0,1 = 10 %),
+    /// zwischen 0 und `max_budget_share` aus `balance.ron`.
     SetResearchBudget {
         share: f64,
     },
