@@ -412,6 +412,17 @@ fn larger_economies_research_faster_in_a_running_game() {
         let weight = |index: usize| {
             output[index] * people[index].powf(data.balance.research.population_exponent)
         };
+        // Wissen einer Gemeinschaft: die Zahl ihrer Technologien und was sie nach Liste
+        // gekostet haben.
+        let known = |index: usize| research.known_count(PolityId::from_index(index));
+        let worth = |index: usize| -> f64 {
+            data.techs
+                .iter()
+                .zip(&research.polities[index].known)
+                .filter(|(_, known)| **known)
+                .map(|(tech, _)| tech.cost)
+                .sum()
+        };
         for a in 0..count {
             for b in 0..count {
                 if weight(a) < weight(b) * 1.3 {
@@ -427,10 +438,19 @@ fn larger_economies_research_faster_in_a_running_game() {
                     points(a),
                     points(b)
                 );
+                // Wer deutlich mehr leistet, weiß nicht weniger. Die Zahl allein sagt das
+                // nicht: Eine Technologie der dritten Stufe kostet so viel wie zwei der
+                // zweiten, und welche eine Gemeinschaft als Nächstes angeht, hängt an ihren
+                // Vorlieben. Im Rückstand ist erst, wer weniger Technologien kennt und
+                // dafür auch weniger aufgewendet hat.
                 assert!(
-                    research.known_count(PolityId::from_index(a))
-                        >= research.known_count(PolityId::from_index(b)),
-                    "Seed {seed}: G{a} leistet deutlich mehr als G{b}, weiß aber weniger"
+                    known(a) >= known(b) || worth(a) >= worth(b),
+                    "Seed {seed}: G{a} leistet deutlich mehr als G{b}, weiß aber weniger \
+                     ({} Technologien im Wert von {:.0} gegen {} im Wert von {:.0})",
+                    known(a),
+                    worth(a),
+                    known(b),
+                    worth(b)
                 );
             }
         }

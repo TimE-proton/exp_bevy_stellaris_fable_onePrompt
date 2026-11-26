@@ -3,8 +3,9 @@
 use crate::clock::{SimClock, TICKS_PER_DAY};
 use crate::command::{CommandLog, CommandQueue, CommandSource, ReplayScript, SimCommand};
 use crate::data::GameData;
+use crate::fleet::{Fleets, Stance};
 use crate::galaxy::Galaxy;
-use crate::ids::PolityId;
+use crate::ids::{FleetId, PolityId};
 use crate::polity::Polities;
 use crate::state::{SaveGame, SimConfig, SimState, hash_world, new_game};
 use crate::tech::Research;
@@ -305,6 +306,17 @@ pub fn check_invariants(world: &World) -> Result<(), String> {
     if let Some(anomaly) = stats.anomaly {
         return Err(anomaly);
     }
+    // Flotten: Schiffe in ihren Grenzen, keine Flotte ohne Schiffe, Nummern eindeutig,
+    // die Stärke passend zu den Schiffen.
+    let fleets = world.resource::<crate::fleet::Fleets>();
+    if let Some(anomaly) = fleets.find_anomaly(world.resource::<GameData>()) {
+        return Err(anomaly);
+    }
+    // Gefechte: Jede Flotte im Gefecht gehört zu genau einem, das läuft, und umgekehrt.
+    let battles = world.resource::<crate::fleet::Battles>();
+    if let Some(anomaly) = battles.find_anomaly(fleets) {
+        return Err(anomaly);
+    }
     let galaxy = world.resource::<Galaxy>();
     for planet in &galaxy.planets {
         if !planet.population.is_finite() || planet.population < 0.0 {
@@ -342,6 +354,10 @@ pub struct RunSummary {
     pub free_planets: usize,
     pub polities: Vec<PolitySummary>,
     pub economy: EconomyStats,
+    /// Gefechte, die in der Partie begonnen haben, und Schiffe, die darin verloren gingen
+    /// (ohne Bordjäger).
+    pub battles: u64,
+    pub ships_lost: u64,
     /// Erster Invariantenverstoß, falls es einen gab.
     pub violation: Option<String>,
 }
@@ -356,6 +372,23 @@ pub struct PolitySummary {
     pub techs: usize,
     /// Höchste erforschte Stufe je Zweig, in der Reihenfolge von `TechBranch::ALL`.
     pub tiers: [u8; 5],
+    /// Bestehende Flotten und die Schiffe darin.
+    pub fleets: usize,
+    pub ships: usize,
+    /// Summe der Flottenstärken.
+    pub strength: f64,
+    /// Offene Bauaufträge.
+    pub orders: usize,
+    /// Soldrückstand 0..1.
+    pub arrears: f64,
+    /// Schiffe, die in Gefechten verloren gingen (ohne Bordjäger).
+    pub ships_lost: usize,
+    /// Staatskasse in Credits.
+    pub treasury: f64,
+    /// Kriegsmüdigkeit 0..100.
+    pub war_weariness: f64,
+    /// Bevölkerungsgewichteter Zusammenhalt der eigenen Welten, 0..100.
+    pub cohesion: f64,
 }
 
 pub fn summarize(sim: &Headless) -> RunSummary {
@@ -363,6 +396,18 @@ pub fn summarize(sim: &Headless) -> RunSummary {
     let config = sim.world().resource::<SimConfig>();
     let data = sim.world().resource::<GameData>();
     let research = sim.research();
+    let fleets = sim.world().resource::<crate::fleet::Fleets>();
+    let battles = sim.world().resource::<crate::fleet::Battles>();
+    let economy = sim.world().resource::<crate::economy::Economy>();
+    let finance = sim.world().resource::<crate::finance::Finance>();
+    let cohesion = |polity: PolityId| {
+        let (mut weight, mut weighted) = (0.0, 0.0);
+        for planet in galaxy.planets_of(polity) {
+            weight += planet.population;
+            weighted += planet.population * finance.region(planet.id).cohesion;
+        }
+        weighted / f64::max(weight, 1e-9)
+    };
     RunSummary {
         seed: config.seed,
         days: sim.clock().day(),
@@ -386,9 +431,23 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                 techs: research.known_count(polity.id),
                 tiers: crate::data::TechBranch::ALL
                     .map(|branch| research.tier(data, polity.id, branch)),
+                fleets: fleets.of(polity.id).count(),
+                ships: fleets.ship_count(polity.id),
+                // Von null an gezählt: Die Summe über nichts wäre sonst minus null.
+                strength: fleets
+                    .of(polity.id)
+                    .fold(0.0, |sum, fleet| sum + fleet.strength as f64),
+                orders: fleets.orders_of(polity.id).count(),
+                arrears: fleets.arrears_of(polity.id) as f64,
+                ships_lost: battles.ships_lost_by(polity.id) as usize,
+                treasury: crate::economy::to_credits(economy.treasury(polity.id)),
+                war_weariness: finance.polity(polity.id).war_weariness,
+                cohesion: cohesion(polity.id),
             })
             .collect(),
         economy: economy_stats(sim.world()),
+        battles: battles.next_id as u64,
+        ships_lost: battles.total_ships_lost() as u64,
         violation: check_invariants(sim.world()).err(),
     }
 }
@@ -400,14 +459,117 @@ pub fn run_ai_game(data: &GameData, seed: u64, days: u64) -> Headless {
     sim
 }
 
+/// Was ein Ereignis eines Kriegsdrehbuchs auslöst.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptedAct {
+    /// A erklärt B den Krieg und schickt alle seine Flotten im Blockadeauftrag in das
+    /// Heimatsystem von B.
+    War,
+    /// A schließt mit B Frieden.
+    Peace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptedEvent {
+    /// Tag, an dessen Beginn die Befehle eingestellt werden.
+    pub day: u64,
+    pub act: ScriptedAct,
+    pub a: PolityId,
+    pub b: PolityId,
+}
+
+/// Kriege nach Drehbuch. Solange keine KI Krieg führt, lassen sich Gefechte, Blockaden und
+/// ihre Folgen nur so in ganzen Partien ansehen und prüfen. Das Drehbuch stellt gewöhnliche
+/// Befehle ein, wie sie auch ein Spieler gäbe; abgelehnte stehen im Befehlsprotokoll.
+#[derive(Clone, Debug, Default)]
+pub struct WarScript {
+    events: Vec<ScriptedEvent>,
+}
+
+impl WarScript {
+    pub fn new(mut events: Vec<ScriptedEvent>) -> Self {
+        // Nach Tag; am selben Tag zuerst die Friedensschlüsse, sonst wie angegeben.
+        events.sort_by_key(|event| (event.day, event.act == ScriptedAct::War));
+        Self { events }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    fn issue(sim: &mut Headless, event: &ScriptedEvent) {
+        let (a, b) = (event.a, event.b);
+        if event.act == ScriptedAct::Peace {
+            sim.issue(a, SimCommand::MakePeace { target: b });
+            return;
+        }
+        sim.issue(a, SimCommand::DeclareWar { target: b });
+        let target = sim
+            .polities()
+            .list
+            .get(b.index())
+            .and_then(|polity| polity.capital)
+            .map(|capital| sim.galaxy().planet(capital).system);
+        let own: Vec<FleetId> = sim
+            .world()
+            .resource::<Fleets>()
+            .of(a)
+            .map(|fleet| fleet.id)
+            .collect();
+        for fleet in own {
+            sim.issue(
+                a,
+                SimCommand::SetStance {
+                    fleet,
+                    stance: Stance::Blockade,
+                },
+            );
+            if let Some(to) = target {
+                sim.issue(a, SimCommand::MoveFleet { fleet, to });
+            }
+        }
+    }
+
+    /// Lässt die Partie bis zum Beginn des Tages `day` laufen und stellt unterwegs die
+    /// fälligen Befehle ein. `exact` rechnet jeden Takt, statt Leertakte zu überspringen.
+    pub fn run_until(&self, sim: &mut Headless, day: u64, exact: bool) {
+        let advance = |sim: &mut Headless, to: u64| {
+            let days = to.saturating_sub(sim.clock().day());
+            if exact {
+                sim.run_days_exact(days);
+            } else {
+                sim.run_days(days);
+            }
+        };
+        for event in &self.events {
+            if event.day < sim.clock().day() || event.day >= day {
+                continue;
+            }
+            advance(sim, event.day);
+            Self::issue(sim, event);
+        }
+        advance(sim, day);
+    }
+}
+
 /// Wie [`run_ai_game`], prüft aber jährlich die Invarianten und meldet den ersten Verstoß.
 pub fn run_checked(data: &GameData, seed: u64, days: u64) -> (Headless, Option<String>) {
+    run_scripted(data, seed, days, &WarScript::default())
+}
+
+/// Wie [`run_checked`], mit Kriegen nach Drehbuch.
+pub fn run_scripted(
+    data: &GameData,
+    seed: u64,
+    days: u64,
+    script: &WarScript,
+) -> (Headless, Option<String>) {
     let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
     let mut violation = None;
     let mut done = 0;
     while done < days {
         let step = crate::clock::DAYS_PER_YEAR.min(days - done);
-        sim.run_days(step);
+        script.run_until(&mut sim, done + step, false);
         done += step;
         if violation.is_none()
             && let Err(message) = check_invariants(sim.world())
@@ -421,6 +583,17 @@ pub fn run_checked(data: &GameData, seed: u64, days: u64) -> (Headless, Option<S
 /// Viele Seeds parallel. Jeder Lauf ist für sich einfädig und deterministisch; die
 /// Ergebnisse kommen in Seed-Reihenfolge zurück, unabhängig von der Thread-Zahl.
 pub fn sweep(data: &GameData, seeds: &[u64], days: u64, jobs: usize) -> Vec<RunSummary> {
+    sweep_scripted(data, seeds, days, jobs, &WarScript::default())
+}
+
+/// Wie [`sweep`], jeder Lauf mit denselben Kriegen nach Drehbuch.
+pub fn sweep_scripted(
+    data: &GameData,
+    seeds: &[u64],
+    days: u64,
+    jobs: usize,
+    script: &WarScript,
+) -> Vec<RunSummary> {
     let jobs = jobs.clamp(1, seeds.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(Vec::with_capacity(seeds.len()));
@@ -432,7 +605,7 @@ pub fn sweep(data: &GameData, seeds: &[u64], days: u64, jobs: usize) -> Vec<RunS
                     let Some(seed) = seeds.get(index) else {
                         break;
                     };
-                    let (sim, violation) = run_checked(data, *seed, days);
+                    let (sim, violation) = run_scripted(data, *seed, days, script);
                     let mut summary = summarize(&sim);
                     summary.violation = violation.or(summary.violation);
                     results
@@ -613,6 +786,75 @@ mod tests {
         let hashes =
             |runs: &[RunSummary]| runs.iter().map(|r| (r.seed, r.hash)).collect::<Vec<_>>();
         assert_eq!(hashes(&serial), hashes(&parallel));
+    }
+
+    #[test]
+    fn a_scripted_war_leads_to_battles_and_is_the_same_with_every_tick() {
+        let data = data();
+        let event = |day, act, a, b| ScriptedEvent {
+            day,
+            act,
+            a: PolityId(a),
+            b: PolityId(b),
+        };
+        // Angegeben in beliebiger Reihenfolge; gespielt nach Tagen.
+        let script = WarScript::new(vec![
+            event(700, ScriptedAct::Peace, 0, 1),
+            event(40, ScriptedAct::War, 0, 1),
+            event(40, ScriptedAct::War, 2, 1),
+        ]);
+        assert!(!script.is_empty() && WarScript::default().is_empty());
+        let (sim, violation) = run_scripted(&data, 4, 2 * DAYS_PER_YEAR, &script);
+        assert_eq!(violation, None);
+        let summary = summarize(&sim);
+        assert!(
+            summary.battles >= 1,
+            "die Flotten sind aufeinandergetroffen"
+        );
+        assert!(summary.ships_lost > 0);
+        assert_eq!(
+            summary.ships_lost as usize,
+            summary
+                .polities
+                .iter()
+                .map(|polity| polity.ships_lost)
+                .sum::<usize>()
+        );
+        // Die Befehle stehen im Protokoll; der Friede kam am genannten Tag.
+        let log = sim.command_log();
+        let declared = log
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.command, SimCommand::DeclareWar { .. }))
+            .count();
+        assert_eq!(declared, 2);
+        let peace = log
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.command, SimCommand::MakePeace { .. }))
+            .expect("der Friedensschluss");
+        assert_eq!(peace.tick, 700 * TICKS_PER_DAY);
+        assert_eq!(peace.outcome, CommandOutcome::Applied);
+        assert!(
+            !sim.world()
+                .resource::<crate::diplomacy::Diplomacy>()
+                .at_war(PolityId(0), PolityId(1))
+        );
+
+        // In Jahresschritten oder am Stück, mit oder ohne Leertakte: derselbe Verlauf.
+        let mut exact = Headless::new(
+            data.clone(),
+            SimConfig {
+                seed: 4,
+                player: None,
+            },
+        );
+        script.run_until(&mut exact, 2 * DAYS_PER_YEAR, true);
+        assert_eq!(exact.clock(), sim.clock());
+        assert_eq!(exact.hash(), sim.hash());
+        // Ohne Drehbuch ist es der gewöhnliche Lauf.
+        let (plain, _) = run_scripted(&data, 4, 200, &WarScript::default());
+        assert_eq!(plain.hash(), run_ai_game(&data, 4, 200).hash());
     }
 
     #[test]

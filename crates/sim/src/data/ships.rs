@@ -405,21 +405,52 @@ pub struct TechDef {
 pub struct MilitaryBalance {
     pub starting_fleet: Vec<(String, u32)>,
     pub upkeep_per_month: f64,
+    /// Anteil der Lücke zwischen ausgebliebenem Sold und Rückstand, der je Monat
+    /// geschlossen wird (Glättung des Soldrückstands).
+    pub arrears_smoothing: f32,
     pub yard_capital_per_slot: f64,
+    /// Aufschlag der Werft auf den Einkaufswert der Bauteile; Erlös der Rüstungsfirma.
+    pub yard_fee: f64,
+    /// So viele Aufträge nimmt die Werft einer Welt höchstens an.
+    pub yard_queue: u32,
     pub repair_per_day: f32,
     pub repair_parts: f64,
+    /// Anteil einer vollständigen Instandsetzung, der auf den Rumpf entfällt (0..1); der
+    /// Rest entfällt auf die Module.
+    pub repair_hull_share: f32,
+    /// Anteil des Kampfwerts eines Schiffs, der an seinen Modulen hängt (0..1).
+    pub module_weight: f32,
+    /// Anteil des Bordvorrats, den eine Flotte im eigenen System je Tag nachfasst.
+    pub resupply_per_day: f32,
     pub fuel_per_distance: f32,
     pub dry_speed: f32,
     pub ammo_goods: f64,
     pub fuel_goods: f64,
     pub hull_good: String,
     pub ammo_good: String,
+    /// Moralabzug der Besatzungen bei vollem Soldrückstand (Skala 0..100).
+    pub morale_per_arrears: f32,
+    /// Tage, die eine Flotte nach dem Abzug aus einem Gefecht braucht, um sich zu sammeln.
+    pub regroup_days: u64,
+    /// Zuwachs der Kriegsmüdigkeit (0..100), wenn eine Gemeinschaft in einem Gefecht den
+    /// Bauwert ihrer gesamten Flotte verlöre; kleinere Verluste zählen anteilig.
+    pub weariness_per_navy_lost: f64,
+    /// Anteil am Bauwert der gesamten Flotte, dessen Verlust in einem verlorenen Gefecht
+    /// als schwere Niederlage gilt, und der Faktor, um den dann die Kurse fallen.
+    pub heavy_defeat_share: f64,
+    pub defeat_shock: f64,
+    /// Anteil, um den ein Trümmerfeld je Monat verblasst.
+    pub debris_fade_per_month: f32,
     #[serde(skip)]
     pub starting_fleet_ids: Vec<(u16, u32)>,
     #[serde(skip)]
     pub hull_good_id: GoodId,
     #[serde(skip)]
     pub ammo_good_id: GoodId,
+    /// Stärkepunkte je Credit Kampfwert: so gewählt, dass eine unversehrte Startflotte
+    /// `fleets.start_strength` erreicht.
+    #[serde(skip)]
+    pub strength_per_value: f64,
 }
 
 /// Drei Werte je Doktrin: offensiv, ausgewogen, defensiv.
@@ -666,6 +697,9 @@ pub struct ResearchBalance {
     /// Anteil, um den Einblick aus Ereignissen je Monat auf das Niveau der Verflechtung
     /// zurückfällt.
     pub intel_decay: f32,
+    /// Einblick (0..1), den ein Gefecht jeder der beiden Seiten in die Forschung der
+    /// anderen verschafft.
+    pub intel_per_battle: f32,
     /// Größte Unschärfe einer Schätzung in Stufen nach oben und nach unten.
     pub estimate_spread: u8,
     /// Wahrscheinlichkeit je Monat, dass ein Betrachter eine weitere Stufe bestätigt, die

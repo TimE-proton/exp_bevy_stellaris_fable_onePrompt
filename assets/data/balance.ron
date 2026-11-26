@@ -115,12 +115,11 @@
         raid_chance: 0.35,
     ),
     fleets: (
+        // Stärke einer unversehrten Startflotte. Die Stärke jeder Flotte ist der Bauwert
+        // ihrer Schiffe mal deren Zustand, an diesem Maß geeicht.
         start_strength: 100.0,
         // Strecke je Tag.
         speed: 22.0,
-        // Anteil der eigenen Stärke, den eine Flotte dem Gegner je Tag zufügt
-        // (grobe Auflösung bis Meilenstein 4).
-        daily_damage: 0.06,
     ),
     finance: (
         // Anteil des Geldes einer Heimatwelt, den zu Beginn ihre Elite hält.
@@ -222,12 +221,28 @@
         starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
         // Monatlicher Unterhalt als Anteil am Bauwert; der Sold geht an die Haushalte.
         upkeep_per_month: 0.012,
+        // Reicht die Staatskasse nicht, bleibt Sold aus. Der Rückstand (0..1) folgt dem
+        // ausgebliebenen Anteil je Monat um diesen Anteil der Lücke.
+        arrears_smoothing: 0.5,
         // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
         yard_capital_per_slot: 4.0,
+        // Aufschlag der Werft auf den Einkaufswert der Bauteile. Er geht als Erlös an die
+        // Rüstungsfirma der Welt: An Staatsaufträgen verdienen ihre Anteilseigner mit.
+        yard_fee: 0.15,
+        // So viele Aufträge nimmt die Werft einer Welt höchstens an.
+        yard_queue: 8,
         // Anteil des Rumpfes, der im Dock je Tag instand gesetzt wird, und Rumpfsegmente
         // je vollständig repariertem Rumpf, als Anteil der Bausegmente.
         repair_per_day: 0.01,
         repair_parts: 0.4,
+        // Davon entfällt dieser Anteil auf den Rumpf, der Rest auf die Module.
+        repair_hull_share: 0.5,
+        // Anteil des Kampfwerts eines Schiffs, der an seinen Modulen hängt: Sind alle
+        // ausgefallen, zählt der Rumpf nur noch mit dem Rest.
+        module_weight: 0.5,
+        // Anteil des Bordvorrats an Munition und Treibstoff, den eine Flotte im eigenen,
+        // nicht blockierten System je Tag vom Markt nachfasst.
+        resupply_per_day: 0.05,
         // Treibstoff je Streckeneinheit auf der Karte, als Anteil des Tankinhalts.
         fuel_per_distance: 0.0012,
         // Ohne Treibstoff fährt eine Flotte nur noch mit diesem Anteil ihrer Fahrt.
@@ -238,6 +253,29 @@
         // Güter für Rumpfreparaturen und für die Munition an Bord.
         hull_good: "rumpfsegmente",
         ammo_good: "munition",
+
+        // --- Gefechte in der Partie ---
+        // Moral der Besatzungen zu Gefechtsbeginn: battle.morale_start, gemindert um die
+        // Kriegsmüdigkeit (battle.morale_per_weariness) und um diesen Abzug bei vollem
+        // Soldrückstand.
+        morale_per_arrears: 30.0,
+        // Wer das Feld nicht hält, weicht in ein Nachbarsystem aus und sammelt sich so
+        // viele Tage, der Marsch dorthin eingerechnet. Solange beginnt die Flotte kein
+        // Gefecht, tritt keinem bei und zählt nicht für Blockade, Kaperfahrt und Geleit.
+        // Dasselbe gilt nach einem Gefecht ohne Entscheidung (Patt oder Zeitgrenze) für
+        // alle, die nicht im eigenen System stehen: Dort bleibt nur, wer zu Hause ist.
+        regroup_days: 30,
+        // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
+        // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
+        weariness_per_navy_lost: 20.0,
+        // Schwere Niederlage: Wer das Feld nicht hält und dabei mindestens diesen Anteil
+        // am Bauwert seiner gesamten Flotte verliert, dessen Kurse fallen um den Faktor
+        // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock). Ein Gefecht
+        // ohne Entscheidung ist keine Niederlage.
+        heavy_defeat_share: 0.25,
+        defeat_shock: 0.9,
+        // Trümmerfelder verblassen je Monat um diesen Anteil (rund die Hälfte in drei Jahren).
+        debris_fade_per_month: 0.02,
     ),
     battle: (
         // Gefechtszeit je Takt in Sekunden. 20 Takte sind ein Kalendertag.
@@ -417,7 +455,8 @@
         // nicht ein Vielfaches.
         // Das Geld ist das Gehalt der Forschenden: Es fließt aus der Staatskasse an die
         // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
-        // Kriegskasse und Schuldendienst gehen vor.
+        // Kriegskasse, Schuldendienst und die Flotte (Sold, Nachschub, Instandsetzung,
+        // Werften) gehen vor: Sie werden am Monatsersten vor der Forschung bezahlt.
         budget_share: 0.20,
         max_budget_share: 0.30,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
@@ -457,6 +496,11 @@
         // Was Ereignisse (etwa beobachtete Gefechte) darüber hinaus einbringen, verliert je
         // Monat diesen Anteil.
         intel_decay: 0.02,
+        // Ein Gefecht zeigt beiden Seiten die Technik der anderen am Werk: Jede gewinnt
+        // so viel Einblick in die Forschung des Gegners. Vom Grundwert aus engt ein Gefecht
+        // bei 0,3 die Schätzung um eine Stufe ein, nach dreien ist sie genau; ohne neue
+        // Gefechte verblasst der Gewinn wieder (intel_decay).
+        intel_per_battle: 0.3,
         // Schätzungen fremder Stufen sind höchstens 2 * estimate_spread Stufen weit; bei
         // vollem Einblick sind sie genau. Die untere Grenze einer Schätzung ist bestätigt
         // und fällt nie.

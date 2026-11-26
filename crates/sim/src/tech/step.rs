@@ -262,7 +262,9 @@ pub fn research_month(
 
         // Der Etat ist ein Anteil der laufenden Einnahmen des Vormonats. Gezahlt wird er
         // nur aus dem, was über der Rücklage des Staates liegt: Eine leere Kasse bremst
-        // die Forschung ebenso wie ein Kriegsschatz, der erst gefüllt werden muss.
+        // die Forschung ebenso wie ein Kriegsschatz, der erst gefüllt werden muss. Sold
+        // und Einkäufe der Flotte sind an diesem Tag schon abgegangen (Reihenfolge der
+        // Systeme in `SimSet`): Sie gehen der Forschung vor.
         let income = economy.state_income_of(id).max(0);
         let free = economy.treasury(id) - state_reserve(economy, data, id, population);
         let budget = ((entry.budget_share * income as f64).round() as Money).min(free);

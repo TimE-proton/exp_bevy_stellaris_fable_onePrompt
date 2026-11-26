@@ -5,16 +5,17 @@
 //! werden mit Takt und laufender Nummer protokolliert. Seed, Datenprüfsumme und dieses
 //! Protokoll genügen, um eine Partie exakt zu wiederholen.
 
+use crate::battle::{Doctrine, Formation};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
-use crate::data::GameData;
+use crate::data::{GameData, ShipClass};
 use crate::diplomacy::{self, Diplomacy};
 use crate::economy::{Economy, to_credits, to_money};
 use crate::finance::shares::ExpropriationScope;
 use crate::finance::{self, Finance};
-use crate::fleet::{self, Fleets, Stance};
+use crate::fleet::{self, Battles, Fleets, Stance};
 use crate::galaxy::Galaxy;
-use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, SystemId};
+use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use crate::logistics::Logistics;
 use crate::polity::{self, Polities};
 use crate::tech::{self, Research};
@@ -91,6 +92,46 @@ pub enum SimCommand {
     /// Rücklage in Credits, die der Staat hält, statt sie wieder auszugeben.
     SetTreasuryTarget {
         amount: f64,
+    },
+    /// Bei der Werft einer eigenen Welt ein Schiff in Auftrag geben (`design` ist der
+    /// Index in `GameData::designs`). Der Entwurf muss baubar sein: Die Gemeinschaft kennt
+    /// alle Technologien, die er voraussetzt.
+    BuildShip {
+        planet: PlanetId,
+        design: u16,
+    },
+    /// Einen eigenen Bauauftrag streichen. Verbautes wird nicht erstattet.
+    CancelBuild {
+        order: u32,
+    },
+    /// Zwei eigene Flotten vereinigen, die im selben System liegen.
+    MergeFleets {
+        from: FleetId,
+        into: FleetId,
+    },
+    /// Die genannten Schiffe aus einer Flotte lösen; sie bilden im selben System eine neue.
+    SplitFleet {
+        fleet: FleetId,
+        ships: Vec<ShipId>,
+    },
+    /// Aufstellung und Doktrin einer Flotte: stehende Befehle für künftige Gefechte, die
+    /// auch in einem laufenden Gefecht sofort gelten.
+    SetFleetOrders {
+        fleet: FleetId,
+        formation: Formation,
+        doctrine: Doctrine,
+    },
+    /// Eine Flotte bricht das Gefecht ab, in dem sie steht: Ihre Schiffe verlassen das
+    /// Feld, und was entkommt, weicht in ein Nachbarsystem aus.
+    Retreat {
+        fleet: FleetId,
+    },
+    /// Bei der Werft einer eigenen Welt ein Schiff einer Klasse in Auftrag geben. Den
+    /// Entwurf wählt die Werft: den wertvollsten der Klasse, den die Gemeinschaft mit
+    /// ihrem Wissen bauen kann (`GameData::best_design`).
+    BuildClass {
+        planet: PlanetId,
+        class: ShipClass,
     },
 }
 
@@ -180,6 +221,7 @@ pub struct CommandContext<'w> {
     pub research: ResMut<'w, Research>,
     pub logistics: Res<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
+    pub battles: ResMut<'w, Battles>,
     pub diplomacy: ResMut<'w, Diplomacy>,
     pub chronicle: ResMut<'w, Chronicle>,
 }
@@ -399,6 +441,71 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
         SimCommand::SetTreasuryTarget { amount } => {
             ctx.economy.treasury_targets[polity.index()] = to_money(amount.max(0.0));
             Ok(())
+        }
+        SimCommand::BuildShip { planet, design } => {
+            let day = ctx.clock.day();
+            fleet::order_ship(
+                &ctx.data,
+                &ctx.galaxy,
+                &ctx.economy,
+                &ctx.polities,
+                &mut ctx.fleets,
+                polity,
+                *planet,
+                *design,
+                ctx.research.known(polity),
+                day,
+            )
+            .map(|_| ())
+        }
+        SimCommand::BuildClass { planet, class } => {
+            let day = ctx.clock.day();
+            let known = ctx.research.known(polity);
+            let design = ctx.data.best_design(*class, known).ok_or_else(|| {
+                format!(
+                    "für die Klasse {} beherrscht die Gemeinschaft keinen Entwurf",
+                    class.label()
+                )
+            })?;
+            fleet::order_ship(
+                &ctx.data,
+                &ctx.galaxy,
+                &ctx.economy,
+                &ctx.polities,
+                &mut ctx.fleets,
+                polity,
+                *planet,
+                design,
+                known,
+                day,
+            )
+            .map(|_| ())
+        }
+        SimCommand::CancelBuild { order } => fleet::cancel_order(&mut ctx.fleets, polity, *order),
+        SimCommand::MergeFleets { from, into } => {
+            fleet::merge_fleets(&ctx.data, &mut ctx.fleets, polity, *from, *into)
+        }
+        SimCommand::SplitFleet { fleet, ships } => fleet::split_fleet(
+            &ctx.data,
+            &ctx.polities,
+            &mut ctx.fleets,
+            polity,
+            *fleet,
+            ships,
+        )
+        .map(|_| ()),
+        SimCommand::SetFleetOrders {
+            fleet,
+            formation,
+            doctrine,
+        } => {
+            fleet::set_fleet_orders(&mut ctx.fleets, polity, *fleet, *formation, *doctrine)?;
+            // Steht die Flotte im Gefecht, gelten die neuen Befehle dort sofort.
+            fleet::relay_orders(&ctx.data, &mut ctx.battles, *fleet, *formation, *doctrine);
+            Ok(())
+        }
+        SimCommand::Retreat { fleet } => {
+            fleet::order_retreat(&ctx.fleets, &mut ctx.battles, polity, *fleet)
         }
     }
 }

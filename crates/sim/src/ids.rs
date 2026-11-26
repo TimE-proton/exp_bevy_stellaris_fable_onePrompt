@@ -66,7 +66,7 @@ id_type!(
     HouseId, "H"
 );
 id_type!(
-    /// Schiff in [`crate::fleet::Fleets::ships`].
+    /// Schiff einer Flotte ([`crate::fleet::Fleet::ships`]), fortlaufend über die ganze Partie.
     ShipId, "K"
 );
 id_type!(

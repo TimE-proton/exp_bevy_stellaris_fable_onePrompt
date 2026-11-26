@@ -438,7 +438,6 @@ pub struct LogisticsBalance {
 pub struct FleetBalance {
     pub start_strength: f32,
     pub speed: f32,
-    pub daily_damage: f32,
 }
 
 /// Technologien, die Ausbaustufen und Kampfweisen der Belagerung freischalten

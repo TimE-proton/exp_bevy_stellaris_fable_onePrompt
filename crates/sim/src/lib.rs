@@ -50,6 +50,12 @@ pub struct SimRoot;
 /// Die eine, verkettete Reihenfolge eines Takts. Die Kausalität des Spiels steht hier:
 /// Befehle und Entscheidungen, dann Warenflüsse und Produktion, daraus Preise und
 /// Finanzen, daraus Zusammenhalt; danach Krieg und seine Folgen.
+///
+/// Sie ist zugleich die Rangfolge der Ansprüche an die Staatskasse: Der Monatsabschluss
+/// (`Finance`) nimmt ein, kehrt den halben Überschuss über der Rücklage an die Haushalte
+/// aus und bedient die Schulden; dann zahlen die Flotten (`Fleets`) Sold, Nachschub,
+/// Instandsetzung und Werften, notfalls aus der Rücklage; erst danach forscht die
+/// Gemeinschaft (`Research`) mit dem, was noch über der Rücklage liegt.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Commands,
@@ -60,8 +66,8 @@ pub enum SimSet {
     Prices,
     Finance,
     Cohesion,
-    Research,
     Fleets,
+    Research,
     SpaceCombat,
     Siege,
     Aftermath,
@@ -95,8 +101,8 @@ impl Plugin for CorePlugin {
                 SimSet::Prices,
                 SimSet::Finance,
                 SimSet::Cohesion,
-                SimSet::Research,
                 SimSet::Fleets,
+                SimSet::Research,
                 SimSet::SpaceCombat,
                 SimSet::Siege,
                 SimSet::Aftermath,
@@ -148,9 +154,13 @@ fn advance_clock(mut clock: ResMut<SimClock>) {
 }
 
 /// Braucht die Simulation gerade jeden Takt? Sonst darf ein Headless-Lauf direkt zum
-/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts.
+/// nächsten Tagesbeginn springen; zwischen den Tagesgrenzen geschieht dann nichts. Jeden
+/// Takt braucht sie, solange Befehle warten oder ein Gefecht läuft.
 pub fn needs_fine_ticks(world: &World) -> bool {
     world
         .get_resource::<command::CommandQueue>()
         .is_some_and(|queue| !queue.pending.is_empty())
+        || world
+            .get_resource::<fleet::Battles>()
+            .is_some_and(|battles| !battles.active.is_empty())
 }
