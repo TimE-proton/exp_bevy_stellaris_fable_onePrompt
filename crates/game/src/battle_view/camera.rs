@@ -1787,6 +1787,193 @@ mod tests {
         assert!(orientation(&mut game).angle_between(rest) > 0.1);
     }
 
+    /// Drückt die linke Maustaste, wo der Zeiger gerade steht, und lässt sie wieder los.
+    fn click_in_place(game: &mut crate::testing::TestGame) {
+        game.press(MouseButton::Left);
+        game.frames(1);
+        game.release(MouseButton::Left);
+        game.frames(2);
+    }
+
+    #[test]
+    fn a_grabbed_pointer_clicks_neither_panels_nor_ships() {
+        let mut game = practice();
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        let selected = game.resource::<SelectedShip>().0;
+        assert!(selected.is_some());
+        let overlay = game.resource::<ViewOptions>().overlay;
+        let untouched = |game: &crate::testing::TestGame, when: &str| {
+            assert_eq!(
+                game.resource::<ViewOptions>().overlay,
+                overlay,
+                "{when}: der Knopf unter dem unsichtbaren Zeiger wurde gedrückt"
+            );
+            assert_eq!(
+                game.resource::<SelectedShip>().0,
+                selected,
+                "{when}: der Klick hat die Auswahl geändert"
+            );
+        };
+
+        // Umsehen mit M eingeschaltet, während der Zeiger auf einem Knopf der Kopfleiste
+        // ruht. Der Zeiger ist dann unsichtbar und zeigt auf nichts: Ein Klick gilt weder
+        // dem Knopf unter ihm noch der Szene.
+        let button = game.button("Taktik").expect("Knopf „Taktik“");
+        game.move_pointer(button);
+        game.frames(2);
+        game.key(KeyCode::KeyM);
+        assert!(game.pointer_grabbed(), "M fängt den Zeiger");
+        click_in_place(&mut game);
+        untouched(&game, "Umsehen mit M, Zeiger auf der Kopfleiste");
+        // Ebenso über einer Tafel und über der freien Szene, wohin der unsichtbare Zeiger
+        // beim Umsehen wandert.
+        for point in [ON_SIDE_PANEL, Vec2::new(1400.0, 700.0), OPEN_SCENE] {
+            game.move_pointer(point);
+            game.frames(1);
+            click_in_place(&mut game);
+            untouched(&game, &format!("Umsehen mit M, Zeiger bei {point}"));
+        }
+        // M noch einmal: Der Zeiger ist wieder da, und der Klick gilt dem Knopf, auf dem er
+        // steht, und nur ihm.
+        game.key(KeyCode::KeyM);
+        assert!(!game.pointer_grabbed());
+        let button = game.button("Taktik").expect("Knopf „Taktik“");
+        game.click(button);
+        assert_eq!(game.resource::<ViewOptions>().overlay, !overlay);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+        game.click(button);
+        untouched(&game, "ohne Umsehen");
+
+        // Umsehen mit gehaltener rechter Maustaste: dasselbe, solange sie gehalten wird.
+        game.move_pointer(OPEN_SCENE);
+        game.frames(2);
+        game.press(MouseButton::Right);
+        game.frames(2);
+        assert!(game.pointer_grabbed(), "die rechte Maustaste fängt den Zeiger");
+        for point in [button, ON_SIDE_PANEL, OPEN_SCENE] {
+            game.move_pointer(point);
+            game.frames(1);
+            click_in_place(&mut game);
+            untouched(&game, &format!("rechte Maustaste gehalten, Zeiger bei {point}"));
+        }
+        game.release(MouseButton::Right);
+        game.frames(2);
+        assert!(!game.pointer_grabbed());
+        // Danach reagieren Knöpfe und Szene wieder auf Klicks.
+        game.click(button);
+        assert_eq!(game.resource::<ViewOptions>().overlay, !overlay);
+        assert_eq!(game.resource::<SelectedShip>().0, selected);
+        game.click_on("×");
+        assert_eq!(game.resource::<SelectedShip>().0, None);
+        game.key(KeyCode::KeyU);
+        let (_, at) = ship_in_the_open(&game);
+        game.click(at);
+        assert!(game.resource::<SelectedShip>().0.is_some());
+    }
+
+    /// Ein Schlachtschiff der eigenen Partei, das frei in der Szene steht, und sein Ort im
+    /// Bild.
+    fn battleship_in_the_open(game: &crate::testing::TestGame) -> (u32, Vec2) {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| {
+                ship.status.in_play()
+                    && ship.side == 0
+                    && ship.class == sim::data::ShipClass::Battleship
+            })
+            .filter_map(|(index, _)| {
+                let (screen, _) = frame.projector.project(frame.position(index)?)?;
+                Some((index as u32, screen))
+            })
+            .find(|(_, at)| at.x > 285.0 && at.x < 1215.0 && at.y > 60.0 && at.y < 880.0)
+            .expect("ein eigenes Schlachtschiff in der freien Szene")
+    }
+
+    #[test]
+    fn the_wheel_of_a_grabbed_pointer_changes_the_fly_speed_and_scrolls_no_list() {
+        let mut game = practice();
+        let (ship, at) = battleship_in_the_open(&game);
+        game.click(at);
+        assert_eq!(game.resource::<SelectedShip>().0, Some(ship));
+        // Die Modulliste des Schlachtschiffs ist länger als die Tafel hoch; ihre erste Zeile
+        // steht oben. An ihrem Ort ist abzulesen, ob die Liste gerollt wurde.
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        let data = game.resource::<sim::GameData>();
+        let design = &data.designs[battle.ships[ship as usize].design as usize];
+        let first = data.modules[design.modules[0].module_id as usize]
+            .name
+            .clone();
+        let top = game.text(&first).expect("erste Zeile der Modulliste");
+        let on_list = top + Vec2::new(40.0, 60.0);
+
+        // Zeiger über der Liste, Umsehen mit M: Das Mausrad gehört jetzt der Kamera.
+        game.move_pointer(on_list);
+        game.frames(2);
+        game.key(KeyCode::KeyM);
+        assert!(game.pointer_grabbed());
+        game.wheel(-3.0);
+        // Listen rollen weich aus; das dauert einige Frames.
+        game.frames(15);
+        assert!(
+            game.resource::<ViewFrame>().fly_speed < 0.7,
+            "Flug {}",
+            game.resource::<ViewFrame>().fly_speed
+        );
+        assert_eq!(
+            game.text(&first),
+            Some(top),
+            "die Liste unter dem unsichtbaren Zeiger ist mitgerollt"
+        );
+
+        // Ohne Umsehen rollt dasselbe Mausrad an derselben Stelle die Liste, und das
+        // Flugtempo bleibt, wie es ist.
+        game.key(KeyCode::KeyM);
+        assert!(!game.pointer_grabbed());
+        let speed = game.resource::<ViewFrame>().fly_speed;
+        game.scroll(on_list, -3.0);
+        game.frames(15);
+        assert_eq!(game.resource::<ViewFrame>().fly_speed, speed);
+        let rolled = game.text(&first).expect("erste Zeile der Modulliste");
+        assert!(rolled.y < top.y - 20.0, "die Liste rollt: {rolled} statt {top}");
+    }
+
+    #[test]
+    fn a_new_battle_starts_with_the_normal_fly_speed() {
+        use crate::state::AppState;
+
+        let mut game = practice();
+        game.scroll(OPEN_SCENE, 6.0);
+        let fast = game.resource::<ViewFrame>().fly_speed;
+        assert!(fast > 1.5, "Flug {fast}");
+        // „Neu starten“ ist dasselbe Gefecht mit derselben Kamera: Das Tempo bleibt.
+        game.send(super::super::BattleViewRequest::Restart);
+        game.frames(4);
+        assert_eq!(game.resource::<ViewFrame>().fly_speed, fast);
+
+        // Verlassen und über den Dialog ein neues Gefecht beginnen: Der Zeiger steht dabei
+        // auf dem Knopf des Dialogs, also über der Oberfläche.
+        game.click_on("Verlassen");
+        game.frames(4);
+        assert_eq!(game.state(), AppState::MainMenu);
+        game.click_on("Gefechtsübung");
+        game.click_on("Gefecht beginnen");
+        game.frames(8);
+        assert_eq!(game.state(), AppState::Practice);
+        assert_eq!(
+            game.resource::<ViewFrame>().fly_speed,
+            1.0,
+            "das neue Gefecht hat das Flugtempo des alten übernommen"
+        );
+        // Dort ändert das Mausrad es wie gewohnt.
+        game.scroll(OPEN_SCENE, -2.0);
+        assert!(game.resource::<ViewFrame>().fly_speed < 0.9);
+    }
+
     #[test]
     fn keys_do_not_collide() {
         use std::collections::BTreeSet;

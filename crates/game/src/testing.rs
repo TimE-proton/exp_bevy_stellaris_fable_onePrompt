@@ -16,9 +16,12 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::WgpuSettings;
 use bevy::time::TimeUpdateStrategy;
-use bevy::window::{CursorMoved, ExitCondition, PrimaryWindow, WindowEvent};
+use bevy::window::{
+    CursorGrabMode, CursorMoved, CursorOptions, ExitCondition, PrimaryWindow, WindowEvent,
+    WindowResized,
+};
 use bevy::winit::WinitPlugin;
-use bevy_egui::egui::accesskit::Role;
+use bevy_egui::egui::accesskit::{Node, Role};
 use bevy_egui::{EguiContext, EguiOutput, EguiPlugin, PrimaryEguiContext, egui};
 use std::time::Duration;
 
@@ -215,6 +218,12 @@ impl TestGame {
     pub fn scroll(&mut self, at: Vec2, lines: f32) {
         self.move_pointer(at);
         self.frames(2);
+        self.wheel(lines);
+        self.frames(2);
+    }
+
+    /// Dreht das Mausrad um `lines` Rasten, wo der Zeiger gerade steht.
+    pub fn wheel(&mut self, lines: f32) {
         let window = self.window();
         self.input(MouseWheel {
             unit: MouseScrollUnit::Line,
@@ -223,7 +232,6 @@ impl TestGame {
             window,
             phase: TouchPhase::Moved,
         });
-        self.frames(2);
     }
 
     /// Drückt eine Taste und lässt sie im nächsten Frame wieder los.
@@ -233,31 +241,60 @@ impl TestGame {
 
     /// Wie [`TestGame::key`], mit gehaltenen Zusatztasten.
     pub fn key_with(&mut self, held: &[KeyCode], key_code: KeyCode) {
+        for key in held {
+            self.key_event(*key, ButtonState::Pressed);
+        }
+        self.frames(1);
+        self.key_event(key_code, ButtonState::Pressed);
+        self.frames(1);
+        self.key_event(key_code, ButtonState::Released);
+        for key in held {
+            self.key_event(*key, ButtonState::Released);
+        }
+        self.frames(2);
+    }
+
+    /// Eine Taste geht nieder oder wird losgelassen.
+    pub fn key_event(&mut self, key_code: KeyCode, state: ButtonState) {
         let window = self.window();
-        let message = |key_code: KeyCode, state: ButtonState| KeyboardInput {
+        self.input(KeyboardInput {
             key_code,
             logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
             state,
             text: None,
             repeat: false,
             window,
-        };
-        for key in held {
-            self.input(message(*key, ButtonState::Pressed));
-        }
-        self.frames(1);
-        self.input(message(key_code, ButtonState::Pressed));
-        self.frames(1);
-        self.input(message(key_code, ButtonState::Released));
-        for key in held {
-            self.input(message(*key, ButtonState::Released));
-        }
-        self.frames(2);
+        });
     }
 
-    /// Mitte des Knopfs mit genau dieser Beschriftung, wie er zuletzt gezeichnet wurde;
-    /// `None`, wenn es keinen gibt oder er gesperrt ist.
-    pub fn button(&mut self, label: &str) -> Option<Vec2> {
+    /// Zieht das Fenster auf eine andere Größe (logische Pixel), wie das Fenstersystem es
+    /// meldet.
+    pub fn resize(&mut self, size: Vec2) {
+        let window = self.window();
+        let mut entity = self.world_mut().entity_mut(window);
+        entity
+            .get_mut::<Window>()
+            .expect("Fenster")
+            .resolution
+            .set(size.x, size.y);
+        self.input(WindowResized {
+            window,
+            width: size.x,
+            height: size.y,
+        });
+    }
+
+    /// Ist der Mauszeiger gefangen (Umsehen in der Schlacht)?
+    pub fn pointer_grabbed(&mut self) -> bool {
+        let window = self.window();
+        self.world()
+            .get::<CursorOptions>(window)
+            .is_some_and(|options| options.grab_mode != CursorGrabMode::None)
+    }
+
+    /// Mitte des ersten Bedienelements, auf das `wanted` zutrifft, wie es zuletzt gezeichnet
+    /// wurde.
+    fn element(&mut self, wanted: impl Fn(&Node) -> bool) -> Option<Vec2> {
         let world = self.world_mut();
         let output = world
             .query_filtered::<&EguiOutput, With<PrimaryEguiContext>>()
@@ -267,9 +304,7 @@ impl TestGame {
         tree.nodes
             .iter()
             .map(|(_, node)| node)
-            .find(|node| {
-                node.role() == Role::Button && node.label() == Some(label) && !node.is_disabled()
-            })
+            .find(|node| wanted(node))
             .and_then(|node| node.bounds())
             .map(|bounds| {
                 Vec2::new(
@@ -277,6 +312,21 @@ impl TestGame {
                     ((bounds.y0 + bounds.y1) * 0.5) as f32,
                 )
             })
+    }
+
+    /// Mitte des Knopfs mit genau dieser Beschriftung, wie er zuletzt gezeichnet wurde;
+    /// `None`, wenn es keinen gibt oder er gesperrt ist.
+    pub fn button(&mut self, label: &str) -> Option<Vec2> {
+        self.element(|node| {
+            node.role() == Role::Button && node.label() == Some(label) && !node.is_disabled()
+        })
+    }
+
+    /// Mitte des ersten Textes mit genau diesem Wortlaut, wie er zuletzt gezeichnet wurde.
+    /// Auch Zeilen einer Liste, die gerade aus dem sichtbaren Teil gerollt sind, haben ihren
+    /// Ort: An ihm lässt sich ablesen, wie weit die Liste gerollt ist.
+    pub fn text(&mut self, text: &str) -> Option<Vec2> {
+        self.element(|node| node.role() == Role::Label && node.value() == Some(text))
     }
 
     /// Klickt auf den Knopf mit dieser Beschriftung.
@@ -312,6 +362,51 @@ impl TestGame {
                 .flatten()
         })
     }
+}
+
+/// Größe der Galaxie, die ein Seed ergibt: Systeme und Planeten.
+fn galaxy_size(data: &sim::GameData, seed: u64) -> (usize, usize) {
+    let galaxy = sim::galaxy::generate_galaxy(data, seed);
+    (galaxy.systems.len(), galaxy.planets.len())
+}
+
+/// Zwei Seeds, deren Galaxien verschieden groß sind: der kleinste und der größte unter
+/// den ersten acht. Wer prüft, was beim Wechsel der Partie mit Kennungen der alten
+/// geschieht, braucht genau das: Kennungen der großen liegen außerhalb der kleinen.
+pub fn small_and_large_galaxy(data: &sim::GameData) -> (u64, u64) {
+    let sizes: Vec<(u64, (usize, usize))> = (1..=8)
+        .map(|seed| (seed, galaxy_size(data, seed)))
+        .collect();
+    let (small, least) = *sizes.iter().min_by_key(|(_, size)| *size).unwrap();
+    let (large, most) = *sizes.iter().max_by_key(|(_, size)| *size).unwrap();
+    assert!(
+        least.0 < most.0 && least.1 < most.1,
+        "die Galaxien der Seeds unterscheiden sich nicht mehr in Systemen und Planeten: {sizes:?}"
+    );
+    (small, large)
+}
+
+/// Schreibt den Spielstand einer frischen Partie mit diesem Seed in eine Datei, die nur
+/// dieser Testlauf kennt, und liefert ihren Pfad. Wer sie anlegt, räumt sie wieder ab.
+pub fn save_of_new_game(data: &sim::GameData, seed: u64, name: &str) -> std::path::PathBuf {
+    use sim::state::{SAVE_FORMAT, SaveGame, SimConfig, SimState};
+    let path =
+        std::env::temp_dir().join(format!("konfluenz_test_{}_{name}.ron", std::process::id()));
+    let state = SimState::generate(
+        data,
+        SimConfig {
+            seed,
+            player: Some(sim::ids::PolityId(0)),
+        },
+    );
+    SaveGame {
+        format: SAVE_FORMAT,
+        data_hash: data.hash,
+        state,
+    }
+    .write(&path)
+    .expect("Spielstand schreiben");
+    path
 }
 
 #[cfg(test)]

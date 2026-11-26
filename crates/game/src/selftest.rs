@@ -1108,6 +1108,80 @@ mod tests {
         );
     }
 
+    /// Welche der beiden Kameras der Szenen eingeschaltet sein soll: die der Schlacht, die
+    /// der Karte.
+    #[derive(Resource, Clone, Copy)]
+    struct CamerasOn(bool, bool);
+
+    /// Hält die Kameras in dem Zustand, den `CamerasOn` verlangt, was auch immer die
+    /// Ansichten selbst schalten.
+    fn force_cameras(
+        wanted: Res<CamerasOn>,
+        mut battle: Single<&mut Camera, (With<BattleCamera>, Without<MapCamera>)>,
+        mut map: Single<&mut Camera, (With<MapCamera>, Without<BattleCamera>)>,
+    ) {
+        battle.is_active = wanted.0;
+        map.is_active = wanted.1;
+    }
+
+    fn with_cameras(battle: bool, map: bool) -> impl FnOnce(&mut App) {
+        move |app| {
+            app.insert_resource(CamerasOn(battle, map)).add_systems(
+                PostUpdate,
+                force_cameras.before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+            );
+        }
+    }
+
+    #[test]
+    fn the_practice_selftest_fails_when_the_battle_camera_is_off() {
+        // Die Kamera der Karte ist stattdessen an. Sie erfasst die Rümpfe (sie liegen in der
+        // Ebene vor ihr), zeichnet aber keine: Auf dem Foto wäre nichts vom Gefecht.
+        for command in [LINEUP, BATTLE] {
+            let (exit, problems, photos) = practice_run(command, with_cameras(false, true));
+            assert!(exit.is_error(), "{command}: {photos:?}");
+            assert_eq!(problems.len(), photos.len(), "{command}: {problems:?}");
+            for problem in &problems {
+                assert!(
+                    problem.contains("die Schlachtkamera zeichnet nicht"),
+                    "{command}: {problem}"
+                );
+            }
+        }
+        // Ganz ohne eingeschaltete Kamera ebenso.
+        let (exit, problems, _) = practice_run(LINEUP, with_cameras(false, false));
+        assert!(exit.is_error(), "{problems:?}");
+    }
+
+    /// Das eine Problem eines Laufs, an dem die Kartenkamera nichts ins Bild brachte.
+    fn assert_map_camera_blamed(exit: AppExit, problems: &[String], what: &str) {
+        assert!(exit.is_error(), "{what}");
+        assert_eq!(problems.len(), 1, "{what}: {problems:?}");
+        assert!(
+            problems[0].contains("die Kartenkamera zeichnet nicht"),
+            "{what}: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_campaign_selftest_fails_when_the_map_camera_is_off() {
+        // Die Schlachtkamera ist stattdessen an. Die Karte liegt in ihrem Sichtfeld, aber
+        // sie zeichnet keine Karte.
+        let (exit, problems, _) = campaign_run(CAMPAIGN, with_cameras(true, false));
+        assert_map_camera_blamed(exit, &problems, "Schlachtkamera statt Kartenkamera");
+        let (exit, problems, _) = campaign_run(CAMPAIGN, with_cameras(false, false));
+        assert_map_camera_blamed(exit, &problems, "keine Kamera");
+    }
+
+    #[test]
+    fn the_campaign_selftest_fails_when_the_battle_camera_paints_over_the_map() {
+        // Beide Kameras an: Die Schlachtkamera zeichnet nach der Kartenkamera und füllt das
+        // Bild mit ihrem Hintergrund. Die Karte liegt im Sichtfeld ihrer Kamera, zu sehen
+        // ist sie nicht.
+        let (exit, problems, _) = campaign_run(CAMPAIGN, with_cameras(true, true));
+        assert_map_camera_blamed(exit, &problems, "beide Kameras");
+    }
+
     #[test]
     fn a_practice_photo_that_was_never_written_fails_the_selftest() {
         // Ohne Grafikkarte entsteht kein Foto. Eine alte Datei gleichen Namens darf nicht

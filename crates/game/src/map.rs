@@ -3,8 +3,9 @@
 use crate::pointer::WorldMouse;
 use crate::session::SessionEpoch;
 use crate::state::{AppState, ViewState};
-use bevy::camera::visibility::{RenderLayers, ViewVisibility};
+use bevy::camera::visibility::{RenderLayers, VisibleEntities};
 use bevy::camera::{CameraOutputMode, ClearColorConfig};
+use bevy::ecs::message::Messages;
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -64,21 +65,61 @@ struct PlanetDot;
 #[derive(Component)]
 struct PlanetRing(PlanetId);
 
-/// Zählt, was die Engine von der Karte wirklich zeichnet (ihr Urteil aus dem letzten Frame:
-/// im Sichtfeld der Kartenkamera und nicht ausgeblendet). Der Selbsttest prüft damit, dass
-/// sein Foto nicht bloß die Oberfläche zeigt.
+/// Bringt diese Kamera ihr Bild ins Fenster? Sie muss eingeschaltet sein, und keine andere
+/// eingeschaltete Kamera darf nach ihr zeichnen und das Bild dabei mit ihrem Hintergrund
+/// füllen. (Die Kamera der Oberfläche zeichnet zuletzt, aber auf durchsichtigem Grund.)
+pub fn camera_shows(camera: Entity, cameras: &Query<(Entity, &Camera)>) -> bool {
+    let Ok((_, own)) = cameras.get(camera) else {
+        return false;
+    };
+    let paints_over = |other: &Camera| {
+        other.is_active
+            && other.order > own.order
+            && match other.clear_color {
+                ClearColorConfig::None => false,
+                ClearColorConfig::Custom(color) => color.alpha() > 0.0,
+                ClearColorConfig::Default => true,
+            }
+    };
+    own.is_active
+        && !cameras
+            .iter()
+            .any(|(entity, other)| entity != camera && paints_over(other))
+}
+
+/// Zählt, was die Kartenkamera von der Karte wirklich zeichnet: was die Engine im letzten
+/// Frame für genau diese Kamera als sichtbar eingestuft hat (in ihrem Sichtfeld und nicht
+/// ausgeblendet). Der Selbsttest prüft damit, dass sein Foto nicht bloß die Oberfläche
+/// zeigt. Dass irgendeine Kamera die Karte im Sichtfeld hat, genügt nicht: Die
+/// Schlachtkamera erfasst sie auch, zeichnet aber keine Karte.
 #[derive(SystemParam)]
 pub struct MapCensus<'w, 's> {
-    entities: Query<'w, 's, &'static ViewVisibility, With<MapEntity>>,
+    camera: Query<'w, 's, (Entity, &'static VisibleEntities), With<MapCamera>>,
+    cameras: Query<'w, 's, (Entity, &'static Camera)>,
+    entities: Query<'w, 's, (), With<MapEntity>>,
 }
 
 impl MapCensus<'_, '_> {
-    /// Sterne, Routen, Planeten und Beschriftungen im Sichtfeld der Kamera.
+    /// Bringt die Kartenkamera ihr Bild ins Fenster?
+    pub fn camera_shows(&self) -> bool {
+        self.camera
+            .single()
+            .is_ok_and(|(camera, _)| camera_shows(camera, &self.cameras))
+    }
+
+    /// Sterne, Routen, Planeten und Beschriftungen, die die Kartenkamera zeichnet.
     pub fn visible(&self) -> usize {
-        self.entities
-            .iter()
-            .filter(|visibility| visibility.get())
-            .count()
+        if !self.camera_shows() {
+            return 0;
+        }
+        self.camera.single().map_or(0, |(_, visible)| {
+            visible
+                .entities
+                .values()
+                .flatten()
+                .filter(|entity| self.entities.contains(**entity))
+                .count()
+        })
     }
 }
 
@@ -184,6 +225,7 @@ fn rebuild_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut selection: ResMut<Selection>,
+    mut focus_requests: ResMut<Messages<FocusSystem>>,
     mut camera: Single<(&mut Transform, &mut Projection), With<MapCamera>>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) {
@@ -194,6 +236,10 @@ fn rebuild_map(
     for entity in &old {
         commands.entity(entity).despawn();
     }
+    // Bitten an die Kamera, die noch unterwegs sind, meinen Systeme der vorigen Partie (ein
+    // Klick auf einen Verweis im Frame des Wechsels). In dieser gibt es sie nicht oder
+    // unter gleicher Nummer ein anderes.
+    focus_requests.clear();
 
     let mut solid = |color: Color| materials.add(ColorMaterial::from_color(color));
     let assets = MapAssets {
@@ -757,6 +803,143 @@ mod tests {
         game.frames(2);
         game.key(KeyCode::KeyW);
         assert!(view(&mut game).0.y > dragged.0.y);
+    }
+
+    /// Eine Bitte an die Kartenkamera, die erst am Ende eines Frames eintrifft: so spät, wie
+    /// die Oberfläche sie nach einem Klick schickt.
+    #[derive(Resource, Default)]
+    struct LateFocus(Option<SystemId>);
+
+    fn focus_late(mut late: ResMut<LateFocus>, mut focus: MessageWriter<FocusSystem>) {
+        if let Some(system) = late.0.take() {
+            focus.write(FocusSystem(system));
+        }
+    }
+
+    #[test]
+    fn the_map_follows_a_game_loaded_inside_a_running_campaign() {
+        use crate::session::SessionRequest;
+        use crate::testing::{save_of_new_game, small_and_large_galaxy};
+
+        let data = sim::GameData::load_workspace().unwrap();
+        let (small, large) = small_and_large_galaxy(&data);
+        let save = save_of_new_game(&data, small, "karte");
+        let mut game = TestGame::start(&format!("--seed {large}"));
+        game.app
+            .init_resource::<LateFocus>()
+            .add_systems(PostUpdate, focus_late);
+        game.frames(4);
+        let old_systems = game.resource::<Galaxy>().systems.len();
+        assert_eq!(game.count::<Territory>(), old_systems);
+        // Der Spieler hat das letzte System der großen Galaxie gewählt und die Karte dorthin
+        // geholt: Dieses System gibt es in der kleinen nicht.
+        let last = SystemId((old_systems - 1) as u32);
+        game.world_mut().resource_mut::<Selection>().system = Some(last);
+        game.send(FocusSystem(last));
+        game.frames(2);
+        assert_ne!(view(&mut game).0, Vec2::ZERO);
+
+        // Laden; im selben Frame klickt der Spieler noch auf Verweise der alten Partie: Die
+        // Bitten an die Karte treffen ein, wenn die Partie schon gewechselt hat. Einmal
+        // nennt die Bitte ein System, das es danach nicht mehr gibt, einmal eines, das es
+        // unter gleicher Nummer wieder gibt.
+        for stale in [last, SystemId(0)] {
+            game.send(SessionRequest::Load(save.clone()));
+            game.world_mut().resource_mut::<LateFocus>().0 = Some(stale);
+            game.frames(6);
+            let galaxy = game.resource::<Galaxy>();
+            let (systems, planets) = (galaxy.systems.len(), galaxy.planets.len());
+            assert!(systems < old_systems);
+            // Die Karte zeigt die geladene Partie und nur sie.
+            assert_eq!(game.count::<Territory>(), systems);
+            assert_eq!(game.count::<PlanetRing>(), planets);
+            assert_eq!(game.count::<SystemLabel>(), systems);
+            let world = game.world_mut();
+            assert!(
+                world
+                    .query::<&Territory>()
+                    .iter(world)
+                    .all(|territory| territory.0.index() < systems)
+            );
+            // Der Blick steht wie bei jeder neuen Partie auf der ganzen Galaxie; die Bitte
+            // aus der alten Partie hat ihn nicht verschoben.
+            assert_eq!(view(&mut game).0, Vec2::ZERO, "Bitte um {stale:?}");
+            let chosen = selected(&game).expect("das Heimatsystem ist gewählt");
+            assert!(chosen.index() < systems);
+        }
+        let _ = std::fs::remove_file(&save);
+
+        // Bitten der geladenen Partie gelten wie gewohnt.
+        game.send(FocusSystem(SystemId(1)));
+        game.frames(2);
+        let expected = Vec2::from(game.resource::<Galaxy>().system(SystemId(1)).pos);
+        assert!(view(&mut game).0.distance(expected) < 1e-3);
+    }
+
+    #[test]
+    fn a_press_beside_a_panel_has_one_owner_even_without_a_run_up() {
+        use crate::pointer::UiCover;
+        use crate::ui::UiState;
+
+        let mut game = campaign();
+        let home = selected(&game);
+        // Rechter Rand der linken Tafel: Der Griff zum Größerziehen ragt ein Stück über sie
+        // hinaus, auf die Karte.
+        let edge = (0..1600)
+            .map(|x| x as f32 + 0.5)
+            .find(|x| !game.resource::<UiCover>().covers(Vec2::new(*x, 400.0)))
+            .expect("freie Karte");
+        let on_handle = Vec2::new(edge + 1.5, 400.0);
+        // Der Zeiger kommt von der freien Karte und drückt im selben Frame, in dem er
+        // eintrifft: Die Oberfläche hatte keine Gelegenheit, den Griff anzukündigen.
+        game.move_pointer(FREE_MAP);
+        game.frames(3);
+        game.move_pointer(on_handle);
+        game.press(MouseButton::Left);
+        game.frames(1);
+        assert_eq!(selected(&game), home, "der Druck auf den Griff wählte ab");
+        assert!(
+            game.egui().egui_is_using_pointer(),
+            "die Tafel hat den Griff nicht gefasst"
+        );
+        game.release(MouseButton::Left);
+        game.frames(2);
+        assert_eq!(selected(&game), home);
+
+        // Knapp unter einem Knopf der Kopfleiste: Die Oberfläche lässt einen Klick, der einen
+        // Knopf um wenige Pixel verfehlt, noch für ihn gelten. Dann gilt er nur ihm.
+        let button = game.button("Flotten").expect("Knopf „Flotten“");
+        let below = (0..60)
+            .map(|y| Vec2::new(button.x, button.y + y as f32 + 0.5))
+            .find(|at| !game.resource::<UiCover>().covers(*at))
+            .expect("Karte unter der Kopfleiste");
+        let near_button = below + Vec2::new(0.0, 1.0);
+        assert!(!game.resource::<UiState>().fleets_open);
+        game.move_pointer(FREE_MAP);
+        game.frames(3);
+        game.click_at_once(near_button);
+        assert!(
+            game.resource::<UiState>().fleets_open,
+            "der Knopf hat den Klick knapp daneben nicht angenommen"
+        );
+        assert_eq!(selected(&game), home, "derselbe Klick traf auch die Karte");
+
+        // Weit genug von jedem Knopf gehört die Stelle der Karte: Ein schneller Klick ins
+        // Leere hebt die Auswahl auf.
+        game.click_on("Flotten");
+        assert!(!game.resource::<UiState>().fleets_open);
+        let empty = (0..40)
+            .flat_map(|row| (0..60).map(move |column| (column, row)))
+            .map(|(column, row)| Vec2::new(480.0 + column as f32 * 13.0, 70.0 + row as f32 * 16.0))
+            .find(|at| {
+                let point = map_point(&mut game, *at);
+                nearest_system(game.resource::<Galaxy>(), point, 60.0).is_none()
+            })
+            .expect("eine leere Stelle der Karte");
+        game.move_pointer(FREE_MAP);
+        game.frames(3);
+        game.click_at_once(empty);
+        assert_eq!(selected(&game), None);
     }
 
     #[test]

@@ -1347,6 +1347,14 @@ mod tests {
             }
         }
 
+        /// Das Gefecht wird als neues angesagt, wie beim nächsten Gefecht der Übung oder
+        /// nach „Neu starten“.
+        fn begin_again(&mut self) {
+            self.feed
+                .begin(&self.battle, super::super::feed::testing::info(2));
+            self.frame.epoch = Some(self.feed.epoch);
+        }
+
         fn refs(&self, selected: Option<u32>) -> HudRefs<'_> {
             HudRefs {
                 feed: &self.feed,
@@ -1618,6 +1626,20 @@ mod tests {
         // Zurück beim ersten Schiff steht dessen Liste, wo man sie verließ.
         let painted = scene.settle(&mut screen, Some(own));
         assert_eq!(painted.all("Fusionsantrieb").len(), 0);
+
+        // Das nächste Gefecht, im selben Programm: Seine Schiffe tragen wieder dieselben
+        // Nummern, haben mit denen des alten aber nichts zu tun. Auch ihre Listen beginnen
+        // oben, die des Schiffs mit der Nummer des eben gerollten eingeschlossen.
+        let mut scene = scene;
+        scene.begin_again();
+        for ship in [own, other] {
+            let painted = scene.settle(&mut screen, Some(ship));
+            assert_eq!(
+                painted.all("Fusionsantrieb").len(),
+                drives,
+                "die Liste von Schiff {ship} ist im neuen Gefecht noch gerollt"
+            );
+        }
     }
 
     #[test]
