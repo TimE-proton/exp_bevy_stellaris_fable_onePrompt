@@ -123,6 +123,16 @@ pub fn effect_text(effect: TechEffect) -> String {
     format!("+{} {}", percent(effect.amount() as f32), effect.label())
 }
 
+/// Schiffsentwürfe, die diese Technologie voraussetzen (selbst oder über eines ihrer
+/// Module), mit ihrer Klasse: „Speer II (Kreuzer)“.
+pub fn designs_requiring(data: &GameData, tech: u16) -> Vec<String> {
+    data.designs
+        .iter()
+        .filter(|design| design.stats.techs.contains(&tech))
+        .map(|design| format!("{} ({})", design.name, design.stats.class.label()))
+        .collect()
+}
+
 /// Die gesammelte Wirkung einer Gemeinschaft als Aufschläge je Art.
 pub fn effect_totals(effects: &TechEffects) -> [TechEffect; 12] {
     [
@@ -544,6 +554,10 @@ fn tech_card(
             for effect in &def.effects {
                 ui.label(detail(effect_text(*effect)));
             }
+            let designs = designs_requiring(data, tech);
+            if !designs.is_empty() {
+                ui.label(detail(format!("Voraussetzung für: {}", designs.join(", "))));
+            }
         });
 }
 
@@ -755,6 +769,25 @@ mod tests {
                 .iter()
                 .all(|effect| effect.amount().abs() < 1e-12)
         );
+        // Was eine Technologie an Entwürfen ermöglicht, steht ebenfalls in den Daten.
+        let tech = |key: &str| data.tech_index(key).unwrap();
+        assert_eq!(
+            designs_requiring(&data, tech("waffen_2")),
+            ["Speer II (Kreuzer)"]
+        );
+        assert!(designs_requiring(&data, tech("wirtschaft_1")).is_empty());
+        // Jeder Entwurf mit Voraussetzungen ist bei jeder davon genannt.
+        for design in &data.designs {
+            for required in &design.stats.techs {
+                assert!(
+                    designs_requiring(&data, *required)
+                        .iter()
+                        .any(|name| name.starts_with(&design.name)),
+                    "{}",
+                    design.key
+                );
+            }
+        }
     }
 
     #[test]
@@ -887,17 +920,14 @@ mod tests {
         let mut game = campaign_with_window();
         let home = game.resource::<Selection>().system;
         assert!(home.is_some());
-        let rect = game.window_rect("Forschung").expect("Fenster");
-        // Über der freien Karte: Ohne das Fenster hübe ein Klick hier die Auswahl auf oder
-        // wählte ein anderes System.
-        let on_window = Vec2::new(rect.center().x, rect.bottom() - 6.0);
-        game.click(on_window);
-        assert_eq!(game.resource::<Selection>().system, home);
-        game.move_pointer(Vec2::new(860.0, 800.0));
-        game.frames(2);
-        game.click_at_once(on_window);
-        assert_eq!(game.resource::<Selection>().system, home);
-        // Auch das Mausrad über dem Fenster gehört ihm und nicht der Karte.
+        let rect = game.window_rect(TITLE).expect("Fenster");
+        // Zwei Stellen des Fensters über der freien Karte, in der Titelleiste und neben
+        // den Reitern: Ohne das Fenster höbe ein Klick dort die Auswahl auf (siehe die
+        // Gegenprobe unten).
+        let on_window = [
+            Vec2::new(rect.center().x, rect.top() + 12.0),
+            Vec2::new(rect.right() - 60.0, rect.top() + 50.0),
+        ];
         let scale = |game: &mut TestGame| {
             let world = game.world_mut();
             let projection = world
@@ -909,9 +939,36 @@ mod tests {
                 _ => panic!("die Karte wird ohne Perspektive gezeigt"),
             }
         };
-        let before = scale(&mut game);
-        game.scroll(on_window, 3.0);
-        assert_eq!(scale(&mut game), before);
+        let zoom = scale(&mut game);
+        for at in on_window {
+            game.click(at);
+            assert_eq!(game.resource::<Selection>().system, home, "{at}");
+            // Auch wenn Zeigerbewegung und Tastendruck im selben Frame eintreffen.
+            game.move_pointer(Vec2::new(860.0, 800.0));
+            game.frames(2);
+            game.click_at_once(at);
+            assert_eq!(game.resource::<Selection>().system, home, "{at}");
+            // Das Mausrad über dem Fenster gehört ihm und nicht der Karte.
+            game.scroll(at, 3.0);
+            assert_eq!(scale(&mut game), zoom, "{at}");
+        }
+
+        // Gegenprobe ohne das Fenster: Dieselben Stellen gehören dann der Karte.
+        game.click_on(TITLE);
+        game.frames(10);
+        assert!(game.window_rect(TITLE).is_none());
+        for at in on_window {
+            game.world_mut().resource_mut::<Selection>().system = home;
+            game.frames(2);
+            game.click(at);
+            assert_ne!(
+                game.resource::<Selection>().system,
+                home,
+                "die Stelle {at} liegt nicht über der freien Karte"
+            );
+        }
+        game.scroll(on_window[0], 3.0);
+        assert!(scale(&mut game) < zoom, "das Mausrad zoomt die Karte");
     }
 
     #[test]

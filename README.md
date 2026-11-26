@@ -133,7 +133,8 @@ die Simulation einen Befehl ab, steht der Grund als Hinweis oben im Fenster.
 
 **Eigene Forschung.** Der Baum zeigt die fünf Zweige Wirtschaft, Antrieb, Waffen,
 Verteidigung und Bodenkrieg als Spalten und ihre Stufen als Zeilen. Jede Technologie nennt
-ihren Stand, ihre Kosten in Forschungspunkten und ihre Wirkungen.
+ihren Stand, ihre Kosten in Forschungspunkten, ihre Wirkungen und die Schiffsentwürfe, die
+sie voraussetzen.
 
 | Stand | Bedeutung |
 |---|---|
