@@ -35,6 +35,10 @@ const LABEL_FROM: f32 = 46.0;
 /// Abstand der Tafeln von der Kopfleiste und vom Fensterrand.
 const PANEL_GAP: f32 = 11.0;
 const EDGE_GAP: f32 = 8.0;
+/// Breite der Lagetafeln: so viel, wie die Tabelle der Klassen mit ihren fünf Spalten
+/// braucht, wenn die Spalten im Abstand [`COLUMN_GAP`] stehen.
+const SIDE_PANEL_WIDTH: f32 = 286.0;
+const COLUMN_GAP: f32 = 6.0;
 /// Weniger Höhe bekommt die Modulliste nie, auch nicht in sehr niedrigen Fenstern.
 const MIN_MODULE_LIST: f32 = 60.0;
 
@@ -107,21 +111,79 @@ pub fn clock(seconds: f32) -> String {
     format!("{:02}:{:02}", total / 60, total % 60)
 }
 
+/// Verbleib der Schiffe einer Partei, je Klasse. Jedes Schiff, mit dem die Partei begann,
+/// steht in genau einer Spalte: Die Spalten einer Klasse ergeben zusammen zu jeder Zeit
+/// ihre Anfangszahl. Bordjäger zählen von Anfang an mit; solange sie an Bord sind, teilen
+/// sie das Los ihres Trägers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// Kämpft.
+    pub fighting: [u32; 6],
+    /// Auf dem Rückzug, aber noch auf dem Feld.
+    pub withdrawing: [u32; 6],
+    /// Treibt ohne Energie auf dem Feld.
+    pub adrift: [u32; 6],
+    pub lost: [u32; 6],
+    pub escaped: [u32; 6],
+}
+
+impl Tally {
+    pub fn of(battle: &Battle, side: usize) -> Self {
+        let mut tally = Self {
+            // Was verloren ging, zählt der Kern: Mit einem Träger gehen auch die Jäger in
+            // seinem Hangar unter, und denen sieht man es am Wrack nicht mehr an.
+            lost: battle.combatants[side].lost,
+            ..Default::default()
+        };
+        let fighters = ShipClass::Fighter.index();
+        for ship in battle
+            .ships
+            .iter()
+            .filter(|ship| ship.side as usize == side)
+        {
+            let column = match ship.status {
+                ShipStatus::Active => &mut tally.fighting,
+                ShipStatus::Routing => &mut tally.withdrawing,
+                ShipStatus::Disabled => &mut tally.adrift,
+                ShipStatus::Escaped => &mut tally.escaped,
+                ShipStatus::Destroyed => continue,
+            };
+            column[ship.class.index()] += 1;
+            column[fighters] += ship.hangar;
+        }
+        tally
+    }
+
+    /// Schiffe einer Klasse, über alle Spalten.
+    pub fn total(&self, class: usize) -> u32 {
+        self.fighting[class]
+            + self.withdrawing[class]
+            + self.adrift[class]
+            + self.lost[class]
+            + self.escaped[class]
+    }
+
+    /// Noch auf dem Feld und nicht ohne Energie: kämpfend oder auf dem Rückzug.
+    pub fn under_way(&self, class: usize) -> u32 {
+        self.fighting[class] + self.withdrawing[class]
+    }
+}
+
 /// Lage einer Partei, einmal je Frame aus dem Gefecht gezählt.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SideSummary {
-    pub active: [u32; 6],
+    pub tally: Tally,
     /// Anteil des anfänglichen Kampfwerts, der noch kämpft.
     pub strength: f32,
     /// Mittlere Moral der Schiffe auf dem Feld, 0..1.
     pub morale: f32,
-    /// Jäger, die noch im Hangar stehen.
+    /// Jäger, die noch im Hangar eines Trägers auf dem Feld stehen.
     pub hangar: u32,
 }
 
 pub fn summarize(battle: &Battle, data: &GameData, side: usize) -> SideSummary {
     let mut summary = SideSummary {
-        active: battle.active_by_class(side),
+        tally: Tally::of(battle, side),
         ..Default::default()
     };
     let (mut morale, mut crews) = (0.0, 0);
@@ -134,7 +196,7 @@ pub fn summarize(battle: &Battle, data: &GameData, side: usize) -> SideSummary {
             morale += ship.morale;
             crews += 1;
         }
-        if ship.status == ShipStatus::Active {
+        if ship.status.in_play() {
             summary.hangar += ship.hangar;
         }
     }
@@ -146,6 +208,27 @@ pub fn summarize(battle: &Battle, data: &GameData, side: usize) -> SideSummary {
     let initial = battle.combatants[side].initial_value.max(1.0);
     summary.strength = (battle.fighting_value(data, side) / initial).clamp(0.0, 1.0);
     summary
+}
+
+/// Eine Zahl der Tabellen: Null tritt zurück, damit ins Auge fällt, wo etwas steht.
+fn count(ui: &mut egui::Ui, value: u32, color: Option<Color32>) {
+    let text = RichText::new(value.to_string());
+    ui.label(match (value, color) {
+        (0, _) => text.color(MUTED),
+        (_, Some(color)) => text.color(color),
+        (_, None) => text,
+    });
+}
+
+/// Kopfzeile einer Tabelle: kleine Überschriften, jede mit einer Erklärung.
+fn column_titles(ui: &mut egui::Ui, titles: &[(&str, &str)]) {
+    for (title, meaning) in titles {
+        let label = ui.label(RichText::new(*title).color(MUTED).small());
+        if !meaning.is_empty() {
+            label.on_hover_text(*meaning);
+        }
+    }
+    ui.end_row();
 }
 
 fn bar(fraction: f32, color: Color32, width: f32) -> egui::ProgressBar {
@@ -377,7 +460,7 @@ fn side_panel(
         .frame(panel_frame(ctx))
         .anchor(anchor, offset)
         .show(ctx, |ui| {
-            ui.set_width(236.0);
+            ui.set_width(SIDE_PANEL_WIDTH);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(refs.feed.side_name(side))
@@ -399,28 +482,42 @@ fn side_panel(
                 ))
                 .color(MUTED),
             );
+            // Jede Zeile ergibt die Anfangszahl der Klasse: Auch wer sich zurückzieht oder
+            // treibt, steht in einer Spalte. Die Spalten stehen dicht, damit die Tafel
+            // schmal bleibt.
+            let spacing = egui::vec2(COLUMN_GAP, ui.spacing().item_spacing.y);
             egui::Grid::new(("klassen", side))
                 .striped(true)
-                .num_columns(4)
+                .num_columns(6)
+                .min_col_width(0.0)
+                .spacing(spacing)
                 .show(ui, |ui| {
-                    for title in ["Klasse", "kämpft", "verloren", "entkommen"] {
-                        ui.label(RichText::new(title).color(MUTED).small());
-                    }
-                    ui.end_row();
+                    column_titles(
+                        ui,
+                        &[
+                            ("Klasse", ""),
+                            (
+                                "kämpft",
+                                "Kämpft; Jäger an Bord eines kämpfenden Trägers zählen mit.",
+                            ),
+                            ("Rückzug", "Auf dem Rückzug, aber noch auf dem Feld."),
+                            ("treibt", "Treibt ohne Energie auf dem Feld."),
+                            ("verloren", "Zerstört."),
+                            ("entkommen", "Hat das Feld verlassen."),
+                        ],
+                    );
+                    let tally = &summary.tally;
                     for class in ShipClass::ALL {
                         let index = class.index();
                         if combatant.initial[index] == 0 {
                             continue;
                         }
                         ui.label(class.plural());
-                        ui.label(summary.active[index].to_string());
-                        let lost = combatant.lost[index];
-                        let mut text = RichText::new(lost.to_string());
-                        if lost > 0 {
-                            text = text.color(WARNING);
-                        }
-                        ui.label(text);
-                        ui.label(combatant.escaped[index].to_string());
+                        ui.label(tally.fighting[index].to_string());
+                        count(ui, tally.withdrawing[index], Some(ACCENT));
+                        count(ui, tally.adrift[index], None);
+                        count(ui, tally.lost[index], Some(WARNING));
+                        count(ui, tally.escaped[index], None);
                         ui.end_row();
                     }
                 });
@@ -788,14 +885,24 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                         .color(MUTED),
                     );
                 });
+                // Dieselbe Zählung wie auf den Lagetafeln; auch hier ergibt jede Zeile die
+                // Anfangszahl.
+                let tally = Tally::of(battle, side);
                 egui::Grid::new(("bilanz", side))
                     .striped(true)
-                    .num_columns(5)
+                    .num_columns(6)
                     .show(ui, |ui| {
-                        for title in ["Klasse", "anfangs", "verloren", "entkommen", "im Feld"] {
-                            ui.label(RichText::new(title).color(MUTED).small());
-                        }
-                        ui.end_row();
+                        column_titles(
+                            ui,
+                            &[
+                                ("Klasse", ""),
+                                ("anfangs", ""),
+                                ("verloren", "Zerstört."),
+                                ("entkommen", "Hat das Feld verlassen."),
+                                ("treibt", "Treibt ohne Energie auf dem Feld."),
+                                ("im Feld", "Hält das Feld; Jäger an Bord zählen mit."),
+                            ],
+                        );
                         for class in ShipClass::ALL {
                             let index = class.index();
                             if result.initial[index] == 0 {
@@ -803,13 +910,10 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                             }
                             ui.label(class.plural());
                             ui.label(result.initial[index].to_string());
-                            let mut lost = RichText::new(result.lost[index].to_string());
-                            if result.lost[index] > 0 {
-                                lost = lost.color(WARNING);
-                            }
-                            ui.label(lost);
-                            ui.label(result.escaped[index].to_string());
-                            ui.label(result.holding[index].to_string());
+                            count(ui, tally.lost[index], Some(WARNING));
+                            count(ui, tally.escaped[index], None);
+                            count(ui, tally.adrift[index], None);
+                            ui.label(tally.under_way(index).to_string());
                             ui.end_row();
                         }
                     });
@@ -1289,20 +1393,179 @@ mod tests {
             None => assert!(text.contains("Keine Seite") || text.contains("Zeitgrenze")),
         }
         for (side, result) in outcome.sides.iter().enumerate() {
-            let summary = summarize(&battle, &data, side);
-            assert_eq!(summary.active, result.holding);
-            // Kein Schiff zählt doppelt: Was verloren, entkommen oder noch im Feld ist,
-            // war anfangs da (Bordjäger eingerechnet).
+            let tally = summarize(&battle, &data, side).tally;
+            // Verloren ist, was der Kern als verloren führt.
+            assert_eq!(tally.lost, result.lost);
             for class in 0..6 {
-                let accounted = result.lost[class] + result.escaped[class] + result.holding[class];
-                assert!(
-                    accounted <= result.initial[class],
-                    "Partei {side}, Klasse {class}: {accounted} von {}",
-                    result.initial[class]
+                // Jede Zeile geht auf: Was verloren, entkommen, treibend oder noch im Feld
+                // ist, ergibt zusammen, was anfangs da war (Bordjäger eingerechnet).
+                assert_eq!(
+                    tally.total(class),
+                    result.initial[class],
+                    "Partei {side}, Klasse {class}: {tally:?}"
                 );
+                // Im Feld steht, was nach dem Kern das Feld hält, dazu die Jäger an Bord;
+                // entkommen ist, was er als entkommen führt, dazu die Jäger an Bord
+                // entkommener Träger.
+                assert!(tally.under_way(class) >= result.holding[class]);
+                assert!(tally.escaped[class] >= result.escaped[class]);
             }
+            // Nach dem Ende zieht sich niemand mehr zurück.
+            assert_eq!(tally.withdrawing, [0; 6]);
             assert!(result.lost.iter().sum::<u32>() + result.escaped.iter().sum::<u32>() > 0);
         }
+    }
+
+    /// Die Spalten jeder Klasse ergeben zusammen ihre Anfangszahl, für jede Partei.
+    fn assert_rows_add_up(battle: &Battle, when: &str) {
+        for (side, combatant) in battle.combatants.iter().enumerate() {
+            let tally = Tally::of(battle, side);
+            for class in ShipClass::ALL {
+                let index = class.index();
+                assert_eq!(
+                    tally.total(index),
+                    combatant.initial[index],
+                    "{when}, Takt {}, Partei {side}, {}: {tally:?}",
+                    battle.tick,
+                    class.plural()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_ship_stands_in_exactly_one_column_at_every_moment() {
+        use super::super::practice::PRESETS;
+
+        let data = data();
+        for preset in &PRESETS {
+            // Einmal bis zum Ende ausgefochten, einmal mit befohlenem Rückzug der ersten
+            // Partei mitten im Gefecht.
+            for retreat_at in [None, Some(250)] {
+                let (mut battle, _) = stepped(&data, preset.fleets, 0);
+                assert_rows_add_up(&battle, preset.name);
+                // Schiffe der ersten Partei, die sich zurückziehen und noch auf dem Feld
+                // sind: Höchststand über das Gefecht.
+                let mut most_withdrawing = 0;
+                while !battle.finished {
+                    if Some(battle.tick) == retreat_at {
+                        battle.order_retreat(0);
+                    }
+                    battle.step(&data);
+                    assert_rows_add_up(&battle, preset.name);
+                    let tally = Tally::of(&battle, 0);
+                    most_withdrawing = most_withdrawing.max(tally.withdrawing.iter().sum());
+                }
+                if retreat_at.is_some() {
+                    // Der befohlene Rückzug war in der Tabelle zu sehen, solange er lief,
+                    // und am Ende ist entkommen, wer nicht verloren ging.
+                    assert!(most_withdrawing > 0, "{}", preset.name);
+                    let tally = Tally::of(&battle, 0);
+                    assert_eq!(tally.fighting, [0; 6], "{}", preset.name);
+                    assert_eq!(tally.withdrawing, [0; 6], "{}", preset.name);
+                    assert!(tally.escaped.iter().sum::<u32>() > 0, "{}", preset.name);
+                }
+            }
+        }
+    }
+
+    /// Die Zahlen einer Zeile der Lagetafel einer Partei, wie sie gezeichnet wurden.
+    fn painted_row(painted: &Painted, panel: egui::Rect, label: &str) -> Vec<u32> {
+        let (_, title) = painted
+            .texts
+            .iter()
+            .find(|(text, rect)| text == label && panel.contains_rect(*rect))
+            .unwrap_or_else(|| panic!("Zeile „{label}“ fehlt"));
+        let mut cells: Vec<(f32, u32)> = painted
+            .texts
+            .iter()
+            .filter(|(_, rect)| {
+                panel.contains_rect(*rect)
+                    && rect.left() > title.right()
+                    && (rect.center().y - title.center().y).abs() < 4.0
+            })
+            .filter_map(|(text, rect)| Some((rect.left(), text.parse().ok()?)))
+            .collect();
+        cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cells.into_iter().map(|(_, value)| value).collect()
+    }
+
+    #[test]
+    fn the_side_panel_shows_withdrawing_ships_and_every_row_adds_up() {
+        // Die erste Partei zieht sich zurück; ihre Schiffe sind noch auf dem Feld.
+        let data = data();
+        let (mut battle, mut feed) = stepped(&data, MIXED, 200);
+        battle.order_retreat(0);
+        for _ in 0..20 {
+            battle.step(&data);
+        }
+        feed.refresh(&battle);
+        let scene = Scene::of(data, battle, feed);
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted = scene.settle(&mut screen, None);
+        for side in 0..2 {
+            let panel = window_rect(&screen, &format!("partei_{side}"));
+            for title in ["kämpft", "Rückzug", "treibt", "verloren", "entkommen"] {
+                assert!(
+                    painted
+                        .texts
+                        .iter()
+                        .any(|(text, rect)| text == title && panel.contains_rect(*rect)),
+                    "Spalte „{title}“ fehlt auf der Tafel der Partei {side}"
+                );
+            }
+            let combatant = &scene.battle.combatants[side];
+            let tally = Tally::of(&scene.battle, side);
+            for class in ShipClass::ALL {
+                let index = class.index();
+                if combatant.initial[index] == 0 {
+                    continue;
+                }
+                let row = painted_row(&painted, panel, class.plural());
+                assert_eq!(
+                    row,
+                    [
+                        tally.fighting[index],
+                        tally.withdrawing[index],
+                        tally.adrift[index],
+                        tally.lost[index],
+                        tally.escaped[index]
+                    ],
+                    "Partei {side}, {}",
+                    class.plural()
+                );
+                assert_eq!(row.iter().sum::<u32>(), combatant.initial[index]);
+            }
+        }
+        // Die Tabelle passt in ihre Tafel, auch mit der längsten Klassenbezeichnung und
+        // vierstelligen Zahlen in jeder Spalte: Nichts ragt über den Rand.
+        for side in 0..2 {
+            let panel = window_rect(&screen, &format!("partei_{side}"));
+            assert!(panel.width() <= SIDE_PANEL_WIDTH + 16.0, "{panel:?}");
+            let title = painted
+                .texts
+                .iter()
+                .find(|(text, rect)| text == "entkommen" && panel.contains_rect(*rect))
+                .map(|(_, rect)| *rect)
+                .expect("Spalte „entkommen“");
+            // Platz für vier Ziffern unter der letzten Überschrift.
+            assert!(
+                title.left() + 30.0 <= panel.right() - 6.0,
+                "{title:?} in {panel:?}"
+            );
+        }
+        // Wer sich zurückzieht, steht jetzt in seiner Spalte und nicht mehr nirgends.
+        let withdrawing = Tally::of(&scene.battle, 0).withdrawing;
+        assert!(withdrawing.iter().sum::<u32>() >= 5, "{withdrawing:?}");
+        // Die Tafeln stehen nebeneinander, auch im schmalen Fenster.
+        let mut narrow = Screen::new(1024.0, 600.0);
+        scene.settle(&mut narrow, None);
+        let (left, right) = (
+            window_rect(&narrow, "partei_0"),
+            window_rect(&narrow, "partei_1"),
+        );
+        assert!(left.right() < right.left(), "{left:?} und {right:?}");
+        assert!(left.left() >= 0.0 && right.right() <= 1024.0);
     }
 
     /// Was die Tafeln für einen Zustand der Ansicht brauchen, an einem Stück.
@@ -1748,11 +2011,16 @@ mod tests {
             // Vor dem ersten Schuss: voller Kampfwert, Moral auf dem Ausgangswert.
             assert!((summary.strength - 1.0).abs() < 1e-3);
             assert!((summary.morale - data.balance.battle.morale_start / 100.0).abs() < 1e-3);
-            assert_eq!(summary.active, battle.active_by_class(side));
+            // Es kämpft, was der Kern als kämpfend führt; die Jäger im Hangar eines
+            // kämpfenden Trägers zählen dazu.
+            let mut fighting = battle.active_by_class(side);
+            fighting[ShipClass::Fighter.index()] += summary.hangar;
+            assert_eq!(summary.tally.fighting, fighting);
         }
         // Der Träger der ersten Partei hat seine Jäger noch an Bord.
         assert_eq!(summarize(&battle, &data, 0).hangar, 24);
         assert_eq!(summarize(&battle, &data, 1).hangar, 0);
+        assert_rows_add_up(&battle, "vor dem ersten Takt");
 
         let (battle, _) = stepped(&data, MIXED, 500);
         let lost: u32 = battle

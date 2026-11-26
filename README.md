@@ -144,6 +144,10 @@ cargo run -- --practice --fleet-a bastion:2,speer:6 --fleet-b horst:2,waechter:8
 
 Die Kopfleiste zeigt Gefechtszeit und Geschwindigkeit; rechts stehen „Übersicht“, „Gefecht“,
 „Taktik“, „Namen“, „Hilfe“ und „Verlassen“, nach dem Ende des Gefechts auch „Bilanz“. Die
+Tafeln beider Verbände zählen je Klasse, was kämpft, was sich zurückzieht und noch auf dem
+Feld ist, was ohne Energie treibt, was verloren und was entkommen ist. Jede Zeile ergibt
+zusammen die Anfangsstärke der Klasse; Jäger an Bord zählen bei ihrem Träger mit. Die
+Bilanz am Ende zählt genauso. Die
 Tafel des eigenen Verbands (links) ändert während des Gefechts Formation und Doktrin und
 befiehlt den Rückzug; ein befohlener Rückzug lässt sich nicht zurücknehmen. Ein Klick auf
 ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition, Treibstoff,

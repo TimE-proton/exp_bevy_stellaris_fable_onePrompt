@@ -101,7 +101,7 @@ impl Default for HudLayout {
     fn default() -> Self {
         Self {
             top: 34.0,
-            corner: Vec2::new(272.0, 394.0),
+            corner: Vec2::new(319.0, 394.0),
             column: None,
         }
     }
@@ -410,7 +410,9 @@ pub fn frame_circle(
         (shift, placed(limits, shift).0)
     };
     // In sehr kleinen Fenstern bleibt neben oder unter den Tafeln kein brauchbarer Platz.
-    let usable = |limits: &Limits| limits.side > 0.25 * tan_x && limits.above > 0.1 * tan_y;
+    // Unter den Tafeln genügt wenig Raum über der Bildmitte: Der Kreis sitzt dann eben in
+    // der unteren Bildhälfte, in voller Breite.
+    let usable = |limits: &Limits| limits.side > 0.25 * tan_x && limits.above > 0.05 * tan_y;
     let (shift, distance) = choices
         .into_iter()
         .find_map(|choice| {
@@ -1152,7 +1154,7 @@ mod tests {
     /// ihn melden.
     const FOUR_CLASSES: HudLayout = HudLayout {
         top: 34.0,
-        corner: Vec2::new(272.0, 340.0),
+        corner: Vec2::new(319.0, 340.0),
         column: None,
     };
     /// Dasselbe mit der offenen Tafel eines gewählten Schiffs.
@@ -1246,6 +1248,34 @@ mod tests {
                 &layout,
                 V2::from_angle((degrees as f32).to_radians()) * 1300.0
             ));
+        }
+    }
+
+    #[test]
+    fn a_squarish_window_uses_the_room_under_the_panels() {
+        // In einem Fenster, das kaum breiter ist als die beiden Lagetafeln zusammen, bleibt
+        // zwischen ihnen nur ein schmaler Streifen. Unter ihnen ist die ganze Breite frei:
+        // Dort steht der Kreis weit größer.
+        let size = Vec2::new(900.0, 900.0);
+        let layout = HudLayout::default();
+        let column = size.x - 2.0 * layout.corner.x;
+        assert!(column < 0.3 * size.x, "Streifen {column}");
+        for extent in [650.0, 1300.0, 2400.0] {
+            let projector = Projector::new(&overview_transform(extent, size, &layout), FOV, size);
+            let (mut left, mut right) = (f32::MAX, f32::MIN);
+            for degrees in (0..360).step_by(3) {
+                let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                assert!(in_view(&projector, &layout, point), "{point:?}");
+                assert!(!under_a_side_panel(&projector, &layout, point), "{point:?}");
+                let at = projector.project(to_world(point)).unwrap().0;
+                left = left.min(at.x);
+                right = right.max(at.x);
+            }
+            assert!(
+                right - left > 2.0 * column,
+                "Kreis {} breit, Streifen zwischen den Tafeln {column}",
+                right - left
+            );
         }
     }
 
@@ -2449,18 +2479,21 @@ mod tests {
             );
 
             // Ein Schiff wählen: Seine Tafel öffnet sich rechts und reicht bis zum unteren
-            // Rand. Mit dem bisherigen Blick stünden Schiffe darunter.
+            // Rand. Sie ist breiter als die Lagetafel über ihr: Der bisherige Blick hält
+            // den Streifen, um den sie weiter ins Bild ragt, nicht frei.
             let (_, at) = ship_in_the_open(&game);
             game.click(at);
             assert!(game.resource::<SelectedShip>().0.is_some());
             let ship_panel = game.window_rect("schiff").expect("Tafel des Schiffs");
-            if fleets == wide {
-                assert!(!hidden_ships(&mut game).is_empty());
-            }
             let layout = *game.resource::<HudLayout>();
             assert_eq!(
                 layout.column.map(f32::round),
                 Some((crate::testing::WINDOW.x - ship_panel.left() + LAYOUT_GAP).round())
+            );
+            assert!(
+                layout
+                    .column
+                    .is_some_and(|column| column > layout.corner.x + 20.0)
             );
 
             // Die Übersicht rückt so weit ab, dass wieder jedes Schiff frei steht.
