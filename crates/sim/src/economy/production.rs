@@ -81,7 +81,8 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 if yield_factor <= 0.0 {
                     continue;
                 }
-                let staffed = capital * employment;
+                // Was durch Bodenkrieg und Besatzung stillsteht, arbeitet nicht.
+                let staffed = capital * employment * (1.0 - local.disruption);
                 let fuel_per_unit = recipe.energy as f64 * efactor;
 
                 // Die Nachfrage zählt auch dann, wenn die Ware fehlt: Knappheit hebt den Preis.
@@ -382,9 +383,57 @@ pub fn update_prices_and_wages(galaxy: &Galaxy, economy: &mut Economy, data: &Ga
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{SimConfig, SimState};
 
     fn balance() -> crate::data::EconomyBalance {
         GameData::load_workspace().unwrap().balance.economy
+    }
+
+    /// Ein Tag Produktion auf einer Heimatwelt, deren Wirtschaft zum Anteil `disruption`
+    /// stillsteht: Ausstoß je Rezept und das Geld der Haushalte danach.
+    fn a_day_with(disruption: f64) -> (Vec<f64>, Money, Money) {
+        let data = GameData::load_workspace().unwrap();
+        let mut state = SimState::generate(
+            &data,
+            SimConfig {
+                seed: 6,
+                player: None,
+            },
+        );
+        state.galaxy.rebuild_index();
+        let home = state.polities.list[0].capital.unwrap();
+        state.economy.planets[home.index()].disruption = disruption;
+        let money = state.economy.money_in_accounts();
+        produce_and_consume(&mut state.galaxy, &mut state.economy, &data);
+        assert_eq!(state.economy.money_in_accounts(), money);
+        let local = state.economy.planet(home);
+        let taxes = state.economy.state_income_running[0];
+        (local.output.clone(), local.households, taxes)
+    }
+
+    #[test]
+    fn disruption_idles_its_share_of_the_staffed_capital() {
+        let (full, wealth, taxes) = a_day_with(0.0);
+        let (half, poorer, less) = a_day_with(0.5);
+        let (none, _, nothing) = a_day_with(1.0);
+        assert!(full.iter().sum::<f64>() > 10.0, "die Heimatwelt produziert");
+        let mut halved = 0;
+        for (index, (full, half)) in full.iter().zip(&half).enumerate() {
+            // Jedes Werk stößt höchstens aus, was es ungestört schafft, und mindestens
+            // die Hälfte davon: Engpässe bei Vorprodukten und Absatz lockern sich eher.
+            assert!(*half <= full + 1e-9, "Rezept {index}: {half} über {full}");
+            assert!(*half >= 0.5 * full - 1e-9, "Rezept {index}: {half} zu {full}");
+            if *full > 0.0 && (half - 0.5 * full).abs() < 1e-9 {
+                halved += 1;
+            }
+        }
+        assert!(halved >= 3, "ungebremste Werke stoßen genau die Hälfte aus");
+        // Weniger Arbeit, weniger Lohn und Lohnsteuer: Der Stillstand trifft die
+        // Haushalte und die Staatskasse.
+        assert!(poorer < wealth && less < taxes && less > 0);
+        // Steht alles still, entsteht nichts.
+        assert!(none.iter().all(|output| *output == 0.0));
+        assert_eq!(nothing, 0);
     }
 
     #[test]
