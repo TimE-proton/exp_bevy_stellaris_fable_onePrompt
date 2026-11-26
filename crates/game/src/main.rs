@@ -14,6 +14,7 @@ mod time_control;
 mod traffic;
 mod ui;
 
+use bevy::log::{DEFAULT_FILTER, LogPlugin};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use bevy_egui::EguiPlugin;
@@ -39,15 +40,24 @@ fn main() -> AppExit {
     };
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "KONFLUENZ".into(),
-            resolution: (1600, 900).into(),
-            present_mode: PresentMode::AutoVsync,
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "KONFLUENZ".into(),
+                    resolution: (1600, 900).into(),
+                    present_mode: PresentMode::AutoVsync,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(LogPlugin {
+                // Die Freiflugsteuerung der Engine meldet beim Start ihre Tastenbelegung auf
+                // Englisch; die gültige steht in der Hilfe des Spiels.
+                filter: format!("{DEFAULT_FILTER},bevy_camera_controller=warn"),
+                ..default()
+            }),
+    )
     .add_plugins(EguiPlugin::default());
     add_game(&mut app, data, args);
     app.run()

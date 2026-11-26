@@ -1091,7 +1091,7 @@ mod tests {
             !battle.finished && !battle.wrecks.is_empty(),
             "mitten im Gefecht"
         );
-        let camera = super::super::camera::overview_transform(2400.0);
+        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
         let frame_data = view_frame(&feed, &camera);
         let speed = SimSpeed::default();
         for labels in [false, true] {
@@ -1140,7 +1140,7 @@ mod tests {
             battle.step(&data);
             feed.refresh(&battle);
         }
-        let camera = super::super::camera::overview_transform(2400.0);
+        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
         let frame_data = view_frame(&feed, &camera);
         let speed = SimSpeed {
             paused: false,
@@ -1220,7 +1220,7 @@ mod tests {
         }
 
         fn of(data: GameData, battle: Battle, feed: BattleFeed) -> Self {
-            let camera = super::super::camera::overview_transform(2400.0);
+            let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
             let frame = view_frame(&feed, &camera);
             Self {
                 data,
@@ -1648,7 +1648,7 @@ mod tests {
         // Aus der Übersicht über das ganze Feld ist jedes Schiff klein: Alle tragen eine
         // Markierung (die kleinen Klassen voll deckend), und sie liegt dort, wo das Schiff
         // im Bild steht.
-        let camera = super::super::camera::overview_transform(2400.0);
+        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
         let frame_data = view_frame(&feed, &camera);
         let markers = collect_markers(&battle, &frame_data, &frame_data.projector);
         let in_play = battle
@@ -1731,7 +1731,7 @@ mod tests {
                 battle.step(&data);
                 feed.refresh(&battle);
             }
-            let camera = super::super::camera::overview_transform(2400.0);
+            let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
             let frame_data = view_frame(&feed, &camera);
             let speed = SimSpeed::default();
             let options = ViewOptions::default();
