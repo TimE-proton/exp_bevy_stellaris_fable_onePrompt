@@ -46,6 +46,7 @@ struct MilitaryView<'w> {
     battles: Res<'w, Battles>,
     diplomacy: Res<'w, Diplomacy>,
     research: Res<'w, Research>,
+    clock: Res<'w, SimClock>,
 }
 
 impl MilitaryView<'_> {
@@ -59,6 +60,7 @@ impl MilitaryView<'_> {
             battles: &self.battles,
             diplomacy: &self.diplomacy,
             research: &self.research,
+            day: self.clock.day(),
         }
     }
 }

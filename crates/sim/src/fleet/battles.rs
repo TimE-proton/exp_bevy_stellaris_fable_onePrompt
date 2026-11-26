@@ -1680,6 +1680,29 @@ mod tests {
         battle
     }
 
+    #[test]
+    fn the_estimate_in_a_battle_counts_what_everyone_sees() {
+        use crate::ai::estimate::{battle_values, total};
+        let (data, _, _, mut fleets) = setup();
+        let mut battle = duel(&data, &mut fleets, 0, 1);
+        let battles = Battles::default();
+        let (mine, theirs, foes) = battle_values(&battles, &battle, 0);
+        assert!(total(&mine) > 0.0 && total(&theirs) > 0.0);
+        assert_eq!(foes, vec![fleets.list[1].owner]);
+        // Schäden am Rumpf ändern die Schätzung nicht, auf keiner Seite: Den Zustand der
+        // gegnerischen Schiffe kennt die Führung nicht, und nur die eigenen Schäden
+        // einzurechnen hieße, sich im Lauf jedes Gefechts für unterlegen zu halten.
+        for ship in &mut battle.ships {
+            ship.hull *= 0.3;
+        }
+        assert_eq!(battle_values(&battles, &battle, 0), (mine, theirs, foes));
+        // Was nicht mehr kämpft, zählt nicht mehr.
+        set_active(&mut battle, 1, ShipStatus::Routing);
+        let (still_mine, gone, _) = battle_values(&battles, &battle, 0);
+        assert_eq!(still_mine, mine);
+        assert_eq!(total(&gone), 0.0);
+    }
+
     /// Platz eines Schiffs der strategischen Ebene im Gefecht.
     fn place(battle: &Battle, id: ShipId) -> usize {
         battle

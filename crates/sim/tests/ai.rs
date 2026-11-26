@@ -307,9 +307,10 @@ fn border_war(from: u64, to: u64) -> WarScript {
 
 #[test]
 fn the_ai_fights_a_war_it_did_not_choose_and_returns_to_peace() {
-    // Zwei Partien, in denen die Nachbarn nah genug liegen, dass sie einander erreichen.
+    // Zwei Partien, in denen die Nachbarn nah genug liegen, dass sie einander erreichen,
+    // und in denen eine Seite der anderen überlegen genug ist, um anzugreifen.
     let mut battles = 0;
-    for seed in [2, 6] {
+    for seed in [0, 3] {
         let script = border_war(20, 32);
         let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
         script.run_until(&mut sim, 20 * DAYS_PER_YEAR, false);
@@ -394,7 +395,10 @@ fn a_fleet_led_by_the_ai_beats_one_that_stays_passive() {
     // Derselbe Krieg zweimal: Einmal bleibt die Flotte der einen Seite ohne Befehle,
     // einmal die der anderen. Beide rüsten in beiden Partien gleich. Wer geführt wird,
     // sperrt Systeme und gewinnt die Gefechte; wer untätig bleibt, tut keines von beidem.
-    let seed = 6;
+    // (Eine Partie, in der die geführte Seite auf beiden Plätzen stark genug ist, um
+    // anzugreifen: Gegen eine gleich starke Flotte in Reichweite greift die KI nicht an,
+    // auch wenn die untätig bleibt.)
+    let seed = 7;
     let a = PolityId(0);
     let play = |passive_is_a: bool| {
         let events = vec![
@@ -464,13 +468,31 @@ fn a_fleet_led_by_the_ai_beats_one_that_stays_passive() {
 
 #[test]
 fn wars_led_by_the_ai_are_deterministic() {
-    // Ein früher Krieg, damit jeder Takt gerechnet werden kann.
-    let script = border_war(2, 5);
+    // Ein früher Krieg, damit jeder Takt gerechnet werden kann. Mit gleichen Startflotten
+    // griffe niemand an; deshalb verdoppelt die erste Gemeinschaft ihre Flotte vorher.
+    let mut events = vec![
+        ScriptedEvent {
+            day: 0,
+            act: ScriptedAct::Navy {
+                who: Some(PolityId(0)),
+                factor: 2.0,
+            },
+        },
+        ScriptedEvent {
+            day: 3 * DAYS_PER_YEAR,
+            act: ScriptedAct::BorderWar { a: PolityId(0) },
+        },
+    ];
+    events.push(ScriptedEvent {
+        day: 6 * DAYS_PER_YEAR,
+        act: ScriptedAct::PeaceWithAll { a: PolityId(0) },
+    });
+    let script = WarScript::new(events);
     let config = SimConfig {
         seed: 6,
         player: None,
     };
-    let days = 4 * DAYS_PER_YEAR;
+    let days = 5 * DAYS_PER_YEAR;
     let mut fast = Headless::new(data().clone(), config.clone());
     script.run_until(&mut fast, days, false);
     // Der Krieg läuft, und die KI hat ihre Flotten geführt.
@@ -480,7 +502,10 @@ fn wars_led_by_the_ai_are_deterministic() {
     );
     let summary = summarize(&fast);
     assert!(
-        summary.polities.iter().any(|polity| polity.offensives > 0) || summary.battles > 0,
+        summary
+            .polities
+            .iter()
+            .any(|polity| polity.offensives > 0 && polity.blockade_days > 0),
         "im Krieg ist nichts geschehen"
     );
 
@@ -496,7 +521,7 @@ fn wars_led_by_the_ai_are_deterministic() {
     assert_eq!(exact.hash(), fast.hash());
 
     let mut first_half = Headless::new(data().clone(), config);
-    let middle = 3 * DAYS_PER_YEAR + 100;
+    let middle = 4 * DAYS_PER_YEAR + 100;
     script.run_until(&mut first_half, middle, false);
     assert!(
         first_half
@@ -509,4 +534,104 @@ fn wars_led_by_the_ai_are_deterministic() {
     assert_eq!(resumed.hash(), first_half.hash());
     script.run_until(&mut resumed, days, false);
     assert_eq!(resumed.hash(), fast.hash());
+}
+
+#[test]
+fn wars_led_by_the_ai_do_not_repeat_the_same_empty_battle_or_sortie() {
+    // Zwei Grenzkriege über zwanzig Jahre, in denen sich früher dieselben zwei Flotten
+    // Dutzende Male ohne Verluste trafen und Angriffe im Wochentakt begonnen und
+    // abgebrochen wurden.
+    for seed in [13, 20] {
+        let script = border_war(25, 45);
+        let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
+        script.run_until(&mut sim, 46 * DAYS_PER_YEAR, false);
+        assert_eq!(check_invariants(sim.world()), Ok(()), "Seed {seed}");
+        let reports = &sim.world().resource::<Battles>().reports;
+        // Gefechte, in denen niemand etwas verlor: Eine Seite wich der anderen nur aus.
+        let empty = reports
+            .iter()
+            .filter(|report| report.sides.iter().all(|side| side.lost_value <= 0.0))
+            .count();
+        assert!(
+            empty <= 6,
+            "Seed {seed}: {empty} von {} Gefechten ohne jeden Verlust",
+            reports.len()
+        );
+        // Wer angreift, hält im Mittel wenigstens zwei Wochen ein System gesperrt: Ein
+        // Angriff ist kein Ausfall, der am nächsten Tag wieder abgebrochen wird.
+        let summary = summarize(&sim);
+        for polity in summary
+            .polities
+            .iter()
+            .filter(|polity| polity.offensives >= 10)
+        {
+            assert!(
+                polity.blockade_days >= 14 * polity.offensives,
+                "Seed {seed}, {}: {} Angriffe für {} Blockadetage",
+                polity.name,
+                polity.offensives,
+                polity.blockade_days
+            );
+        }
+        assert!(summary.ai_rejected_share() < 0.02, "Seed {seed}");
+    }
+}
+
+#[test]
+fn after_laying_up_ships_the_ai_does_not_order_new_ones_for_years() {
+    // Eine Partie, in der nach dem Grenzkrieg zwei Gemeinschaften ihre Flotte nicht mehr
+    // tragen und Schiffe stilllegen. Monat für Monat: Nach einer Stilllegung kommt im
+    // Frieden layup_quiet_months lang kein neuer Auftrag hinzu.
+    let quiet = data().balance.military.ai.layup_quiet_months as u64;
+    let script = border_war(25, 45);
+    let mut sim = Headless::new(
+        data().clone(),
+        SimConfig {
+            seed: 9,
+            player: None,
+        },
+    );
+    script.run_until(&mut sim, 40 * DAYS_PER_YEAR, false);
+    // Je Gemeinschaft: bisher stillgelegt, ausgeliefert plus offene Aufträge, und der
+    // Monat der letzten Stilllegung.
+    let mut seen: Vec<(u32, u32, Option<u64>)> = Vec::new();
+    let (mut laid_up, mut checked) = (0, 0);
+    for month in 40 * 12..60 * 12 {
+        script.run_until(&mut sim, (month + 1) * sim::clock::DAYS_PER_MONTH, false);
+        let fleets = sim.world().resource::<Fleets>();
+        let diplomacy = sim.world().resource::<Diplomacy>();
+        let count = sim.polities().list.len();
+        seen.resize(count, (0, 0, None));
+        for (index, entry) in seen.iter_mut().enumerate() {
+            let id = PolityId::from_index(index);
+            let tally = fleets.tally_of(id);
+            let committed = tally.built + fleets.orders_of(id).count() as u32;
+            if tally.laid_up > entry.0 {
+                laid_up += tally.laid_up - entry.0;
+                entry.2 = Some(month);
+            } else if let Some(since) = entry.2
+                && month - since < quiet
+                && !diplomacy.is_at_war(id)
+            {
+                checked += 1;
+                assert!(
+                    committed <= entry.1,
+                    "{}: neuer Auftrag {} Monate nach der Stilllegung",
+                    sim.polities().get(id).name,
+                    month - since
+                );
+            }
+            entry.0 = tally.laid_up;
+            entry.1 = committed;
+        }
+    }
+    assert!(
+        laid_up >= 2,
+        "Szenario neu wählen: nur {laid_up} Schiffe stillgelegt"
+    );
+    assert!(
+        checked >= 24,
+        "nur {checked} Monate nach einer Stilllegung geprüft"
+    );
+    assert_eq!(check_invariants(sim.world()), Ok(()));
 }

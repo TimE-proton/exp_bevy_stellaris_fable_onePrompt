@@ -4,10 +4,13 @@
 //! unterwegs ist, ob sie kämpft oder sich sammelt, und welche Schiffe sie führt (Klasse
 //! und Bauwert). Zustand, Vorräte und Technik ihrer Schiffe kennt nur ihre eigene
 //! Gemeinschaft; die Technik geht mit der Schätzung ein, die das Spiel anbietet
-//! ([`Research::estimate`]). Die eigene Flotte rechnet mit ihrem wirklichen Zustand.
+//! ([`Research::estimate`]). Die eigene Flotte rechnet mit ihrem wirklichen Zustand. Das
+//! Im laufenden Gefecht ([`battle_values`]) zählt auf beiden Seiten, was noch kämpft,
+//! mit seinem Bauwert.
 
+use crate::battle::{Battle, ShipStatus};
 use crate::data::{GameData, ShipClass, TechBranch};
-use crate::fleet::{Fleet, Fleets, combat_value};
+use crate::fleet::{Battles, Fleet, Fleets, combat_value};
 use crate::ids::{FleetId, PolityId, SystemId};
 use crate::tech::Research;
 
@@ -86,6 +89,41 @@ pub fn sightings(data: &GameData, fleets: &Fleets, viewer: PolityId) -> Vec<Sigh
             values: seen_values(data, fleet),
         })
         .collect()
+}
+
+/// Die Kräfte in einem laufenden Gefecht aus Sicht der Partei `side`: was für ihre Seite
+/// und was gegen sie noch kämpft, je Klasse, dazu die Gemeinschaften der Gegner. Gezählt
+/// wird auf beiden Seiten dasselbe, nämlich was jeder sieht: die Schiffe, die noch
+/// kämpfen (Jäger in der Luft eingeschlossen), mit ihrem Bauwert. Rumpf und Hangars der
+/// Gegner kennt die Partei nicht; rechnete sie nur die eigenen Schäden ein, hielte sie
+/// sich im Lauf jedes Gefechts für unterlegen.
+pub fn battle_values(
+    battles: &Battles,
+    battle: &Battle,
+    side: usize,
+) -> (ClassValues, ClassValues, Vec<PolityId>) {
+    let (mut mine, mut theirs): (ClassValues, ClassValues) = ([0.0; 6], [0.0; 6]);
+    let mut foes: Vec<PolityId> = Vec::new();
+    for ship in battle
+        .ships
+        .iter()
+        .filter(|ship| ship.status == ShipStatus::Active)
+    {
+        let other = ship.side as usize;
+        if battles.has_departed(battle.id, other) {
+            continue;
+        }
+        if battle.is_hostile(side as u16, ship.side) {
+            theirs[ship.class.index()] += ship.value as f64;
+            let owner = battle.combatants[other].owner;
+            if !foes.contains(&owner) {
+                foes.push(owner);
+            }
+        } else {
+            mine[ship.class.index()] += ship.value as f64;
+        }
+    }
+    (mine, theirs, foes)
 }
 
 /// Wirksamkeit einer Klasse gegen die Mischung eines Gegners: das Mittel der Kontertabelle

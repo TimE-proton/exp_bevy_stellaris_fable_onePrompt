@@ -15,12 +15,12 @@
 //! [`super::estimate`] hergibt.
 
 use super::estimate::{
-    ClassValues, Sighting, add, class_score, odds, own_values, seen_values, sightings, tech_edge,
-    total,
+    ClassValues, Sighting, add, battle_values, class_score, odds, own_values, seen_values,
+    sightings, tech_edge, total,
 };
 use super::levers::{Hand, free_yards, has_yard};
-use super::{AiState, MilitaryMode, MilitaryPlan, Mission, Operation};
-use crate::battle::{Doctrine, ShipStatus};
+use super::{AiState, Meeting, MilitaryMode, MilitaryPlan, Mission, Operation};
+use crate::battle::Doctrine;
 use crate::clock::DAYS_PER_MONTH;
 use crate::command::CommandQueue;
 use crate::data::{GameData, ShipClass};
@@ -43,12 +43,14 @@ pub struct Situation<'a> {
     pub battles: &'a Battles,
     pub diplomacy: &'a Diplomacy,
     pub research: &'a Research,
+    /// Der heutige Tag.
+    pub day: u64,
 }
 
-/// So viele abgeschlossene Haushaltsmonate braucht die Rüstung, bevor sie bestellt, und
-/// über so viele mittelt sie höchstens.
+/// So viele abgeschlossene Haushaltsmonate braucht die Rüstung im Krieg, bevor sie
+/// bestellt; über so viele urteilt sie höchstens, und so viele braucht sie im Frieden.
 const BUDGET_MONTHS_MIN: usize = 3;
-const BUDGET_MONTHS_MAX: usize = 6;
+const BUDGET_MONTHS_MAX: usize = 12;
 /// Unter diesem Tankinhalt wartet eine Flotte im eigenen Hafen, statt loszufahren: Ein
 /// Schiff aus der Werft kommt mit leeren Tanks.
 const FUEL_TO_SAIL: f32 = 0.5;
@@ -212,7 +214,23 @@ pub fn plan_month(
         // viele in Folge.
         plan.short_mask = ((plan.short_mask << 1) | short as u16) & 0x0fff;
         plan.short_months = plan.short_mask.count_ones();
+        plan.calm_months = if short {
+            0
+        } else {
+            plan.calm_months.saturating_add(1)
+        };
+        plan.months_since_layup = plan.months_since_layup.saturating_add(1);
         let last_month = sit.economy.budget(id).and_then(|budget| budget.last());
+        // Was die Gemeinschaft auf lange Sicht einnimmt: ein träges Mittel über Jahre.
+        if let Some(month) = last_month {
+            let revenue = to_credits(month.revenue);
+            plan.usual_revenue = if plan.usual_revenue > 0.0 {
+                plan.usual_revenue
+                    + (revenue - plan.usual_revenue) / levers.revenue_memory_months as f64
+            } else {
+                revenue
+            };
+        }
 
         // --- Forschung: Etat der Vorlage, im Krieg höher, gekürzt, solange der Haushalt
         // ihn nicht trägt; im Krieg ein Ziel, das der Flotte hilft. ---
@@ -316,13 +334,42 @@ pub fn plan_month(
         let war = if at_war { levers.war_factor } else { 1.0 };
         let share =
             (levers.peace_share * (1.0 + levers.threat_gain * excess) * war).min(levers.max_share);
-        let judged = recent.len() >= BUDGET_MONTHS_MIN && claim_rate > 0.0;
-        let target_value = if judged {
-            share * mean(|month| month.revenue) / claim_rate
+        // Im Frieden urteilt die Rüstung erst über ein ganzes Jahr: Die ersten Monate
+        // einer jungen Gemeinschaft sagen wenig darüber, was sie auf Dauer trägt.
+        let months_needed = if at_war {
+            BUDGET_MONTHS_MIN
         } else {
-            f64::INFINITY
+            BUDGET_MONTHS_MAX
         };
-        if !short && funded && judged {
+        let judged = recent.len() >= months_needed && claim_rate > 0.0;
+        // Die Einnahmen kommen in Schüben, und ein Haushalt, dem das Geld ausgeht, nimmt
+        // auch weniger ein. Tragen muss die Flotte sich in den schwachen Monaten.
+        let lean_revenue = {
+            let mut revenues: Vec<f64> = recent
+                .iter()
+                .map(|month| to_credits(month.revenue))
+                .collect();
+            revenues.sort_by(f64::total_cmp);
+            let count = ((revenues.len() as f64 * levers.lean_share).ceil() as usize)
+                .clamp(1, revenues.len().max(1));
+            revenues.iter().take(count).sum::<f64>() / count as f64
+        };
+        // Bestellt wird bis zu dem, was die schwachen Monate und die lange Sicht beide
+        // tragen. Stillgelegt wird erst, was über dem liegt, was eines von beiden trägt:
+        // Einen Einbruch von einigen Monaten sitzt die Flotte aus.
+        let (target_value, keep_value) = if judged {
+            (
+                share * lean_revenue.min(plan.usual_revenue) / claim_rate,
+                share * lean_revenue.max(plan.usual_revenue) / claim_rate,
+            )
+        } else {
+            (f64::INFINITY, f64::INFINITY)
+        };
+        // Im Frieden baut die KI nicht gleich wieder, was sie eben nicht tragen konnte.
+        let calm = at_war
+            || (plan.calm_months >= levers.quiet_months
+                && plan.months_since_layup >= levers.layup_quiet_months);
+        if !short && funded && judged && calm {
             let room = levers.room_use * mean(|month| month.remainder());
             let known = sit.research.known(id);
             let mut committed: f64 = sit
@@ -354,7 +401,12 @@ pub fn plan_month(
                     };
                     let value = data.designs[design as usize].stats.value;
                     let cost = burden(data, design, claim_rate);
-                    if committed + cost > room || own_total + 0.5 * value > target_value {
+                    // Kein einzelnes Schiff darf mehr wert sein als das ganze Ziel: Eine
+                    // kleine Gemeinschaft baut kleine Schiffe.
+                    if committed + cost > room
+                        || value > target_value
+                        || own_total + 0.5 * value > target_value
+                    {
                         continue;
                     }
                     let held = if own_total > 0.0 {
@@ -400,9 +452,9 @@ pub fn plan_month(
                 hand.cancel_build(order);
             }
             // Dann, nach der Frist, Schiffe: so viel Bauwert, wie zuletzt Sold ausblieb,
-            // die entbehrlichsten zuerst, aber nie unter das Rüstungsziel. Liegt die
-            // Flotte schon darunter, ist sie nicht der Grund, und Stilllegen hülfe nicht.
-            let surplus = (missed as f64 * afloat).min(afloat - target_value);
+            // die entbehrlichsten zuerst, aber nie unter das, was die Einnahmen auf lange
+            // Sicht tragen. Liegt die Flotte schon darunter, ist sie nicht der Grund.
+            let surplus = (missed as f64 * afloat).min(afloat - keep_value);
             if plan.short_months >= levers.layup_after_months
                 && surplus > 0.0
                 && lay_up_surplus(sit, &mut hand, id, &foe_mix, surplus)
@@ -410,6 +462,8 @@ pub fn plan_month(
                 // Was die Stilllegung bringt, zeigt sich erst in den nächsten Monaten.
                 plan.short_mask = 0;
                 plan.short_months = 0;
+                plan.calm_months = 0;
+                plan.months_since_layup = 0;
             }
         }
     }
@@ -618,6 +672,9 @@ fn lead_in_peace(
     own: &[&Fleet],
 ) {
     plan.operations.clear();
+    plan.met.clear();
+    plan.post = None;
+    plan.no_offensive_before = 0;
     let busy = merge_idle(sit, hand, plan, own, |_| false);
     // Bleibt Sold aus, sammelt sich die Flotte bei einer Werft: Nur dort lässt sich
     // stilllegen.
@@ -697,54 +754,80 @@ fn lead_at_war(
             standing.insert(sighting.system);
         }
     }
+    // Systeme, in denen eine fremde Flotte steht, mit der die eigene eben im Gefecht
+    // stand, auch wenn sie sich dort sammelt. Dorthin führt kein neuer Angriff: Wer
+    // ausgewichen ist, weicht wieder aus, und entschieden wird nichts.
+    let known: BTreeSet<SystemId> = sightings(data, sit.fleets, id)
+        .iter()
+        .filter(|sighting| plan.met.contains_key(&sighting.fleet))
+        .map(Sighting::position)
+        .collect();
     let nobody: ClassValues = [0.0; 6];
     let foes_at = |system: SystemId| foes.get(&system).unwrap_or(&nobody);
     let clear = |index: usize| !foes.contains_key(&SystemId::from_index(index));
+
+    // Was im Umkreis eines Systems an Gegnern steht und dort eingreifen kann: Daran misst
+    // sich ein Angriff, nicht nur an dem, was im Ziel selbst liegt.
+    let mut around: Vec<ClassValues> = vec![[0.0; 6]; sit.galaxy.systems.len()];
+    for (system, values) in &foes {
+        for (slot, hops) in around.iter_mut().zip(sit.galaxy.hops_from(*system)) {
+            if hops <= levers.response_jumps {
+                add(slot, values);
+            }
+        }
+    }
+    // Wer sich gestellt hat, wird nach rematch_days wieder aufgesucht; wer nur
+    // ausgewichen ist, erst nach elusive_days.
+    plan.met.retain(|_, meeting| {
+        let wait = if meeting.fought {
+            levers.rematch_days
+        } else {
+            levers.elusive_days
+        };
+        sit.day < meeting.day + wait
+    });
 
     // --- Im Gefecht: Rückzug, bevor die Flotte verloren ist. ---
     for fleet in own.iter().filter(|fleet| fleet.in_battle) {
         let Some((battle, side)) = sit.battles.of_fleet(fleet.id) else {
             continue;
         };
-        // Dieselbe Schätzung wie vor dem Treffen, auf dem Stand des Gefechts: was auf
-        // beiden Seiten noch kämpft, je Klasse, mit dem Rumpf, der ihm geblieben ist.
-        let (mut mine, mut theirs): (ClassValues, ClassValues) = ([0.0; 6], [0.0; 6]);
-        let mut edge = 1.0f64;
-        for ship in battle
-            .ships
+        // Wer hier gegenübersteht, wird so bald nicht wieder aufgesucht: Wich er aus,
+        // lässt er sich nicht stellen.
+        let fought = battle
+            .combatants
             .iter()
-            .filter(|ship| ship.status == ShipStatus::Active)
-        {
-            let other = ship.side as usize;
-            if sit.battles.has_departed(battle.id, other) {
-                continue;
-            }
-            let craft = data.designs[ship.design as usize]
-                .stats
-                .craft
-                .map_or(0.0, |craft| {
-                    ship.hangar as f64 * data.designs[craft as usize].stats.value
-                });
-            let value = ship.value as f64 * (ship.hull / ship.hull_max.max(1e-6)) as f64 + craft;
-            if battle.is_hostile(side as u16, ship.side) {
-                theirs[ship.class.index()] += value;
-                edge = edge.min(tech_edge(
-                    data,
-                    sit.research,
-                    id,
-                    battle.combatants[other].owner,
-                ));
-            } else {
-                mine[ship.class.index()] += value;
+            .any(|combatant| combatant.lost_value > 0.0);
+        for (other, combatant) in battle.combatants.iter().enumerate() {
+            if battle.is_hostile(side as u16, other as u16)
+                && let Some(foe) = combatant.fleet
+            {
+                plan.met.insert(
+                    foe,
+                    Meeting {
+                        day: sit.day,
+                        fought,
+                    },
+                );
             }
         }
+        // Dieselbe Schätzung wie vor dem Treffen, auf dem Stand des Gefechts.
+        let (mine, theirs, hostile) = battle_values(sit.battles, battle, side);
+        // Mit demselben Vorsprung der Technik wie vor dem Treffen (gegen mehrere Gegner
+        // dem kleinsten): Sonst träte die Flotte an und bräche am ersten Tag wieder ab.
+        let edge = hostile
+            .iter()
+            .map(|foe| tech_edge(data, sit.research, id, *foe))
+            .min_by(f64::total_cmp)
+            .unwrap_or(1.0);
         let outmatched =
             total(&theirs) > 0.0 && odds(data, &mine, &theirs, edge) < levers.retreat_odds;
         let worn = plan.operations.get(&fleet.id).is_some_and(|operation| {
             fleet.build_value(data) < (1.0 - levers.break_off_loss) * operation.start_value
         });
-        if outmatched || worn {
-            hand.retreat(fleet, sit.battles);
+        if (outmatched || worn) && hand.retreat(fleet, sit.battles) {
+            // Wer so weichen musste, greift nicht gleich wieder an.
+            plan.no_offensive_before = sit.day + levers.caution_days;
         }
     }
 
@@ -772,10 +855,16 @@ fn lead_at_war(
                 .then(b.id.cmp(&a.id))
         })
         .map(|fleet| fleet.id);
-    // Eigene Systeme, in denen ein Gegner steht oder gleich stehen wird.
-    let intruded: Vec<SystemId> = foes
-        .keys()
-        .copied()
+    // Eigene Systeme, in denen ein Gegner steht oder gleich stehen wird. Eine Flotte, die
+    // im letzten Gefecht nur ausgewichen ist, zählt nicht: Sie wiche wieder aus.
+    let intruded: BTreeSet<SystemId> = seen
+        .iter()
+        .filter(|sighting| {
+            plan.met
+                .get(&sighting.fleet)
+                .is_none_or(|meeting| meeting.fought)
+        })
+        .map(Sighting::position)
         .filter(|system| sit.galaxy.owns_planet_in(id, *system))
         .collect();
 
@@ -789,6 +878,8 @@ fn lead_at_war(
         // Jede Flotte rechnet für sich: Was neben ihr liegt, ist ab morgen mit ihr vereinigt.
         let force = own_values(data, fleet);
         let chances = |system: SystemId| odds(data, &force, foes_at(system), 1.0);
+        // Dasselbe gegen alles, was im Umkreis des Systems eingreifen kann.
+        let expect = |system: SystemId| odds(data, &force, &around[system.index()], 1.0);
         let doctrine_for = |chance: f64| {
             if chance >= levers.offensive_odds {
                 Doctrine::Aggressive
@@ -828,7 +919,67 @@ fn lead_at_war(
                     && way_clear(index)
             })
         };
+        // Wohin eine Flotte geht, die Vorräte fassen oder instand gesetzt werden muss: zu
+        // einer Werft, wenn der Tank bis dorthin reicht, sonst erst in den nächsten Hafen.
+        // Ist kein Hafen ohne Gegner erreichbar, wartet sie, wo sie ist, statt ihm in die
+        // Arme zu laufen.
+        let refuge = || {
+            let in_tank =
+                |base: &SystemId| distance[base.index()] * fuel_per_distance <= fleet.min_fuel();
+            safe_base(true)
+                .filter(in_tank)
+                .or_else(|| safe_base(false))
+                .unwrap_or(at)
+        };
         let mut operation = plan.operations.get(&fleet.id).copied();
+
+        // --- Ausweichen: Ein überlegener Gegner ist im Anmarsch auf das eigene System
+        // oder steht schon nebenan. Wer erst reagiert, wenn er da ist, kämpft. Das gilt
+        // auch für eine Flotte, die gerade Vorräte fasst. ---
+        let mut closing = *foes_at(at);
+        for neighbor in sit.galaxy.neighbors(at) {
+            add(&mut closing, foes_at(neighbor.system));
+        }
+        if total(&closing) > 0.0
+            && odds(data, &force, &closing, 1.0) < AVOID_MARGIN * levers.defend_odds
+        {
+            // Ein Hafen, an dem kein Gegner steht und neben dem keiner steht.
+            let quiet = |index: usize| {
+                let system = SystemId::from_index(index);
+                clear(index)
+                    && sit
+                        .galaxy
+                        .neighbors(system)
+                        .iter()
+                        .all(|neighbor| clear(neighbor.system.index()))
+            };
+            // Am liebsten auf einem Weg, der auch an keinem Gegner vorbeiführt: Wer neben
+            // ihm vorbeizieht, dem tritt er in den Weg.
+            let way_quiet = |index: usize| {
+                sit.galaxy
+                    .shortest_path(at, SystemId::from_index(index), |_| true)
+                    .is_some_and(|path| path.iter().skip(1).all(|step| quiet(step.index())))
+            };
+            // ... und den der Tank noch erreicht.
+            let haven = |index: usize| {
+                index != at.index()
+                    && theatre.bases[index]
+                    && quiet(index)
+                    && distance[index] * fuel_per_distance <= fleet.min_fuel()
+            };
+            let away = nearest(&distance, |index| haven(index) && way_quiet(index))
+                .or_else(|| nearest(&distance, |index| haven(index) && way_clear(index)));
+            if let Some(away) = away {
+                // Wer so weichen muss, kommt nicht gleich wieder: weder mit einem Angriff
+                // noch an den Platz, den er eben räumt.
+                plan.operations.remove(&fleet.id);
+                plan.no_offensive_before = sit.day + levers.caution_days;
+                hand.set_stance(fleet, Stance::Escort);
+                hand.set_orders(fleet, fleet.formation, Doctrine::Defensive);
+                hand.move_fleet(fleet, away);
+                continue;
+            }
+        }
 
         // --- Abbruch: zu wenig Vorrat oder zu hohe Verluste. Dann nach Hause. ---
         // Der Rückweg muss im Tank bleiben: der Weg zum nächsten Hafen und eine Reserve.
@@ -848,9 +999,7 @@ fn lead_at_war(
             }
         };
         if spent {
-            // Ist kein Hafen frei vom Gegner, wartet die Flotte, wo sie ist, statt ihm in
-            // die Arme zu laufen.
-            let target = safe_base(true).or_else(|| safe_base(false)).unwrap_or(at);
+            let target = refuge();
             let refit = Operation {
                 mission: Mission::Refit,
                 target,
@@ -859,7 +1008,12 @@ fn lead_at_war(
             plan.operations.insert(fleet.id, refit);
             operation = Some(refit);
         }
-        if let Some(refit) = operation.filter(|running| running.mission == Mission::Refit) {
+        if let Some(mut refit) = operation.filter(|running| running.mission == Mission::Refit) {
+            // Steht inzwischen ein Gegner im Ziel oder auf dem Weg, wählt sie neu.
+            if !(clear(refit.target.index()) && way_clear(refit.target.index())) {
+                refit.target = refuge();
+                plan.operations.insert(fleet.id, refit);
+            }
             let arrived = fleet.route.is_empty() && at == refit.target;
             let restored = supplies >= levers.ready_supply
                 && (state >= levers.ready_supply as f64 || !theatre.yards[at.index()]);
@@ -868,42 +1022,20 @@ fn lead_at_war(
                 plan.operations.remove(&fleet.id);
             } else {
                 hand.set_stance(fleet, Stance::Escort);
-                hand.move_fleet(fleet, refit.target);
-                continue;
-            }
-        }
-
-        // --- Ausweichen: Ein überlegener Gegner ist im Anmarsch auf das eigene System
-        // oder steht schon nebenan. Wer erst reagiert, wenn er da ist, kämpft. ---
-        let mut closing = *foes_at(at);
-        for neighbor in sit.galaxy.neighbors(at) {
-            add(&mut closing, foes_at(neighbor.system));
-        }
-        if total(&closing) > 0.0
-            && odds(data, &force, &closing, 1.0) < AVOID_MARGIN * levers.defend_odds
-        {
-            // Ein Hafen, an dem kein Gegner steht und neben dem keiner steht.
-            let quiet = |index: usize| {
-                let system = SystemId::from_index(index);
-                clear(index)
-                    && sit
-                        .galaxy
-                        .neighbors(system)
-                        .iter()
-                        .all(|neighbor| clear(neighbor.system.index()))
-            };
-            if let Some(away) = nearest(&distance, |index| {
-                index != at.index() && theatre.bases[index] && quiet(index) && way_clear(index)
-            }) {
-                plan.operations.remove(&fleet.id);
-                hand.set_stance(fleet, Stance::Escort);
-                hand.set_orders(fleet, fleet.formation, Doctrine::Defensive);
-                hand.move_fleet(fleet, away);
+                // Mit leerem Tank schleppt sich die Flotte nur: Der Weg, der heute frei
+                // ist, ist es nicht mehr, wenn sie ankommt. Wer eben erst weichen musste,
+                // bleibt deshalb liegen, statt denselben Weg gleich wieder zu versuchen.
+                let dry = fleet.min_fuel() < distance[refit.target.index()] * fuel_per_distance;
+                let stranded = dry && fleet.route.is_empty() && sit.day < plan.no_offensive_before;
+                if !stranded {
+                    hand.move_fleet(fleet, refit.target);
+                }
                 continue;
             }
         }
 
         // --- Verteidigung zuerst: einem Eindringling begegnen, wo die Kräfte reichen. ---
+        let is_main = main == Some(fleet.id) || total(&force) >= 0.5 * navy;
         if !intruded.is_empty() {
             let meet = intruded
                 .iter()
@@ -924,7 +1056,19 @@ fn lead_at_war(
             match meet {
                 Some(system) => {
                     hand.set_orders(fleet, fleet.formation, doctrine_for(chances(system)));
-                    hand.move_fleet(fleet, system);
+                    // Wo die Hauptflotte einen Eindringling stellt, bleibt sie danach
+                    // stehen: Zieht sie ab, sobald er weicht, kommt er wieder.
+                    if is_main {
+                        plan.post = Some(system);
+                    }
+                    // Aus dem Hafen läuft sie erst aus, wenn der Tank für den Weg reicht:
+                    // Mit leerem Tank schleppt sie sich nur und käme später an.
+                    let need = (distance[system.index()] * fuel_per_distance + FUEL_RESERVE)
+                        .min(levers.ready_supply);
+                    let in_port = fleet.route.is_empty() && theatre.bases[at.index()];
+                    if !(in_port && at != system && fleet.min_fuel() < need) {
+                        hand.move_fleet(fleet, system);
+                    }
                 }
                 None => {
                     // Kein Treffen, das sich lohnt: unter Versorgung bleiben.
@@ -948,7 +1092,6 @@ fn lead_at_war(
             fleet.route.is_empty() && theatre.bases[at.index()] && fleet.min_fuel() < FUEL_TO_SAIL;
 
         // --- Kleine Verbände stoßen zur Hauptflotte, wenn die in einem Hafen liegt. ---
-        let is_main = main == Some(fleet.id) || total(&force) >= 0.5 * navy;
         if !is_main {
             plan.operations.remove(&fleet.id);
             hand.set_stance(fleet, Stance::Escort);
@@ -959,10 +1102,11 @@ fn lead_at_war(
                     main.is_ready() && main.route.is_empty() && theatre.bases[main.system.index()]
                 })
                 .map(|main| main.system);
+            // Nur auf einem Weg, der an keinem Gegner vorbeiführt.
             let to = match rally {
-                Some(system) => system,
-                None if theatre.bases[at.index()] => at,
-                None => safe_base(false).unwrap_or(at),
+                Some(system) if way_clear(system.index()) => system,
+                _ if theatre.bases[at.index()] => at,
+                _ => safe_base(false).unwrap_or(at),
             };
             if !fuelling {
                 hand.move_fleet(fleet, to);
@@ -975,7 +1119,11 @@ fn lead_at_war(
         let running = operation.filter(|running| running.mission != Mission::Refit);
         let fresh = supplies >= levers.ready_supply && state >= levers.ready_supply as f64;
         let mut attack: Option<(Mission, SystemId)> = None;
-        if running.is_some() || (fresh && !fuelling) {
+        // Ein neuer Angriff beginnt im Hafen, nicht mitten im Marsch: Wer unterwegs
+        // umkehrt, fährt den Tank leer, bevor er ankommt.
+        let rested = sit.day >= plan.no_offensive_before;
+        let in_port = fleet.route.is_empty() && theatre.bases[at.index()];
+        if running.is_some() || (fresh && in_port && !fuelling && rested) {
             let needed = |mission: Mission, system: SystemId| {
                 if running.is_some_and(|op| op.mission == mission && op.target == system) {
                     levers.defend_odds
@@ -991,9 +1139,11 @@ fn lead_at_war(
                         length * fuel_per_distance <= levers.offensive_reach
                     })
             };
-            // Die Hauptflotte des Gegners suchen, wenn die eigene stärker ist.
+            // Die Hauptflotte des Gegners suchen, wenn die eigene stärker ist. Eine Flotte,
+            // mit der sie eben im Gefecht stand, sucht sie nicht wieder auf.
             let quarry = seen
                 .iter()
+                .filter(|sighting| !known.contains(&sighting.position()))
                 .max_by(|a, b| {
                     total(&a.values)
                         .total_cmp(&total(&b.values))
@@ -1002,7 +1152,7 @@ fn lead_at_war(
                 .map(|sighting| sighting.position());
             if let Some(system) = quarry
                 && in_reach(system)
-                && chances(system) >= needed(Mission::Hunt, system)
+                && expect(system) >= needed(Mission::Hunt, system)
             {
                 attack = Some((Mission::Hunt, system));
             }
@@ -1016,8 +1166,10 @@ fn lead_at_war(
                 };
                 let fits = |system: SystemId| {
                     hostile(system)
+                        && (!known.contains(&system)
+                            || running.is_some_and(|op| op.target == system))
                         && in_reach(system)
-                        && chances(system) >= needed(Mission::Blockade, system)
+                        && expect(system) >= needed(Mission::Blockade, system)
                 };
                 let kept = running
                     .filter(|op| op.mission == Mission::Blockade && fits(op.target))
@@ -1069,7 +1221,6 @@ fn lead_at_war(
             // aus einem Hafen läuft die Flotte erst mit vollen Tanks aus.
             let direct = distance[target.index()] * fuel_per_distance;
             let gate = staging[target.index()].map(|(base, _)| base);
-            let in_port = fleet.route.is_empty() && theatre.bases[at.index()];
             if at != target
                 && direct > levers.offensive_reach
                 && gate.is_some_and(|gate| gate != at)
@@ -1081,12 +1232,35 @@ fn lead_at_war(
             continue;
         }
 
-        // --- Sonst: am Warteplatz im Geleitschutz, solange er sicher ist. ---
+        // --- Sonst: am Warteplatz im Geleitschutz, solange er sicher ist; im Krieg dort,
+        // wo zuletzt ein Eindringling gestellt wurde. Ein Angriff, der hier endet, wurde
+        // vor einem stärkeren Gegner aufgegeben und wird nicht gleich wiederholt. ---
+        if running.is_some() {
+            plan.no_offensive_before = sit.day + levers.caution_days;
+        }
         plan.operations.remove(&fleet.id);
         hand.set_stance(fleet, Stance::Escort);
         hand.set_orders(fleet, fleet.formation, Doctrine::Balanced);
-        let station = theatre.station;
-        let to = if clear(station.index()) || chances(station) >= levers.defend_odds {
+        // Dorthin geht sie nur, wenn sie dem gewachsen ist, was dort und nebenan steht (das
+        // Maß, nach dem sie auch ausweicht): Sonst zöge sie hin, wiche aus, sobald sie da
+        // ist, und käme wieder. Einen Posten, den sie nicht mehr halten kann, gibt sie auf.
+        let tenable = |system: SystemId| {
+            let mut near = *foes_at(system);
+            for neighbor in sit.galaxy.neighbors(system) {
+                add(&mut near, foes_at(neighbor.system));
+            }
+            odds(data, &force, &near, 1.0) >= AVOID_MARGIN * levers.defend_odds
+        };
+        if is_main
+            && plan
+                .post
+                .is_some_and(|post| !theatre.bases[post.index()] || !tenable(post))
+        {
+            plan.post = None;
+        }
+        let station = plan.post.unwrap_or(theatre.station);
+        let wary = sit.day < plan.no_offensive_before && theatre.bases[at.index()];
+        let to = if tenable(station) && !wary && way_clear(station.index()) {
             station
         } else if theatre.bases[at.index()] {
             at

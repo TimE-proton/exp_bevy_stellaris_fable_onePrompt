@@ -372,7 +372,7 @@
             // Flotten im Krieg: Ab defend_odds stellt sich eine Flotte einem Eindringling,
             // ab offensive_odds greift sie an; fällt das Kräfteverhältnis im Gefecht
             // unter retreat_odds, befiehlt sie den Rückzug.
-            defend_odds: 1.0,
+            defend_odds: 0.85,
             offensive_odds: 1.3,
             retreat_odds: 0.6,
             // Eine Unternehmung bricht ab unter diesem Vorrat an Munition oder Treibstoff
@@ -396,6 +396,32 @@
             // sie Schiffe still.
             research_cut: 0.7,
             layup_after_months: 3,
+            // Nach ausgebliebenem Sold oder einer Stilllegung bestellt die KI im Frieden
+            // so viele Monate lang nichts: Was sie eben nicht tragen konnte, baut sie
+            // nicht gleich wieder.
+            quiet_months: 24,
+            // Nach einer Stilllegung baut sie zehn Jahre lang nichts Neues.
+            layup_quiet_months: 120,
+            // Stillgelegt wird nur, was die Einnahmen auf lange Sicht nicht tragen: Das
+            // Maß ist ein träges Mittel über so viele Monate. Einen Einbruch von einigen
+            // Monaten sitzt die Flotte mit Soldrückstand aus.
+            revenue_memory_months: 60,
+            // Die Staatseinnahmen kommen in Schüben (Zölle fließen erst, wenn ein Kontor
+            // Überschuss hat). Das Rüstungsziel bemisst sich deshalb nicht am Mittel,
+            // sondern an der schwächeren Hälfte der letzten zwölf Monate.
+            lean_share: 0.5,
+            // Angriff: Was an Gegnern im Umkreis so vieler Sprünge um das Ziel steht, kann
+            // dort eingreifen und zählt bei der Entscheidung mit.
+            response_jumps: 3,
+            // Eine fremde Flotte, mit der die eigene im Gefecht stand, sucht sie ein Jahr
+            // lang nicht wieder auf (rematch_days). Ging in dem Gefecht nichts verloren,
+            // ist die Flotte nur ausgewichen und lässt sich nicht stellen: Dann fünf
+            // Jahre (elusive_days).
+            rematch_days: 360,
+            elusive_days: 1800,
+            // Gibt die Flotte einen Angriff vor einem stärkeren Gegner auf, beginnt sie
+            // so viele Tage keinen neuen.
+            caution_days: 360,
         ),
     ),
     battle: (

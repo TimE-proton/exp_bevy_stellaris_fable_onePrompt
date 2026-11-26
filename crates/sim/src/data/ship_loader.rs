@@ -633,6 +633,18 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             "layup_after_months muss mindestens 1 sein",
             ai.layup_after_months >= 1,
         ),
+        (
+            "lean_share muss über 0 und höchstens 1 sein",
+            ai.lean_share > 0.0 && ai.lean_share <= 1.0,
+        ),
+        (
+            "revenue_memory_months muss mindestens 1 sein",
+            ai.revenue_memory_months >= 1,
+        ),
+        (
+            "response_jumps muss mindestens 1 sein",
+            ai.response_jumps >= 1,
+        ),
     ];
     for (message, ok) in ai_checks {
         if !ok {

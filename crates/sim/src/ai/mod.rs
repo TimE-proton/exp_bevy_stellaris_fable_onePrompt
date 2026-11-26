@@ -60,6 +60,16 @@ pub struct Operation {
     pub start_value: f64,
 }
 
+/// Ein Gefecht mit einer fremden Flotte, wie es die Führung in Erinnerung behält.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Meeting {
+    /// Letzter Tag des Gefechts.
+    pub day: u64,
+    /// Ob in dem Gefecht auf irgendeiner Seite etwas verloren ging. Wenn nicht, ist die
+    /// eine Seite der anderen nur ausgewichen.
+    pub fought: bool,
+}
+
 /// Was sich die militärische Führung einer Gemeinschaft von Tag zu Tag merkt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MilitaryPlan {
@@ -84,6 +94,32 @@ pub struct MilitaryPlan {
     pub operations: BTreeMap<FleetId, Operation>,
     /// Begonnene Angriffe (Jagd oder Blockade) über die ganze Partie, für Berichte.
     pub offensives: u32,
+    /// Monate, seit zuletzt Sold ausblieb oder ein Schiff stillgelegt wurde.
+    #[serde(default = "long_calm")]
+    pub calm_months: u32,
+    /// Monate seit der letzten Stilllegung.
+    #[serde(default = "long_calm")]
+    pub months_since_layup: u32,
+    /// Was die Gemeinschaft auf lange Sicht im Monat einnimmt, in Credits: ein träges
+    /// Mittel über Jahre. 0, solange noch kein Monat abgeschlossen ist.
+    #[serde(default)]
+    pub usual_revenue: f64,
+    /// Fremde Flotten, mit denen eine eigene im Gefecht stand.
+    #[serde(default)]
+    pub met: BTreeMap<FleetId, Meeting>,
+    /// Vor diesem Tag beginnt die Gemeinschaft keinen neuen Angriff und verlässt ihre
+    /// Häfen nicht für den Warteplatz: Sie gab einen Angriff vor einem stärkeren Gegner
+    /// auf, musste sich aus einem Gefecht zurückziehen oder ihm ausweichen.
+    #[serde(default)]
+    pub no_offensive_before: u64,
+    /// Eigenes System, in dem die Hauptflotte im Krieg wartet: dort stellte sie zuletzt
+    /// einen Eindringling. `None`: am Warteplatz.
+    #[serde(default)]
+    pub post: Option<SystemId>,
+}
+
+fn long_calm() -> u32 {
+    u32::MAX
 }
 
 impl Default for MilitaryPlan {
@@ -97,6 +133,12 @@ impl Default for MilitaryPlan {
             research_target: None,
             operations: BTreeMap::new(),
             offensives: 0,
+            calm_months: long_calm(),
+            months_since_layup: long_calm(),
+            usual_revenue: 0.0,
+            met: BTreeMap::new(),
+            no_offensive_before: 0,
+            post: None,
         }
     }
 }

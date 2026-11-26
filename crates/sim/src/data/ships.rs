@@ -541,6 +541,30 @@ pub struct MilitaryAiBalance {
     pub research_cut: f64,
     /// Monate mit Soldrückstand im Frieden, nach denen die KI Schiffe stilllegt.
     pub layup_after_months: u32,
+    /// Im Frieden bestellt die KI erst wieder, wenn so viele Monate lang kein Sold
+    /// ausblieb und kein Schiff stillgelegt wurde.
+    pub quiet_months: u32,
+    /// Nach einer Stilllegung bestellt die KI im Frieden so viele Monate lang nichts.
+    pub layup_quiet_months: u32,
+    /// Über so viele Monate mittelt die KI träge, was sie auf lange Sicht einnimmt. An
+    /// diesem Mittel misst sie, ob eine Flotte auf Dauer zu groß ist: Einen Einbruch von
+    /// einigen Monaten sitzt sie aus, statt Schiffe stillzulegen.
+    pub revenue_memory_months: u32,
+    /// Die Rüstung bemisst ihr Ziel an den schwächsten Monaten: am Mittel dieses Anteils
+    /// der Monate mit den geringsten Einnahmen unter den letzten zwölf.
+    pub lean_share: f64,
+    /// Gegner im Umkreis so vieler Sprünge um ein Angriffsziel zählen zu dem, was die
+    /// Flotte dort erwartet.
+    pub response_jumps: u32,
+    /// Eine fremde Flotte, mit der die eigene im Gefecht stand, sucht sie so viele Tage
+    /// lang nicht wieder auf.
+    pub rematch_days: u64,
+    /// Dasselbe für eine Flotte, die im Gefecht nur ausgewichen ist (niemand verlor
+    /// etwas): Sie lässt sich nicht stellen.
+    pub elusive_days: u64,
+    /// Nach einem Angriff, der vor einem stärkeren Gegner aufgegeben wurde, beginnt die
+    /// Gemeinschaft so viele Tage lang keinen neuen.
+    pub caution_days: u64,
 }
 
 /// Drei Werte je Doktrin: offensiv, ausgewogen, defensiv.
