@@ -26,6 +26,7 @@
 mod battles;
 mod movement;
 mod plugin;
+pub(crate) mod succession;
 mod supply;
 mod yard;
 

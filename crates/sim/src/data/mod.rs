@@ -364,6 +364,19 @@ impl GameData {
                 "Preisschranken oder cover_days unplausibel".into(),
             ));
         }
+        if !(0.0..1.0).contains(&economy.reserve_floor) {
+            return Err(invalid(
+                "balance.ron",
+                "economy.reserve_floor muss in 0..1 liegen (1 ausgeschlossen)".into(),
+            ));
+        }
+
+        // Ende der Partie
+        check_endgame(
+            &self.balance.endgame,
+            self.balance.finance.cohesion.max_polities,
+        )
+        .map_err(|message| invalid("balance.ron", message))?;
 
         // Galaxie
         let g = &self.galaxy;
@@ -408,6 +421,23 @@ impl GameData {
             ));
         }
 
+        for template in &self.polities {
+            let (openness, spirit, readiness) = template.culture;
+            if [openness, spirit, readiness]
+                .iter()
+                .any(|value| !(0.0..=1.0).contains(value))
+            {
+                return Err(invalid(
+                    "polities.ron",
+                    format!(
+                        "`{}`: culture braucht drei Werte in 0..1 (Offenheit, Gemeinsinn, \
+                         Wehrhaftigkeit)",
+                        template.key
+                    ),
+                ));
+            }
+        }
+
         // Namen
         if self.names.prefixes.is_empty() || self.names.suffixes.is_empty() {
             return Err(invalid(
@@ -417,6 +447,31 @@ impl GameData {
         }
         Ok(())
     }
+}
+
+/// Stellschrauben unter `balance.ron: endgame`. Die Meldung nennt die Schraube.
+fn check_endgame(endgame: &EndgameBalance, max_polities: u32) -> Result<(), String> {
+    // Echte Anteile: Bei 0 wäre jede Gemeinschaft souverän bzw. die Bevölkerung nie zu
+    // klein, bei 1 keine bzw. immer.
+    let share = |value: f64| value > 0.0 && value < 1.0;
+    if !share(endgame.sovereign_min_share) {
+        return Err("endgame.sovereign_min_share muss zwischen 0 und 1 liegen".into());
+    }
+    if !share(endgame.collapse_share) {
+        return Err("endgame.collapse_share muss zwischen 0 und 1 liegen".into());
+    }
+    // Sonst könnten so viele Gemeinschaften nebeneinander bestehen, dass keine die
+    // Schwelle erreicht: Die Partie endete, ohne dass etwas geschehen wäre.
+    if endgame.sovereign_min_share * max_polities as f64 >= 1.0 {
+        return Err(format!(
+            "endgame.sovereign_min_share mal finance.cohesion.max_polities ({max_polities}) \
+             muss unter 1 bleiben"
+        ));
+    }
+    if endgame.collapse_months < 1 {
+        return Err("endgame.collapse_months muss mindestens 1 sein".into());
+    }
+    Ok(())
 }
 
 /// `assets/data` des Workspace, aus dem dieses Crate gebaut wurde.
@@ -458,6 +513,88 @@ mod tests {
         assert_eq!(hut.input_ids[0].0, data.good_id("erz").unwrap());
         assert_eq!(data.techs.len(), 30);
         assert_ne!(data.hash, 0);
+    }
+
+    #[test]
+    fn endgame_levers_are_checked() {
+        let data = GameData::load_workspace().unwrap();
+        let max = data.balance.finance.cohesion.max_polities;
+        let shipped = data.balance.endgame.clone();
+        assert_eq!(check_endgame(&shipped, max), Ok(()));
+        let broken = |change: fn(&mut EndgameBalance)| {
+            let mut endgame = shipped.clone();
+            change(&mut endgame);
+            check_endgame(&endgame, max).expect_err("die Prüfung hätte anschlagen müssen")
+        };
+        for message in [
+            broken(|endgame| endgame.sovereign_min_share = 0.0),
+            broken(|endgame| endgame.sovereign_min_share = 1.0),
+            broken(|endgame| endgame.sovereign_min_share = f64::NAN),
+        ] {
+            assert!(message.contains("sovereign_min_share"), "{message}");
+        }
+        for message in [
+            broken(|endgame| endgame.collapse_share = 0.0),
+            broken(|endgame| endgame.collapse_share = 1.0),
+            broken(|endgame| endgame.collapse_share = -0.2),
+        ] {
+            assert!(message.contains("collapse_share"), "{message}");
+        }
+        assert!(broken(|endgame| endgame.collapse_months = 0).contains("collapse_months"));
+        // Die Schwelle muss zu der Zahl der Gemeinschaften passen, die es höchstens gibt.
+        let message = broken(|endgame| endgame.sovereign_min_share = 0.2);
+        assert!(message.contains("max_polities"), "{message}");
+        assert!(shipped.sovereign_min_share * (max as f64) < 1.0);
+        // Die Obergrenze für neue Gemeinschaften darf null sein: Dann gibt es keine.
+        let mut none = shipped.clone();
+        none.max_free_states = 0;
+        assert_eq!(check_endgame(&none, max), Ok(()));
+    }
+
+    #[test]
+    fn the_reserve_floor_and_the_cultures_are_checked() {
+        let error_after = |change: fn(&mut GameData)| {
+            let mut data = GameData::load_workspace().unwrap();
+            change(&mut data);
+            data.resolve_and_validate()
+                .expect_err("die Prüfung hätte anschlagen müssen")
+                .to_string()
+        };
+        for message in [
+            error_after(|data| data.balance.economy.reserve_floor = 1.0),
+            error_after(|data| data.balance.economy.reserve_floor = -0.1),
+            error_after(|data| data.balance.economy.reserve_floor = f32::NAN),
+        ] {
+            assert!(
+                message.contains("balance.ron") && message.contains("reserve_floor"),
+                "{message}"
+            );
+        }
+        let message = error_after(|data| data.polities[2].culture = (0.5, 1.2, 0.5));
+        assert!(
+            message.contains("polities.ron") && message.contains("culture"),
+            "{message}"
+        );
+        let message = error_after(|data| data.polities[0].culture.2 = f32::NAN);
+        assert!(message.contains("culture"), "{message}");
+        // Der Boden null ist zulässig: Dann versiegen Vorkommen ganz.
+        let mut data = GameData::load_workspace().unwrap();
+        data.balance.economy.reserve_floor = 0.0;
+        assert!(data.resolve_and_validate().is_ok());
+        // Die ausgelieferten Kulturen unterscheiden sich deutlich voneinander.
+        for (index, template) in data.polities.iter().enumerate() {
+            for other in &data.polities[index + 1..] {
+                let (a, b) = (template.culture, other.culture);
+                let distance =
+                    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt();
+                assert!(
+                    distance > 0.15,
+                    "{} und {} sind kaum zu unterscheiden",
+                    template.key,
+                    other.key
+                );
+            }
+        }
     }
 
     #[test]

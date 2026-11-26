@@ -7,15 +7,16 @@
 
 use super::shares::seat_of_issuer;
 use super::{Finance, polity_of_holder, region_of_holder};
-use crate::chronicle::{Chronicle, ChronicleKind};
+use crate::chronicle::ChronicleKind;
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::{CohesionBalance, GameData};
 use crate::economy::{Economy, to_credits};
+use crate::endgame::Path;
 use crate::fleet::Fleets;
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::Logistics;
-use crate::polity::{Polities, Polity};
+use crate::polity::{Founding, Polities, Succession, TransferTerms};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -83,8 +84,10 @@ impl Ownership {
     }
 }
 
-/// Betriebe, die einer Region zugerechnet werden.
-fn issuers_of_region<'a>(
+/// Betriebe, die einer Region zugerechnet werden: die Firmen der Welt und das Kontor ihres
+/// Systems, wenn sie dessen Sitz ist. Die eine Stelle, die das festlegt; wer die Betriebe
+/// einer Welt braucht (Besitzlage, Besitzwechsel), fragt hier.
+pub fn issuers_of_region<'a>(
     finance: &'a Finance,
     galaxy: &'a Galaxy,
     logistics: &'a Logistics,
@@ -467,31 +470,40 @@ pub fn update_cohesion(
     secessions
 }
 
-/// Führt eine Abspaltung aus. Entsteht eine neue Gemeinschaft, wird sie angelegt; ist die
-/// Obergrenze erreicht, bleibt die Region autonom und die Frist beginnt neu.
+/// Führt eine Abspaltung aus: Die Region tritt zu der Gemeinschaft über, die dort die
+/// Mehrheit hält, oder ruft einen Freistaat aus. Gibt die neue Besitzerin zurück.
+///
+/// Ein Freistaat entsteht nur, solange es nicht zu viele Gemeinschaften gibt, die Region
+/// genug Menschen hat und in der Partie noch nicht `endgame.max_free_states` Gemeinschaften
+/// durch Abspaltung entstanden sind. Sonst bleibt die Region autonom, und die Frist
+/// beginnt neu.
 pub fn apply_secession(
     secession: &Secession,
-    finance: &mut Finance,
-    galaxy: &mut Galaxy,
-    economy: &mut Economy,
-    logistics: &Logistics,
-    polities: &mut Polities,
-    chronicle: &mut Chronicle,
-    data: &GameData,
+    succession: &mut Succession,
     tick: u64,
 ) -> Option<PolityId> {
+    let data = succession.data;
     let balance = &data.balance.finance.cohesion;
     let planet = secession.planet;
-    let index = planet.index();
     let old = secession.from;
-    if galaxy.planet(planet).owner != Some(old) {
+    let world = succession.galaxy.planets.get(planet.index())?;
+    if world.owner != Some(old) {
         return None;
     }
-    let planet_name = galaxy.planet(planet).name.clone();
-    let system = galaxy.planet(planet).system;
+    let (planet_name, system) = (world.name.clone(), world.system);
+    let path = if secession.joins.is_some() {
+        Path::Joined
+    } else {
+        Path::Own
+    };
+    // Erst prüfen, dann ändern: Nach der Gründung darf die Übertragung nicht mehr scheitern.
+    let terms = TransferTerms::secession(planet, balance, path);
+    succession
+        .check_transfer(planet, secession.joins, &terms)
+        .ok()?;
     let new_owner = match secession.joins {
         Some(target) => {
-            chronicle.push(
+            succession.chronicle.push(
                 tick,
                 ChronicleKind::Cohesion,
                 Some(target),
@@ -499,83 +511,42 @@ pub fn apply_secession(
                 format!(
                     "{} sagt sich von {} los und tritt zu {} über, das dort die Mehrheit hält.",
                     planet_name,
-                    polities.get(old).name,
-                    polities.get(target).name
+                    succession.polities.get(old).name,
+                    succession.polities.get(target).name
                 ),
             );
             target
         }
         None => {
-            let alive = polities.alive().count();
+            let alive = succession.polities.alive().count();
             // Ein eigener Staat braucht genug Menschen; kleine Kolonien bleiben autonom.
             if alive >= balance.max_polities as usize
-                || galaxy.planet(planet).population < balance.independence_min_population
+                || world.population < balance.independence_min_population
+                || succession.endgame.free_states >= data.balance.endgame.max_free_states
             {
                 return None;
             }
-            let id = PolityId::from_index(polities.list.len());
-            let parent = polities.get(old).clone();
-            // Die Farbe des Mutterreichs, aufgehellt.
-            let lighten = |channel: f32| channel + (1.0 - channel) * 0.45;
-            polities.list.push(Polity {
-                id,
-                name: format!("Freistaat {planet_name}"),
-                short: "Freistaat".into(),
-                motto: "Was wir erarbeiten, bleibt hier.".into(),
-                color: (
-                    lighten(parent.color.0),
-                    lighten(parent.color.1),
-                    lighten(parent.color.2),
-                ),
-                capital: Some(planet),
-                alive: true,
-                next_claim_day: 0,
-            });
-            economy.treasuries.push(0);
-            economy.tax_rates.push(economy.tax_rates[old.index()]);
-            economy.treasury_targets.push(0);
-            finance.polities.push(super::PolityFinance {
-                bond_yield: data.balance.finance.base_yield,
-                ..Default::default()
-            });
-            chronicle.push(
+            let parent = succession.polities.get(old);
+            let parent_name = parent.name.clone();
+            let founding = Founding::free_state(parent, world);
+            let id = succession.spawn(old, founding, tick).ok()?;
+            succession.endgame.free_states += 1;
+            succession.chronicle.push(
                 tick,
                 ChronicleKind::Cohesion,
                 Some(id),
                 Some(system),
                 format!(
                     "{} sagt sich von {} los und ruft den Freistaat aus.",
-                    planet_name, parent.name
+                    planet_name, parent_name
                 ),
             );
             id
         }
     };
-    galaxy.planet_mut(planet).owner = Some(new_owner);
-    economy.planets[index].tax_exempt = false;
-
-    // Die Abtrünnigen ziehen die Hälfte der Anteile des alten Staates an ihren Betrieben ein.
-    let capitals: Vec<Option<PlanetId>> = polities.list.iter().map(|p| p.capital).collect();
-    let local_issuers: Vec<IssuerId> =
-        issuers_of_region(finance, galaxy, logistics, &capitals, planet)
-            .map(|(id, _)| id)
-            .collect();
-    for id in local_issuers {
-        if let Some(issuer) = finance.issuers.get_mut(&id) {
-            let seized = issuer.held_by(HolderId::State(old)) / 2;
-            let taken = issuer.remove(HolderId::State(old), seized);
-            issuer.add(HolderId::Public(planet), taken);
-            issuer.shock *= 0.85;
-        }
-    }
-    let day = tick / crate::clock::TICKS_PER_DAY;
-    let region = &mut finance.regions[index];
-    region.owner_seen = Some(new_owner);
-    region.since_day = day;
-    region.stage = Stage::Loyal;
-    region.months_below = 0;
-    region.months_above = 0;
-    region.cohesion = balance.base + balance.honeymoon;
-    finance.secessions += 1;
+    succession
+        .transfer_planet(planet, new_owner, terms, tick)
+        .expect("vorab geprüft");
+    succession.finance.secessions += 1;
     Some(new_owner)
 }

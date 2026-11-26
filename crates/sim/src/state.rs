@@ -7,8 +7,9 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::command::{CommandLog, CommandQueue};
 use crate::data::GameData;
-use crate::diplomacy::Diplomacy;
+use crate::diplomacy::{Diplomacy, setup_diplomacy};
 use crate::economy::{Economy, setup_economy};
+use crate::endgame::Endgame;
 use crate::finance::{Finance, setup_finance};
 use crate::fleet::{Battles, Fleets, setup_fleets};
 use crate::galaxy::{Galaxy, generate_galaxy};
@@ -80,6 +81,7 @@ sim_state! {
     fleets: Fleets,
     battles: Battles,
     diplomacy: Diplomacy,
+    endgame: Endgame,
     queue: CommandQueue,
     log: CommandLog,
     chronicle: Chronicle,
@@ -132,7 +134,13 @@ impl SimState {
         let research = setup_research(data, &polities);
         // Das Startwissen wirkt vom ersten Takt an, auch für Befehle vor dem ersten Tag.
         research.publish_effects(&mut economy, &mut logistics);
-        let fleets = setup_fleets(data, &galaxy, &polities);
+        let mut fleets = setup_fleets(data, &galaxy, &polities);
+        let mut battles = Battles::default();
+        // Jede Liste je Gemeinschaft steht von Beginn an vollständig; später wächst sie
+        // nur noch, wenn eine Gemeinschaft gegründet wird.
+        crate::fleet::succession::size_for_polities(&mut fleets, &mut battles, polities.list.len());
+        let diplomacy = setup_diplomacy(data, &polities);
+        let endgame = Endgame::new(galaxy.planets.len());
         Self {
             config,
             clock: SimClock::default(),
@@ -143,8 +151,9 @@ impl SimState {
             research,
             logistics,
             fleets,
-            battles: Battles::default(),
-            diplomacy: Diplomacy::default(),
+            battles,
+            diplomacy,
+            endgame,
             queue: CommandQueue::default(),
             log: CommandLog::default(),
             chronicle,

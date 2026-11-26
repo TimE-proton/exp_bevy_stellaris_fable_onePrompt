@@ -11,13 +11,15 @@ use crate::clock::SimClock;
 use crate::data::{GameData, ShipClass};
 use crate::diplomacy::{self, Diplomacy};
 use crate::economy::{Economy, to_credits, to_money};
+use crate::endgame::Endgame;
 use crate::finance::shares::ExpropriationScope;
 use crate::finance::{self, Finance};
 use crate::fleet::{self, Battles, Fleets, Stance};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use crate::logistics::Logistics;
-use crate::polity::{self, Polities};
+use crate::polity::{self, Polities, Succession};
+use crate::state::SimConfig;
 use crate::tech::{self, Research};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
@@ -214,16 +216,40 @@ impl ReplayScript {
 pub struct CommandContext<'w> {
     pub data: Res<'w, GameData>,
     pub clock: Res<'w, SimClock>,
+    pub config: ResMut<'w, SimConfig>,
     pub galaxy: ResMut<'w, Galaxy>,
     pub polities: ResMut<'w, Polities>,
     pub economy: ResMut<'w, Economy>,
     pub finance: ResMut<'w, Finance>,
     pub research: ResMut<'w, Research>,
-    pub logistics: Res<'w, Logistics>,
+    pub logistics: ResMut<'w, Logistics>,
     pub fleets: ResMut<'w, Fleets>,
     pub battles: ResMut<'w, Battles>,
     pub diplomacy: ResMut<'w, Diplomacy>,
+    pub endgame: ResMut<'w, Endgame>,
     pub chronicle: ResMut<'w, Chronicle>,
+}
+
+impl CommandContext<'_> {
+    /// Leihgabe für Besitzwechsel, Gründung und Ende einer Gemeinschaft: So greift ein
+    /// Befehl auf [`crate::polity::succession`] zu.
+    pub fn succession(&mut self) -> Succession<'_> {
+        Succession {
+            data: &self.data,
+            config: &mut self.config,
+            galaxy: &mut self.galaxy,
+            polities: &mut self.polities,
+            economy: &mut self.economy,
+            finance: &mut self.finance,
+            logistics: &mut self.logistics,
+            fleets: &mut self.fleets,
+            battles: &mut self.battles,
+            research: &mut self.research,
+            diplomacy: &mut self.diplomacy,
+            endgame: &mut self.endgame,
+            chronicle: &mut self.chronicle,
+        }
+    }
 }
 
 pub(crate) fn inject_replay(
@@ -279,6 +305,16 @@ pub(crate) fn apply_commands(
 
 fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> Result<(), String> {
     let tick = ctx.clock.tick;
+    // Befehle gibt nur, wen es gibt: Eine Gemeinschaft, die geendet hat, befiehlt nichts
+    // mehr, auch wenn ihr Befehl schon in der Warteschlange stand.
+    if !ctx
+        .polities
+        .list
+        .get(polity.index())
+        .is_some_and(|issuer| issuer.alive)
+    {
+        return Err("Gemeinschaft besteht nicht mehr".into());
+    }
     match command {
         SimCommand::ClaimPlanet { planet } => polity::claim_planet(
             &mut ctx.galaxy,
@@ -317,9 +353,12 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
                 polity,
                 *target,
             )?;
-            // Kriegsausbruch: Die Kurse beider Seiten geben nach.
+            // Kriegsausbruch: Die Kurse beider Seiten geben nach, samt derer, die ihnen
+            // unterstehen und den Krieg teilen.
             let factor = ctx.data.balance.finance.war_shock;
-            for side in [polity, *target] {
+            let mut sides = ctx.diplomacy.bloc(polity);
+            sides.extend(ctx.diplomacy.bloc(*target));
+            for side in sides {
                 finance::shares::shock_polity(
                     &mut ctx.finance,
                     &ctx.galaxy,

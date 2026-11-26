@@ -2768,7 +2768,7 @@ fn an_unpaid_war_weary_fleet_breaks_before_the_first_shot() {
     sim.run_days(1);
     // Die Verteidiger sind des Krieges müde bis zum Äußersten und seit Monaten ohne Sold.
     sim.world_mut().resource_mut::<Finance>().polities[b.index()].war_weariness = 100.0;
-    sim.world_mut().resource_mut::<Fleets>().arrears = vec![0.0, 1.0];
+    sim.world_mut().resource_mut::<Fleets>().arrears[b.index()] = 1.0;
     sim.issue(a, SimCommand::DeclareWar { target: b });
     sim.run_days(1);
     {
@@ -3568,7 +3568,6 @@ fn three_communities_fight_in_one_system() {
 
 #[test]
 fn a_battle_outlasts_the_secession_and_the_end_of_a_participant() {
-    let data = data();
     let (a, b) = (PolityId(0), PolityId(1));
     let (ours, theirs) = (FleetId(0), FleetId(1));
     let mut sim = with_player(25);
@@ -3583,59 +3582,65 @@ fn a_battle_outlasts_the_secession_and_the_end_of_a_participant() {
         .map(|planet| planet.id)
         .filter(|planet| *planet != capital)
         .collect();
+    assert!(!colonies.is_empty(), "das Szenario braucht eine Kolonie");
 
     // Mitten im Gefecht sagt sich die Heimatwelt der Verteidiger los und ruft einen
-    // Freistaat aus; ihre Kolonien treten zu ihm über. Die alte Gemeinschaft hält keine
-    // Welt mehr: Sie ist erloschen. Ihre Flotte kämpft weiter.
+    // Freistaat aus. Die alte Gemeinschaft verlegt ihre Hauptwelt in eine Kolonie und
+    // führt ihren Krieg weiter: Ihre Flotte kämpft, als wäre nichts geschehen.
     let tick = sim.clock().tick;
-    let mut state = sim.state();
-    let mut secede = |planet: PlanetId, joins: Option<PolityId>| {
-        apply_secession(
-            &Secession {
-                planet,
-                from: b,
-                joins,
-            },
-            &mut state.finance,
-            &mut state.galaxy,
-            &mut state.economy,
-            &state.logistics,
-            &mut state.polities,
-            &mut state.chronicle,
-            data,
-            tick,
-        )
+    let secede = |sim: &mut Headless, planet: PlanetId, joins: Option<PolityId>| {
+        sim.succession(|succession| {
+            apply_secession(
+                &Secession {
+                    planet,
+                    from: b,
+                    joins,
+                },
+                succession,
+                tick,
+            )
+        })
     };
-    let free_state = secede(capital, None).expect("die Heimatwelt ruft den Freistaat aus");
-    for colony in colonies {
-        assert_eq!(secede(colony, Some(free_state)), Some(free_state));
-    }
-    // Wie im Monatsschritt der Partie: Der Freistaat nimmt das Wissen des alten Reichs mit.
-    state.research.inherit(data, b, free_state);
-    state.economy.sync_polities();
-    state
-        .research
-        .publish_effects(&mut state.economy, &mut state.logistics);
-    state.polities.get_mut(b).alive = false;
-    state.polities.get_mut(b).capital = None;
-    state.install(sim.world_mut());
+    let free_state =
+        secede(&mut sim, capital, None).expect("die Heimatwelt ruft den Freistaat aus");
     assert_eq!(sim.galaxy().system_owner(target), Some(free_state));
-    assert_eq!(sim.galaxy().planets_of(b).count(), 0);
-    assert!(!sim.polities().get(b).alive && sim.polities().get(free_state).alive);
+    assert!(sim.polities().get(b).alive);
+    assert!(colonies.contains(&sim.polities().get(b).capital.unwrap()));
+    assert_eq!(fleet(&sim, theirs).owner, b);
     assert!(fleet(&sim, theirs).in_battle);
+    assert!(
+        sim.world().resource::<Diplomacy>().at_war(a, b),
+        "der Krieg der alten Gemeinschaft geht weiter"
+    );
     assert_eq!(check_invariants(sim.world()), Ok(()));
 
-    // Das Gefecht geht ordentlich zu Ende.
+    // Dann treten auch ihre Kolonien zum Freistaat über. Die alte Gemeinschaft hält keine
+    // Welt mehr und endet; der Freistaat tritt ihr Erbe an. Die Flotte gehört jetzt ihm,
+    // und weil er mit niemandem Krieg führt, ist im Gefecht niemand mehr feind.
+    for colony in colonies {
+        assert_eq!(secede(&mut sim, colony, Some(free_state)), Some(free_state));
+    }
+    assert_eq!(sim.galaxy().planets_of(b).count(), 0);
+    assert!(!sim.polities().get(b).alive && sim.polities().get(free_state).alive);
+    assert_eq!(fleet(&sim, theirs).owner, free_state);
+    assert!(
+        fleet(&sim, theirs).in_battle,
+        "bis der Rechner es einstellt"
+    );
+    assert!(!sim.world().resource::<Diplomacy>().is_at_war(a));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+
+    // Das Gefecht geht ordentlich zu Ende: eingestellt, ohne Sieger und ohne Rückzug.
     let report = fight_out(&mut sim, target);
+    assert_eq!(report.outcome, BattleOutcome::CalledOff);
     assert_eq!(report.sides.len(), 2);
-    assert_eq!(side_of(&report, theirs).owner, b);
-    assert!(report.sides.iter().any(|side| side.held_field) || report.outcome.undecided());
+    assert_eq!(side_of(&report, theirs).owner, free_state);
     assert_aftermath(&sim, &report);
     let place_name = sim.galaxy().system(target).name.clone();
     assert!(chronicled(
         &sim,
         target,
-        &["Gefecht bei", &place_name, "nach"]
+        &["Gefecht bei", &place_name, "eingestellt"]
     ));
 
     // Der Freistaat führt mit niemandem Krieg: Wer im System bleibt, bleibt unbehelligt.

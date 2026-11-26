@@ -255,6 +255,65 @@ pub fn distribute_shares(
     Ok(moved)
 }
 
+/// Verschiebt ohne Gegenleistung den Anteil `share` (0..1) dessen, was `from` an jedem der
+/// genannten Emittenten hält, an `to`: abgerundet auf ganze Anteile, je Emittent für sich.
+/// Für Besitzwechsel von Welten. Gibt die Zahl der verschobenen Anteile zurück.
+pub fn move_holdings(
+    finance: &mut Finance,
+    issuers: &[IssuerId],
+    from: HolderId,
+    to: HolderId,
+    share: f64,
+) -> u64 {
+    if from == to {
+        return 0;
+    }
+    let share = share.clamp(0.0, 1.0);
+    let mut moved = 0;
+    for id in issuers {
+        let Some(issuer) = finance.issuers.get_mut(id) else {
+            continue;
+        };
+        let part = (issuer.held_by(from) as f64 * share) as u64;
+        let taken = issuer.remove(from, part);
+        issuer.add(to, taken);
+        moved += taken;
+    }
+    moved
+}
+
+/// Alles, was `from` an Anteilen hält und zum Verkauf gestellt hat, geht an `to`: in jedem
+/// Emittenten, ohne Gegenleistung. Für das Erbe einer Gemeinschaft, die endet. Gibt die
+/// Zahl der übergegangenen Anteile zurück.
+pub fn pass_holdings(finance: &mut Finance, from: HolderId, to: HolderId) -> u64 {
+    if from == to {
+        return 0;
+    }
+    let mut moved = 0;
+    for issuer in finance.issuers.values_mut() {
+        // Erschöpfend zerlegt: Was ein Emittent je Halter führt, steht hier vollständig.
+        let super::Issuer {
+            shares: _,
+            holdings,
+            offered,
+            price: _,
+            dividend: _,
+            dividend_month: _,
+            shock: _,
+            pressure: _,
+            risk: _,
+        } = issuer;
+        if let Some(held) = holdings.remove(&from) {
+            *holdings.entry(to).or_default() += held;
+            moved += held;
+        }
+        if let Some(open) = offered.remove(&from) {
+            *offered.entry(to).or_default() += open;
+        }
+    }
+    moved
+}
+
 /// Übernahmeangebot: Der Bieter zahlt einen Aufschlag auf den Kurs. Fonds nehmen ein
 /// gutes Angebot rasch an, Eliten verlangen mehr, fremde Staaten verkaufen nie.
 pub fn takeover_bid(

@@ -3,6 +3,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{SimClock, day_start, month_start};
 use crate::data::GameData;
 use crate::economy::{Economy, abandon_dead_colonies, grow_population, migrate};
+use crate::endgame::Endgame;
 use crate::polity::Polities;
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
@@ -47,11 +48,15 @@ fn migration(
     polities: Res<Polities>,
     mut galaxy: ResMut<Galaxy>,
     mut economy: ResMut<Economy>,
+    mut endgame: ResMut<Endgame>,
     mut chronicle: ResMut<Chronicle>,
 ) {
     migrate(&mut galaxy, &mut economy, &data, polities.list.len());
     let capitals: Vec<_> = polities.list.iter().map(|polity| polity.capital).collect();
     for (planet, owner) in abandon_dead_colonies(&mut galaxy, &mut economy, &capitals, &data) {
+        // Eine aufgegebene Welt trägt keine Geschichte mehr: Wer sie neu besiedelt, dem
+        // ist sie eigen.
+        endgame.clear_planet(planet);
         chronicle.push(
             clock.tick,
             ChronicleKind::Colony,
