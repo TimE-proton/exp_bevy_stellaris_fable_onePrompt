@@ -5,7 +5,7 @@
 //! Wie in der übrigen Oberfläche sind die Tafeln reine Funktionen: Sie lesen den Feed,
 //! zeichnen und geben Aktionen zurück. Erst das System am Ende wendet sie an.
 
-use super::camera::{CameraRequest, Projector, SelectedShip, ViewOptions};
+use super::camera::{CameraRequest, HudLayout, LAYOUT_GAP, Projector, SelectedShip, ViewOptions};
 use super::feed::{BattleFeed, BattleOrder, BattleViewRequest};
 use super::{Part, ViewFrame, ViewTimings};
 use crate::pointer::UiCover;
@@ -172,11 +172,20 @@ fn panel_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::window(&ctx.global_style()).fill(panels::opaque_window_fill(ctx))
 }
 
-/// Zeichnet alle Tafeln der Schlachtansicht.
-pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudAction>) {
-    let Some(battle) = refs.feed.battle() else {
-        return;
-    };
+/// Zeichnet alle Tafeln der Schlachtansicht. Gibt zurück, was Kopfleiste, Lagetafeln und
+/// die Tafel des gewählten Schiffs vom Bild belegen; die Kamera stellt bei der Übersicht
+/// kein Schiff darunter.
+pub fn battle_hud(
+    root: &mut egui::Ui,
+    refs: &HudRefs,
+    actions: &mut Vec<HudAction>,
+) -> Option<HudLayout> {
+    let battle = refs.feed.battle()?;
+    let screen = root.ctx().content_rect();
+    // Platz, den eine Tafel an ihrem Bildrand belegt, mit Abstand. Aus ihrer Größe und
+    // nicht aus ihrer Lage gerechnet: Ein neues Fenster steht im ersten Durchlauf noch
+    // nicht an seinem Platz, seine Größe kennt es aber schon.
+    let reserved = |rect: egui::Rect| rect.width() + EDGE_GAP + LAYOUT_GAP;
     markers(root.ctx(), refs, battle);
     let style = root.ctx().global_style();
     let bar = egui::Panel::top("gefechtsleiste")
@@ -185,12 +194,21 @@ pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudActi
     // Die Tafeln hängen unter der Kopfleiste, wie hoch sie auch ist: In schmalen Fenstern
     // hat sie zwei Zeilen.
     let top = bar.response.rect.bottom() + PANEL_GAP;
+    let mut layout = HudLayout {
+        top: bar.response.rect.bottom() - screen.top(),
+        corner: Vec2::ZERO,
+        column: None,
+    };
     let ctx = root.ctx().clone();
     let mut panel_bottoms = [top - EDGE_GAP; 2];
     for side in 0..battle.combatants.len() {
         let rect = side_panel(&ctx, refs, battle, side, top, actions);
         if let (Some(bottom), Some(rect)) = (panel_bottoms.get_mut(side), rect) {
             *bottom = rect.bottom();
+            layout.corner = layout.corner.max(Vec2::new(
+                reserved(rect),
+                top - screen.top() + rect.height() + LAYOUT_GAP,
+            ));
         }
     }
     if let Some(ship) = refs
@@ -199,12 +217,15 @@ pub fn battle_hud(root: &mut egui::Ui, refs: &HudRefs, actions: &mut Vec<HudActi
     {
         // Die Tafel des Schiffs steht unter der Lagetafel ihrer Seite und darf den Raum
         // bis dorthin nutzen.
-        let below = panel_bottoms[inspector_side(refs)] + EDGE_GAP;
-        inspector(&ctx, refs, battle, ship.0, ship.1, below, actions);
+        let side = inspector_side(refs);
+        let below = panel_bottoms[side] + EDGE_GAP;
+        let rect = inspector(&ctx, refs, battle, ship.0, ship.1, below, actions);
+        layout.column = rect.map(reserved);
     }
     if battle.finished && refs.options.summary {
         summary(&ctx, refs, battle, actions);
     }
+    Some(layout)
 }
 
 /// Seite, auf der die Tafel des gewählten Schiffs steht (0 = links, 1 = rechts): nicht
@@ -492,7 +513,8 @@ pub fn module_damage(data: &GameData, ship: &BattleShip) -> (usize, usize) {
 }
 
 /// Tafel des gewählten Schiffs: Zustand, Vorräte, Ziel und alle Module. `below` ist die
-/// Höhe im Fenster, unter der sie bleiben muss (die Lagetafel darüber).
+/// Höhe im Fenster, unter der sie bleiben muss (die Lagetafel darüber). Gibt zurück, wo
+/// die Tafel steht.
 fn inspector(
     ctx: &egui::Context,
     refs: &HudRefs,
@@ -501,7 +523,7 @@ fn inspector(
     ship: &BattleShip,
     below: f32,
     actions: &mut Vec<HudAction>,
-) {
+) -> Option<egui::Rect> {
     let design = &refs.data.designs[ship.design as usize];
     let side_color = color32(refs.feed.side_color(ship.side as usize));
     // Die Tafel steht unten auf der Seite, auf der nicht die (höhere) Lagetafel des Spielers
@@ -702,7 +724,8 @@ fn inspector(
                             }
                         });
                 });
-        });
+        })
+        .map(|shown| shown.response.rect)
 }
 
 /// Ergebnis in einem Satz.
@@ -1066,6 +1089,7 @@ pub(super) fn draw_hud(
     mut requests: MessageWriter<BattleViewRequest>,
     mut camera: MessageWriter<CameraRequest>,
     mut cover: ResMut<UiCover>,
+    mut layout: ResMut<HudLayout>,
 ) -> Result {
     let _span = timings.span(Part::Hud);
     let ctx = contexts.ctx_mut()?;
@@ -1079,7 +1103,9 @@ pub(super) fn draw_hud(
         selected: selected.0,
         options: &options,
     };
-    battle_hud(&mut root, &refs, &mut actions);
+    if let Some(drawn) = battle_hud(&mut root, &refs, &mut actions) {
+        layout.set_if_neq(drawn);
+    }
     if ui_state.help_open {
         panels::help_window(root.ctx(), &mut ui_state.help_open, true);
     }
@@ -1160,7 +1186,11 @@ mod tests {
             !battle.finished && !battle.wrecks.is_empty(),
             "mitten im Gefecht"
         );
-        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
+        let camera = super::super::camera::overview_transform(
+            2400.0,
+            Vec2::new(1600.0, 900.0),
+            &HudLayout::default(),
+        );
         let frame_data = view_frame(&feed, &camera);
         let speed = SimSpeed::default();
         for labels in [false, true] {
@@ -1182,7 +1212,9 @@ mod tests {
                     options: &options,
                 };
                 let mut actions = Vec::new();
-                frame(|ui| battle_hud(ui, &refs, &mut actions));
+                frame(|ui| {
+                    battle_hud(ui, &refs, &mut actions);
+                });
                 assert!(
                     actions.is_empty(),
                     "ohne Eingabe darf nichts ausgelöst werden"
@@ -1198,7 +1230,9 @@ mod tests {
             selected: Some(99_999),
             options: &ViewOptions::default(),
         };
-        frame(|ui| battle_hud(ui, &refs, &mut Vec::new()));
+        frame(|ui| {
+            battle_hud(ui, &refs, &mut Vec::new());
+        });
     }
 
     #[test]
@@ -1209,7 +1243,11 @@ mod tests {
             battle.step(&data);
             feed.refresh(&battle);
         }
-        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
+        let camera = super::super::camera::overview_transform(
+            2400.0,
+            Vec2::new(1600.0, 900.0),
+            &HudLayout::default(),
+        );
         let frame_data = view_frame(&feed, &camera);
         let speed = SimSpeed {
             paused: false,
@@ -1224,7 +1262,9 @@ mod tests {
             options: &ViewOptions::default(),
         };
         let mut actions = Vec::new();
-        frame(|ui| battle_hud(ui, &refs, &mut actions));
+        frame(|ui| {
+            battle_hud(ui, &refs, &mut actions);
+        });
         assert!(actions.is_empty());
         // Auch mit ausgeblendeter Bilanz (zum Betrachten des Felds).
         let hidden = ViewOptions {
@@ -1235,7 +1275,9 @@ mod tests {
             options: &hidden,
             ..refs
         };
-        frame(|ui| battle_hud(ui, &refs, &mut actions));
+        frame(|ui| {
+            battle_hud(ui, &refs, &mut actions);
+        });
         assert!(actions.is_empty());
         // Die Bilanz nennt den Ausgang und zählt je Partei, was der Kern gezählt hat.
         let outcome = matchup::outcome_of(&battle);
@@ -1289,7 +1331,11 @@ mod tests {
         }
 
         fn of(data: GameData, battle: Battle, feed: BattleFeed) -> Self {
-            let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
+            let camera = super::super::camera::overview_transform(
+                2400.0,
+                Vec2::new(1600.0, 900.0),
+                &HudLayout::default(),
+            );
             let frame = view_frame(&feed, &camera);
             Self {
                 data,
@@ -1324,7 +1370,9 @@ mod tests {
         /// Zeichnet die Tafeln, bis sie ihren Platz gefunden haben.
         fn settle(&self, screen: &mut Screen, selected: Option<u32>) -> Painted {
             let refs = self.refs(selected);
-            screen.settle(|ui| battle_hud(ui, &refs, &mut Vec::new()))
+            screen.settle(|ui| {
+                battle_hud(ui, &refs, &mut Vec::new());
+            })
         }
 
         /// Klickt auf eine Stelle und gibt zurück, was die Tafeln dabei auslösen.
@@ -1336,7 +1384,9 @@ mod tests {
         ) -> Vec<HudAction> {
             let refs = self.refs(selected);
             let mut actions = Vec::new();
-            screen.click(at, |ui| battle_hud(ui, &refs, &mut actions));
+            screen.click(at, |ui| {
+                battle_hud(ui, &refs, &mut actions);
+            });
             actions
         }
 
@@ -1551,9 +1601,11 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         };
         screen.run(vec![egui::Event::PointerMoved(list)], |ui| {
-            battle_hud(ui, &refs, &mut Vec::new())
+            battle_hud(ui, &refs, &mut Vec::new());
         });
-        screen.run(vec![wheel], |ui| battle_hud(ui, &refs, &mut Vec::new()));
+        screen.run(vec![wheel], |ui| {
+            battle_hud(ui, &refs, &mut Vec::new());
+        });
         // Die Liste rollt weich aus; das dauert einige Durchläufe.
         for _ in 0..12 {
             scene.settle(&mut screen, Some(own));
@@ -1717,7 +1769,11 @@ mod tests {
         // Aus der Übersicht über das ganze Feld ist jedes Schiff klein: Alle tragen eine
         // Markierung (die kleinen Klassen voll deckend), und sie liegt dort, wo das Schiff
         // im Bild steht.
-        let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
+        let camera = super::super::camera::overview_transform(
+            2400.0,
+            Vec2::new(1600.0, 900.0),
+            &HudLayout::default(),
+        );
         let frame_data = view_frame(&feed, &camera);
         let markers = collect_markers(&battle, &frame_data, &frame_data.projector);
         let in_play = battle
@@ -1829,7 +1885,9 @@ mod tests {
         // Die Tafeln zeichnen mit Wracks, ohne etwas auszulösen.
         let mut actions = Vec::new();
         let refs = scene.refs(None);
-        screen.settle(|ui| battle_hud(ui, &refs, &mut actions));
+        screen.settle(|ui| {
+            battle_hud(ui, &refs, &mut actions);
+        });
         assert!(actions.is_empty());
     }
 
@@ -1857,7 +1915,11 @@ mod tests {
                 battle.step(&data);
                 feed.refresh(&battle);
             }
-            let camera = super::super::camera::overview_transform(2400.0, Vec2::new(1600.0, 900.0));
+            let camera = super::super::camera::overview_transform(
+                2400.0,
+                Vec2::new(1600.0, 900.0),
+                &HudLayout::default(),
+            );
             let frame_data = view_frame(&feed, &camera);
             let speed = SimSpeed::default();
             let options = ViewOptions::default();
@@ -1871,7 +1933,9 @@ mod tests {
                     options: &options,
                 };
                 let mut actions = Vec::new();
-                frame(|ui| battle_hud(ui, &refs, &mut actions));
+                frame(|ui| {
+                    battle_hud(ui, &refs, &mut actions);
+                });
                 assert!(actions.is_empty());
             }
             assert_eq!(

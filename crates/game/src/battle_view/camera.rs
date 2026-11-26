@@ -28,14 +28,11 @@ const OVERVIEW_MAX: f32 = 12_000.0;
 /// Neigung der Blicke von vorn und von der Seite: flach, aber nicht so flach, dass die
 /// Schiffe einander verdecken.
 const SIDE_PITCH: f32 = 0.3;
-/// So viele Pixel am oberen Bildrand belegt die Kopfleiste; Übersicht und Richtungsblicke
-/// halten sie frei.
-const TOP_BAR_PIXELS: f32 = 34.0;
-/// Freier Rand solcher Blicke, als Anteil der halben Bildbreite und -höhe.
+/// Freier Rand der Übersicht und der Richtungsblicke, als Anteil der halben Bildbreite und
+/// -höhe.
 const FIT_MARGIN: f32 = 0.04;
-/// Platz der Lagetafeln in den beiden oberen Ecken des Bilds (Pixel). Übersicht und
-/// Richtungsblicke stellen kein Schiff darunter.
-const PANEL_CORNER: Vec2 = Vec2::new(272.0, 340.0);
+/// Abstand in Pixeln, den solche Blicke zu den Tafeln halten.
+pub const LAYOUT_GAP: f32 = 10.0;
 /// Näher als auf diesen Umkreis um die Mitte der Schiffe gehen die Richtungsblicke nicht
 /// heran.
 const SIDE_VIEW_MIN: f32 = 150.0;
@@ -69,6 +66,32 @@ impl Default for ViewOptions {
             labels: false,
             follow: false,
             summary: true,
+        }
+    }
+}
+
+/// Was die Tafeln der Schlachtansicht vom Bild belegen, in Pixeln und schon mit Abstand
+/// ([`LAYOUT_GAP`]). Die Tafeln melden es in jedem Frame, in dem sie gezeichnet werden;
+/// Übersicht und Richtungsblicke stellen kein Schiff darunter.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct HudLayout {
+    /// Unterkante der Kopfleiste.
+    pub top: f32,
+    /// Breite und Unterkante der Lagetafeln in den beiden oberen Ecken.
+    pub corner: Vec2,
+    /// Breite der Tafel des gewählten Schiffs, solange sie offen ist. Sie steht an einer
+    /// Seite und reicht bis zum unteren Bildrand.
+    pub column: Option<f32>,
+}
+
+impl Default for HudLayout {
+    /// Solange noch keine Tafel gezeichnet ist: der Platz, den die Lagetafeln höchstens
+    /// brauchen (alle sechs Klassen, Jäger im Hangar und die Befehle des Spielers).
+    fn default() -> Self {
+        Self {
+            top: 34.0,
+            corner: Vec2::new(272.0, 394.0),
+            column: None,
         }
     }
 }
@@ -149,7 +172,7 @@ const DEFAULT_SIZE: Vec2 = Vec2::new(1600.0, 900.0);
 
 impl Default for Projector {
     fn default() -> Self {
-        Self::new(&overview_transform(2400.0, DEFAULT_SIZE), FOV, DEFAULT_SIZE)
+        Self::new(&resting_view(), FOV, DEFAULT_SIZE)
     }
 }
 
@@ -272,10 +295,18 @@ struct Limits {
 
 /// Blick aus der Richtung `yaw`/`pitch` auf einen Kreis in der Gefechtsebene, so nah wie
 /// möglich und doch so, dass der ganze Kreis zu sehen ist: mit etwas Rand, unterhalb der
-/// Kopfleiste und nicht unter den Lagetafeln in den oberen Ecken. Dafür liegt er entweder
-/// in der Spalte zwischen den Tafeln oder ganz unter ihnen, je nachdem, was näher
-/// heranführt. `size` ist die Größe des Bilds in Pixeln.
-pub fn frame_circle(center: Vec3, radius: f32, yaw: f32, pitch: f32, size: Vec2) -> Transform {
+/// Kopfleiste und unter keiner Tafel. Dafür liegt er entweder in der Spalte zwischen den
+/// Tafeln oder ganz unter den Lagetafeln, je nachdem, was näher heranführt; ist die Tafel
+/// des gewählten Schiffs offen, bleibt nur die Spalte neben ihr. `size` ist die Größe des
+/// Bilds in Pixeln, `layout` der Platz der Tafeln darin.
+pub fn frame_circle(
+    center: Vec3,
+    radius: f32,
+    yaw: f32,
+    pitch: f32,
+    size: Vec2,
+    layout: &HudLayout,
+) -> Transform {
     let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
     let (forward, right, up) = (
         rotation * Vec3::NEG_Z,
@@ -287,16 +318,27 @@ pub fn frame_circle(center: Vec3, radius: f32, yaw: f32, pitch: f32, size: Vec2)
     let tan_x = tan_y * size.x / size.y;
     let full = Limits {
         side: (1.0 - FIT_MARGIN) * tan_x,
-        above: (1.0 - FIT_MARGIN - 2.0 * TOP_BAR_PIXELS / size.y).max(0.2) * tan_y,
+        above: (1.0 - FIT_MARGIN - 2.0 * layout.top / size.y).max(0.2) * tan_y,
         below: (1.0 - FIT_MARGIN) * tan_y,
     };
-    let between_panels = Limits {
-        side: (1.0 - FIT_MARGIN - 2.0 * PANEL_CORNER.x / size.x) * tan_x,
+    // Der Blick bleibt mittig: Die Spalte ist so schmal, wie die breiteste Tafel es
+    // verlangt, auf beiden Seiten.
+    let between = |width: f32| Limits {
+        side: (1.0 - FIT_MARGIN - 2.0 * width / size.x) * tan_x,
         ..full
     };
     let under_panels = Limits {
-        above: (1.0 - FIT_MARGIN - 2.0 * PANEL_CORNER.y / size.y) * tan_y,
+        above: (1.0 - FIT_MARGIN - 2.0 * layout.corner.y / size.y) * tan_y,
         ..full
+    };
+    // Erste Wahl hält alle Tafeln frei. Fehlt dafür der Platz, zählt die Tafel des Schiffs
+    // nicht mehr, zuletzt gar keine.
+    let choices: [Vec<Limits>; 2] = match layout.column {
+        Some(column) => [
+            vec![between(layout.corner.x.max(column))],
+            vec![between(layout.corner.x), under_panels],
+        ],
+        None => [vec![between(layout.corner.x), under_panels], Vec::new()],
     };
     // Der Blickpunkt wandert längs der Blickrichtung über den Boden: Die nahe Hälfte des
     // Kreises erscheint größer als die ferne, die Kreismitte gehört also nicht in die
@@ -356,13 +398,17 @@ pub fn frame_circle(center: Vec3, radius: f32, yaw: f32, pitch: f32, size: Vec2)
         let shift = (low + high) * 0.5;
         (shift, placed(limits, shift).0)
     };
-    // In sehr kleinen Fenstern bleibt neben oder unter den Tafeln kein brauchbarer Platz;
-    // ist beides so, zählen die Tafeln nicht.
-    let (shift, distance) = [between_panels, under_panels]
+    // In sehr kleinen Fenstern bleibt neben oder unter den Tafeln kein brauchbarer Platz.
+    let usable = |limits: &Limits| limits.side > 0.25 * tan_x && limits.above > 0.1 * tan_y;
+    let (shift, distance) = choices
         .into_iter()
-        .filter(|limits| limits.side > 0.25 * tan_x && limits.above > 0.1 * tan_y)
-        .map(centered)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .find_map(|choice| {
+            choice
+                .into_iter()
+                .filter(usable)
+                .map(centered)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+        })
         .unwrap_or_else(|| centered(full));
     Transform {
         translation: center + along * shift - forward * distance,
@@ -373,8 +419,13 @@ pub fn frame_circle(center: Vec3, radius: f32, yaw: f32, pitch: f32, size: Vec2)
 
 /// Blick schräg von oben auf einen Kreis mit Halbmesser `extent` um die Feldmitte, der
 /// ganz zu sehen ist. Die erste Partei steht dabei links, die zweite rechts.
-pub fn overview_transform(extent: f32, size: Vec2) -> Transform {
-    frame_circle(Vec3::ZERO, extent, 0.0, -OVERVIEW_PITCH, size)
+pub fn overview_transform(extent: f32, size: Vec2, layout: &HudLayout) -> Transform {
+    frame_circle(Vec3::ZERO, extent, 0.0, -OVERVIEW_PITCH, size, layout)
+}
+
+/// Blick der Kamera, bevor ein Gefecht bekannt ist: das ganze Feld im Standardfenster.
+fn resting_view() -> Transform {
+    overview_transform(2400.0, DEFAULT_SIZE, &HudLayout::default())
 }
 
 /// Schiffe auf dem Feld, die für die Blicke zählen (ohne die, die weit abgetrieben sind).
@@ -407,8 +458,8 @@ pub fn overview_extent(battle: &Battle, field: f32) -> f32 {
 
 /// Die Übersicht: schräg von Süden auf das Feld, so nah, dass gerade noch jedes Schiff auf
 /// dem Feld zu sehen ist.
-pub fn overview_view(battle: &Battle, field: f32, size: Vec2) -> Transform {
-    overview_transform(overview_extent(battle, field), size)
+pub fn overview_view(battle: &Battle, field: f32, size: Vec2, layout: &HudLayout) -> Transform {
+    overview_transform(overview_extent(battle, field), size, layout)
 }
 
 /// Kleinster Kreis um die Mitte der Schiffe auf dem Feld, der sie alle enthält.
@@ -430,10 +481,10 @@ pub fn fleet_circle(battle: &Battle) -> (Vec3, f32) {
 }
 
 /// Blick aus einer festen Richtung auf alle Schiffe auf dem Feld.
-pub fn side_view(battle: &Battle, side: ViewSide, size: Vec2) -> Transform {
+pub fn side_view(battle: &Battle, side: ViewSide, size: Vec2, layout: &HudLayout) -> Transform {
     let (center, radius) = fleet_circle(battle);
     let (yaw, pitch) = side.angles();
-    frame_circle(center, radius, yaw, pitch, size)
+    frame_circle(center, radius, yaw, pitch, size, layout)
 }
 
 /// Kamera im Abstand `distance` vor `target`, mit Blickrichtung aus Gierwinkel und Neigung.
@@ -481,6 +532,7 @@ pub(super) fn plugin(app: &mut App) {
     app.add_plugins(FreeCameraPlugin)
         .init_resource::<SelectedShip>()
         .init_resource::<ViewOptions>()
+        .init_resource::<HudLayout>()
         .init_resource::<FollowAnchor>()
         .add_message::<CameraRequest>()
         .add_systems(Startup, spawn_camera)
@@ -533,7 +585,7 @@ fn spawn_camera(mut commands: Commands) {
         },
         flight_controls(),
         flight,
-        overview_transform(2400.0, DEFAULT_SIZE),
+        resting_view(),
     ));
 }
 
@@ -570,7 +622,7 @@ pub(super) fn set_active(
     flight.velocity = Vec3::ZERO;
     flight.speed_multiplier = 1.0;
     if active {
-        *transform = overview_transform(2400.0, DEFAULT_SIZE);
+        *transform = resting_view();
         sync_flight(flight, transform);
     }
 }
@@ -613,6 +665,7 @@ fn tame_free_camera(
     mouse: WorldMouse,
     feed: Res<BattleFeed>,
     data: Res<sim::GameData>,
+    layout: Res<HudLayout>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
     mut kept_speed: Local<Option<f32>>,
@@ -636,7 +689,8 @@ fn tame_free_camera(
     // so weit zurück, wie die Übersicht es braucht.
     if transform.translation.length() > MAX_DISTANCE {
         let overview = feed.battle().map_or(0.0, |battle| {
-            overview_view(battle, data.balance.battle.exit_radius, window.size())
+            let field = data.balance.battle.exit_radius;
+            overview_view(battle, field, window.size(), &layout)
                 .translation
                 .length()
         });
@@ -705,6 +759,7 @@ fn apply_requests(
     data: Res<sim::GameData>,
     frame: Res<ViewFrame>,
     selected: Res<SelectedShip>,
+    layout: Res<HudLayout>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut options: ResMut<ViewOptions>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
@@ -714,6 +769,12 @@ fn apply_requests(
         return;
     };
     let size = window.size();
+    // Die Tafel des Schiffs zählt nur, solange eines gewählt ist: Der gemeldete Platz ist
+    // ein Frame alt, und mit der Auswahl verschwindet sie.
+    let layout = HudLayout {
+        column: layout.column.filter(|_| selected.0.is_some()),
+        ..*layout
+    };
     let (transform, flight) = &mut *camera;
     for request in requests.read() {
         let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
@@ -741,7 +802,12 @@ fn apply_requests(
         let target = match *request {
             CameraRequest::Overview => {
                 options.follow = false;
-                Some(overview_view(battle, data.balance.battle.exit_radius, size))
+                Some(overview_view(
+                    battle,
+                    data.balance.battle.exit_radius,
+                    size,
+                    &layout,
+                ))
             }
             CameraRequest::Focus => match selected.0 {
                 Some(ship) => ship_view(ship),
@@ -767,7 +833,7 @@ fn apply_requests(
                     }
                     None => {
                         options.follow = false;
-                        side_view(battle, side, size)
+                        side_view(battle, side, size, &layout)
                     }
                 })
             }
@@ -876,6 +942,7 @@ fn update_projector(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_egui::egui;
     use sim::battle::V2;
 
     fn camera() -> Projector {
@@ -1011,11 +1078,11 @@ mod tests {
     }
 
     /// Liegt ein Punkt der Gefechtsebene im Bild, unterhalb der Kopfleiste?
-    fn in_view(projector: &Projector, point: V2) -> bool {
+    fn in_view(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
         projector.project(to_world(point)).is_some_and(|(at, _)| {
             at.x >= 0.0
                 && at.x <= projector.size.x
-                && at.y >= TOP_BAR_PIXELS
+                && at.y >= layout.top
                 && at.y <= projector.size.y
         })
     }
@@ -1031,75 +1098,174 @@ mod tests {
         Vec2::new(700.0, 1000.0),
     ];
 
+    /// Der Platz der Tafeln in einem Gefecht mit vier Klassen je Partei, wie die Tafeln
+    /// ihn melden.
+    const FOUR_CLASSES: HudLayout = HudLayout {
+        top: 34.0,
+        corner: Vec2::new(272.0, 340.0),
+        column: None,
+    };
+    /// Dasselbe mit der offenen Tafel eines gewählten Schiffs.
+    const SHIP_PANEL_OPEN: HudLayout = HudLayout {
+        column: Some(374.0),
+        ..FOUR_CLASSES
+    };
+
     /// Liegt ein Punkt der Gefechtsebene unter einer der Lagetafeln in den oberen Ecken?
-    fn under_a_panel(projector: &Projector, point: V2) -> bool {
+    fn under_a_side_panel(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
         projector.project(to_world(point)).is_some_and(|(at, _)| {
-            at.y < PANEL_CORNER.y
-                && (at.x < PANEL_CORNER.x || at.x > projector.size.x - PANEL_CORNER.x)
+            at.y < layout.corner.y
+                && (at.x < layout.corner.x || at.x > projector.size.x - layout.corner.x)
         })
+    }
+
+    /// Liegt ein Punkt der Gefechtsebene dort, wo die Tafel des gewählten Schiffs stehen
+    /// kann? Sie steht links oder rechts und reicht bis zum unteren Rand.
+    fn under_the_ship_panel(projector: &Projector, layout: &HudLayout, point: V2) -> bool {
+        let Some(column) = layout.column else {
+            return false;
+        };
+        projector
+            .project(to_world(point))
+            .is_some_and(|(at, _)| at.x < column || at.x > projector.size.x - column)
     }
 
     #[test]
     fn overview_shows_the_whole_circle() {
-        for size in SIZES {
-            for extent in [650.0, 1300.0, 2400.0, 7400.0] {
-                let view = overview_transform(extent, size);
-                let projector = Projector::new(&view, FOV, size);
-                // Jeder Punkt des Kreises ist zu sehen, auch der dem Betrachter nächste im
-                // Süden, und keiner liegt unter einer Lagetafel; die Feldmitte ohnehin.
-                let rim: Vec<Vec2> = (0..360)
-                    .step_by(3)
-                    .map(|degrees| {
-                        let point = V2::from_angle((degrees as f32).to_radians()) * extent;
-                        assert!(
-                            in_view(&projector, point),
-                            "{point:?} fehlt (Halbmesser {extent}, Bild {size})"
-                        );
-                        assert!(
-                            !under_a_panel(&projector, point),
-                            "{point:?} liegt unter einer Tafel (Halbmesser {extent}, Bild {size})"
-                        );
-                        projector.project(to_world(point)).unwrap().0
-                    })
-                    .collect();
-                assert!(in_view(&projector, V2::ZERO));
-                // Und der Kreis füllt das Bild, soweit die Tafeln es zulassen.
-                let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
-                for at in rim {
-                    min = min.min(at);
-                    max = max.max(at);
+        for layout in [HudLayout::default(), FOUR_CLASSES] {
+            for size in SIZES {
+                for extent in [650.0, 1300.0, 2400.0, 7400.0] {
+                    let view = overview_transform(extent, size, &layout);
+                    let projector = Projector::new(&view, FOV, size);
+                    // Jeder Punkt des Kreises ist zu sehen, auch der dem Betrachter nächste
+                    // im Süden, und keiner liegt unter einer Lagetafel; die Feldmitte
+                    // ohnehin.
+                    let rim: Vec<Vec2> = (0..360)
+                        .step_by(3)
+                        .map(|degrees| {
+                            let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                            assert!(
+                                in_view(&projector, &layout, point),
+                                "{point:?} fehlt (Halbmesser {extent}, Bild {size})"
+                            );
+                            assert!(
+                                !under_a_side_panel(&projector, &layout, point),
+                                "{point:?} liegt unter einer Tafel (Halbmesser {extent}, Bild {size})"
+                            );
+                            projector.project(to_world(point)).unwrap().0
+                        })
+                        .collect();
+                    assert!(in_view(&projector, &layout, V2::ZERO));
+                    // Und der Kreis füllt das Bild, soweit die Tafeln es zulassen.
+                    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                    for at in rim {
+                        min = min.min(at);
+                        max = max.max(at);
+                    }
+                    // Er reicht in der Breite an die Spalte zwischen den Tafeln heran oder
+                    // in der Höhe an den Raum unter der Kopfleiste oder unter den Tafeln.
+                    let share = (max - min) / size;
+                    let column = 1.0 - FIT_MARGIN - 2.0 * layout.corner.x / size.x;
+                    let below_bar = 1.0 - FIT_MARGIN - layout.top / size.y;
+                    let below_panels = 1.0 - FIT_MARGIN - layout.corner.y / size.y;
+                    assert!(
+                        share.x > 0.95 * column
+                            || share.y > 0.95 * below_bar
+                            || share.y > 0.95 * below_panels,
+                        "der Kreis ist klein im Bild ({share}) bei Halbmesser {extent}, Bild {size}"
+                    );
+                    // Die Übersicht blickt von Süden schräg nach unten; die erste Partei
+                    // steht links.
+                    assert!(view.translation.z > 0.0 && view.translation.y > 0.0);
+                    let left = projector
+                        .project(to_world(V2::new(-extent, 0.0)))
+                        .unwrap()
+                        .0;
+                    let right = projector.project(to_world(V2::new(extent, 0.0))).unwrap().0;
+                    assert!(left.x < right.x);
                 }
-                // Er reicht in der Breite an die Spalte zwischen den Tafeln heran oder in
-                // der Höhe an den Raum unter der Kopfleiste oder unter den Tafeln.
-                let share = (max - min) / size;
-                let column = 1.0 - FIT_MARGIN - 2.0 * PANEL_CORNER.x / size.x;
-                let below_bar = 1.0 - FIT_MARGIN - TOP_BAR_PIXELS / size.y;
-                let below_panels = 1.0 - FIT_MARGIN - PANEL_CORNER.y / size.y;
-                assert!(
-                    share.x > 0.95 * column
-                        || share.y > 0.95 * below_bar
-                        || share.y > 0.95 * below_panels,
-                    "der Kreis ist klein im Bild ({share}) bei Halbmesser {extent}, Bild {size}"
-                );
-                // Die Übersicht blickt von Süden schräg nach unten; die erste Partei steht
-                // links.
-                assert!(view.translation.z > 0.0 && view.translation.y > 0.0);
-                let left = projector
-                    .project(to_world(V2::new(-extent, 0.0)))
-                    .unwrap()
-                    .0;
-                let right = projector.project(to_world(V2::new(extent, 0.0))).unwrap().0;
-                assert!(left.x < right.x);
             }
         }
         // In einem winzigen Fenster, in dem die Tafeln alles belegen, zählt nur das Bild.
         let size = Vec2::new(400.0, 300.0);
-        let projector = Projector::new(&overview_transform(1300.0, size), FOV, size);
+        let layout = HudLayout::default();
+        let projector = Projector::new(&overview_transform(1300.0, size, &layout), FOV, size);
         for degrees in (0..360).step_by(15) {
             assert!(in_view(
                 &projector,
+                &layout,
                 V2::from_angle((degrees as f32).to_radians()) * 1300.0
             ));
+        }
+    }
+
+    #[test]
+    fn overview_keeps_clear_of_the_open_ship_panel() {
+        let rim = |extent: f32| {
+            (0..360)
+                .step_by(3)
+                .map(move |degrees| V2::from_angle((degrees as f32).to_radians()) * extent)
+        };
+        // Wo das Fenster breit genug ist, liegt der ganze Kreis neben der Tafel des Schiffs
+        // (auf welcher Seite sie auch steht) und unter keiner Lagetafel.
+        for size in [Vec2::new(1600.0, 900.0), Vec2::new(1280.0, 720.0)] {
+            for extent in [650.0, 1300.0, 2400.0] {
+                let open = overview_transform(extent, size, &SHIP_PANEL_OPEN);
+                let projector = Projector::new(&open, FOV, size);
+                for point in rim(extent) {
+                    assert!(in_view(&projector, &SHIP_PANEL_OPEN, point));
+                    assert!(
+                        !under_the_ship_panel(&projector, &SHIP_PANEL_OPEN, point),
+                        "{point:?} liegt unter der Tafel des Schiffs (Bild {size})"
+                    );
+                    assert!(!under_a_side_panel(&projector, &SHIP_PANEL_OPEN, point));
+                }
+                // Dafür steht die Kamera weiter zurück als ohne diese Tafel, und der Kreis
+                // nutzt die Spalte aus.
+                let closed = overview_transform(extent, size, &FOUR_CLASSES);
+                assert!(open.translation.length() > closed.translation.length());
+                let (mut left, mut right) = (f32::MAX, f32::MIN);
+                for point in rim(extent) {
+                    let at = projector.project(to_world(point)).unwrap().0;
+                    left = left.min(at.x);
+                    right = right.max(at.x);
+                }
+                let column = size.x * (1.0 - FIT_MARGIN) - 2.0 * 374.0;
+                assert!(
+                    right - left > 0.95 * column,
+                    "Kreis {} breit, Spalte {column}",
+                    right - left
+                );
+            }
+        }
+        // In einem schmalen Fenster bliebe neben ihr kein brauchbarer Platz. Dann gilt der
+        // Blick ohne sie: lieber ein Schiff unter der Tafel als das ganze Gefecht winzig.
+        let size = Vec2::new(1024.0, 600.0);
+        let open = overview_transform(1300.0, size, &SHIP_PANEL_OPEN);
+        let closed = overview_transform(1300.0, size, &FOUR_CLASSES);
+        assert!(open.translation.distance(closed.translation) < 1e-3);
+        let projector = Projector::new(&open, FOV, size);
+        for point in rim(1300.0) {
+            assert!(in_view(&projector, &SHIP_PANEL_OPEN, point));
+            assert!(!under_a_side_panel(&projector, &SHIP_PANEL_OPEN, point));
+        }
+    }
+
+    #[test]
+    fn overview_stays_below_a_top_bar_of_two_rows() {
+        // In schmalen Fenstern bricht die Kopfleiste um; der Kreis bleibt darunter.
+        let size = Vec2::new(900.0, 900.0);
+        let layout = HudLayout {
+            top: 60.0,
+            ..FOUR_CLASSES
+        };
+        for extent in [650.0, 2400.0] {
+            let projector = Projector::new(&overview_transform(extent, size, &layout), FOV, size);
+            for degrees in (0..360).step_by(3) {
+                let point = V2::from_angle((degrees as f32).to_radians()) * extent;
+                assert!(in_view(&projector, &layout, point), "{point:?}");
+                assert!(!under_a_side_panel(&projector, &layout, point));
+            }
         }
     }
 
@@ -1120,10 +1286,11 @@ mod tests {
                         .map(|ship| ship.pos.length())
                         .fold(farthest, f32::max);
                     for size in SIZES {
-                        let projector =
-                            Projector::new(&overview_view(&battle, FIELD, size), FOV, size);
+                        let layout = HudLayout::default();
+                        let view = overview_view(&battle, FIELD, size, &layout);
+                        let projector = Projector::new(&view, FOV, size);
                         let outside = ships()
-                            .filter(|ship| !in_view(&projector, ship.pos))
+                            .filter(|ship| !in_view(&projector, &layout, ship.pos))
                             .count();
                         assert_eq!(
                             outside, 0,
@@ -1132,7 +1299,7 @@ mod tests {
                         );
                         // Auch unter den Lagetafeln steht keines.
                         let hidden = ships()
-                            .filter(|ship| under_a_panel(&projector, ship.pos))
+                            .filter(|ship| under_a_side_panel(&projector, &layout, ship.pos))
                             .count();
                         assert_eq!(
                             hidden, 0,
@@ -1161,8 +1328,9 @@ mod tests {
         // Übersicht rückt entsprechend näher.
         let (start, _) = stepped(&data, MIXED, 0);
         let (fight, _) = stepped(&data, MIXED, 400);
-        let wide = overview_view(&start, FIELD, size);
-        let tight = overview_view(&fight, FIELD, size);
+        let layout = HudLayout::default();
+        let wide = overview_view(&start, FIELD, size, &layout);
+        let tight = overview_view(&fight, FIELD, size, &layout);
         assert!(
             tight.translation.length() < wide.translation.length() * 0.8,
             "{} gegen {}",
@@ -1178,18 +1346,20 @@ mod tests {
         // abgetriebenes Schiff zieht sie nicht ins Unendliche.
         let mut empty = start.clone();
         empty.ships.clear();
-        let least = overview_view(&empty, FIELD, size);
+        let least = overview_view(&empty, FIELD, size, &layout);
         assert!(
             least
                 .translation
-                .distance(overview_transform(OVERVIEW_MIN, size).translation)
+                .distance(overview_transform(OVERVIEW_MIN, size, &layout).translation)
                 < 1e-3
         );
         assert!(least.translation.length() < tight.translation.length());
         let mut adrift = start.clone();
         adrift.ships[0].pos = V2::new(90_000.0, 0.0);
         assert!(
-            overview_view(&adrift, FIELD, size).translation.length()
+            overview_view(&adrift, FIELD, size, &layout)
+                .translation
+                .length()
                 < wide.translation.length() * 1.01
         );
         // Nach dem Ende gehört das Trümmerfeld zur Übersicht, soweit es auf dem Feld liegt:
@@ -1222,7 +1392,12 @@ mod tests {
 
         let data = data();
         let (battle, feed) = stepped(&data, MIXED, ticks);
-        let view = overview_view(&battle, FIELD, Vec2::new(1600.0, 900.0));
+        let view = overview_view(
+            &battle,
+            FIELD,
+            Vec2::new(1600.0, 900.0),
+            &HudLayout::default(),
+        );
         let frame = ViewFrame {
             epoch: Some(feed.epoch),
             alpha: 1.0,
@@ -1243,6 +1418,7 @@ mod tests {
         world.insert_resource(ViewTimings::default());
         world.init_resource::<SelectedShip>();
         world.init_resource::<ViewOptions>();
+        world.init_resource::<HudLayout>();
         world.init_resource::<FollowAnchor>();
         world.init_resource::<Messages<CameraRequest>>();
         world.init_resource::<ButtonInput<KeyCode>>();
@@ -1482,13 +1658,16 @@ mod tests {
             .expect("ein Schiff in der freien Szene")
     }
 
-    fn orientation(game: &mut crate::testing::TestGame) -> Quat {
+    fn camera_pose(game: &mut crate::testing::TestGame) -> Transform {
         let world = game.world_mut();
-        world
+        *world
             .query_filtered::<&Transform, With<BattleCamera>>()
             .single(world)
             .unwrap()
-            .rotation
+    }
+
+    fn orientation(game: &mut crate::testing::TestGame) -> Quat {
+        camera_pose(game).rotation
     }
 
     /// Höhe, in der die Kopfleiste liegt, und eine Stelle auf der Lagetafel links.
@@ -1744,7 +1923,10 @@ mod tests {
             let projector = Projector::new(&view, FOV, size);
             // Jedes Schiff auf dem Feld ist im Bild.
             for ship in battle.ships.iter().filter(|ship| ship.status.in_play()) {
-                assert!(in_view(&projector, ship.pos), "{side:?}: Schiff fehlt");
+                assert!(
+                    in_view(&projector, &HudLayout::default(), ship.pos),
+                    "{side:?}: Schiff fehlt"
+                );
             }
             // Die Kamera steht dort, wo der Name des Blicks es sagt, und blickt zum Gefecht.
             let offset = view.translation - center;
@@ -1803,12 +1985,13 @@ mod tests {
         let forward = |game: &mut crate::testing::TestGame| orientation(game) * Vec3::NEG_Z;
         let all_in_view = |game: &crate::testing::TestGame| {
             let frame = game.resource::<ViewFrame>();
+            let layout = game.resource::<HudLayout>();
             let battle = game.resource::<BattleFeed>().battle().unwrap();
             battle
                 .ships
                 .iter()
                 .filter(|ship| ship.status.in_play())
-                .all(|ship| in_view(&frame.projector, ship.pos))
+                .all(|ship| in_view(&frame.projector, layout, ship.pos))
         };
         game.key(KeyCode::Numpad7);
         assert!(forward(&mut game).y < -0.999, "Ziffernblock 7: von oben");
@@ -1836,6 +2019,123 @@ mod tests {
         // Die Übersicht bringt den gewohnten Blick zurück.
         game.key(KeyCode::KeyU);
         assert!(forward(&mut game).z < -0.5 && all_in_view(&game));
+    }
+
+    /// Wo die Schiffe auf dem Feld gerade im Bild stehen.
+    fn ships_on_screen(game: &crate::testing::TestGame) -> Vec<Vec2> {
+        let frame = game.resource::<ViewFrame>();
+        let battle = game.resource::<BattleFeed>().battle().unwrap();
+        battle
+            .ships
+            .iter()
+            .enumerate()
+            .filter(|(_, ship)| ship.status.in_play())
+            .map(|(index, _)| {
+                let position = frame.position(index).expect("Lage des Schiffs");
+                frame.projector.project(position).expect("vor der Kamera").0
+            })
+            .collect()
+    }
+
+    /// Die Tafeln, die gerade über der Schlacht stehen, mit ihren Rechtecken.
+    fn panels(game: &mut crate::testing::TestGame) -> Vec<(&'static str, egui::Rect)> {
+        ["partei_0", "partei_1", "schiff"]
+            .into_iter()
+            .filter_map(|title| Some((title, game.window_rect(title)?)))
+            .collect()
+    }
+
+    /// Schiffe, deren Mitte unter einer Tafel oder außerhalb des Bilds liegt.
+    fn hidden_ships(game: &mut crate::testing::TestGame) -> Vec<String> {
+        let panels = panels(game);
+        let top = game.resource::<HudLayout>().top;
+        let screen = egui::Rect::from_min_max(
+            egui::pos2(0.0, top),
+            egui::pos2(crate::testing::WINDOW.x, crate::testing::WINDOW.y),
+        );
+        ships_on_screen(game)
+            .into_iter()
+            .filter_map(|at| {
+                let at = egui::pos2(at.x, at.y);
+                if !screen.contains(at) {
+                    return Some(format!("{at:?} außerhalb"));
+                }
+                panels
+                    .iter()
+                    .find(|(_, rect)| rect.contains(at))
+                    .map(|(title, _)| format!("{at:?} unter {title}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_overview_shows_every_ship_beside_the_panels_that_are_open() {
+        use crate::testing::TestGame;
+        // Zwei Linien, die anfangs die ganze Breite zwischen den Tafeln füllen, und eine
+        // Flotte mit allen sechs Klassen und Jägern im Hangar: Mit ihr ist die Lagetafel
+        // des Spielers am höchsten.
+        let wide = "--fleet-a bastion:2,speer:6 --fleet-b bastion:2,speer:6";
+        let tall = "--fleet-a horst:3,waechter:6,dolch:4,wespe:2,speer:1,bastion:1 --fleet-b bastion:3,speer:4";
+        for fleets in [wide, tall] {
+            let mut game = TestGame::start(&format!("--practice {fleets} --seed 3"));
+            game.frames(6);
+            // Schon der erste Blick des Gefechts zeigt jedes Schiff neben den Tafeln. Er
+            // ist die Übersicht, wie die Taste sie liefert, bis auf die wenigen Pixel, um
+            // die neue Tafeln in ihrem ersten Durchlauf noch schmaler sind.
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            let first = camera_pose(&mut game);
+            game.key(KeyCode::KeyU);
+            let again = camera_pose(&mut game);
+            assert!(
+                first.translation.distance(again.translation) < 0.01 * again.translation.length(),
+                "{fleets}: erster Blick {first:?}, Übersicht {again:?}"
+            );
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            assert_eq!(panels(&mut game).len(), 2);
+
+            // Der gemeldete Platz der Tafeln stimmt mit dem überein, was gezeichnet wurde.
+            let layout = *game.resource::<HudLayout>();
+            let left = game.window_rect("partei_0").unwrap();
+            let right = game.window_rect("partei_1").unwrap();
+            assert_eq!(layout.column, None);
+            assert!((layout.corner.x - (left.right() + LAYOUT_GAP)).abs() < 0.5);
+            assert!(
+                (layout.corner.x - (crate::testing::WINDOW.x - right.left() + LAYOUT_GAP)).abs()
+                    < 0.5
+            );
+            assert!(
+                (layout.corner.y - (left.bottom().max(right.bottom()) + LAYOUT_GAP)).abs() < 0.5
+            );
+
+            // Ein Schiff wählen: Seine Tafel öffnet sich rechts und reicht bis zum unteren
+            // Rand. Mit dem bisherigen Blick stünden Schiffe darunter.
+            let (_, at) = ship_in_the_open(&game);
+            game.click(at);
+            assert!(game.resource::<SelectedShip>().0.is_some());
+            let ship_panel = game.window_rect("schiff").expect("Tafel des Schiffs");
+            if fleets == wide {
+                assert!(!hidden_ships(&mut game).is_empty());
+            }
+            let layout = *game.resource::<HudLayout>();
+            assert_eq!(
+                layout.column.map(f32::round),
+                Some((crate::testing::WINDOW.x - ship_panel.left() + LAYOUT_GAP).round())
+            );
+
+            // Die Übersicht rückt so weit ab, dass wieder jedes Schiff frei steht.
+            game.key(KeyCode::KeyU);
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+            let with_panel = camera_pose(&mut game);
+            assert!(with_panel.translation.length() > again.translation.length());
+
+            // Ohne Auswahl gilt wieder der nähere Blick.
+            game.click(OPEN_SCENE);
+            assert_eq!(game.resource::<SelectedShip>().0, None);
+            game.key(KeyCode::KeyU);
+            let closed = camera_pose(&mut game);
+            assert!(closed.translation.distance(again.translation) < 0.5);
+            assert_eq!(hidden_ships(&mut game), Vec::<String>::new(), "{fleets}");
+        }
     }
 
     #[test]

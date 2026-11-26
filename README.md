@@ -150,6 +150,10 @@ ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition, 
 Moral, Ziel und allen Modulen; „Heranholen“ und „Verfolgen“ führen die Kamera zu ihm.
 Klicks, Züge und Mausrad auf Leisten und Tafeln wirken nicht auf die Szene dahinter.
 
+Die Übersicht rückt so weit ab, dass jedes Schiff auf dem Feld neben den offenen Tafeln zu
+sehen ist. Die Blicke des Ziffernblocks gelten dem gewählten Schiff, ohne Auswahl allen
+Schiffen auf dem Feld.
+
 Kleine Markierungen stehen für Schiffe, die aus der Ferne kaum zu sehen sind: Dreieck = Jäger
 und Korvette, Raute = Fregatte, Pfeil = Kreuzer, Sechseck = Schlachtschiff, Rechteck = Träger.
 Hohl = auf dem Rückzug, grau = treibt, Kreuz = Wrack.
