@@ -393,7 +393,9 @@ pub fn treasury_window(
     actions: &mut Vec<UiAction>,
 ) {
     let mut open = state.treasury_open;
-    egui::Window::new("Staatsfinanzen").open(&mut open).default_pos([470.0, 90.0]).default_width(520.0).show(ctx, |ui| {
+    // Das Fenster rollt, wo der Haushalt mit allem anderen nicht mehr auf den Schirm passt.
+    let room = (ctx.content_rect().height() - 140.0).max(240.0);
+    egui::Window::new("Staatsfinanzen").open(&mut open).default_pos([430.0, 56.0]).default_width(600.0).default_height(room).vscroll(true).show(ctx, |ui| {
         let Some(player) = sim.config.player else {
             ui.label("Beobachter führen keinen Staat.");
             return;
@@ -409,7 +411,9 @@ pub fn treasury_window(
                 ui.end_row();
             };
             row("Staatskasse", format!("{} Credits", decimal(treasury, 0)));
-            row("Einnahmen", format!("{} je Monat", decimal(finance.revenue, 0)));
+            // Laufende Einnahmen, wie der Haushalt sie führt; die Kasse selbst wächst kaum
+            // noch, seit jeder Monat seine Ansprüche bedient.
+            row("Einnahmen des Vormonats", format!("{} Credits", decimal(to_credits(sim.economy.state_income_of(player)), 0)));
             row("Schulden", format!("{} Credits", decimal(debt, 0)));
             row("Zins für neue Anleihen", percent(finance.bond_yield as f32));
             row("Kriegsmüdigkeit", decimal(finance.war_weariness, 0));
@@ -420,6 +424,8 @@ pub fn treasury_window(
                 row("Zahlungsausfälle", finance.defaults.to_string());
             }
         });
+        ui.separator();
+        super::budget::budget_section(ui, sim, player);
         ui.separator();
 
         ui.label(RichText::new("Steuern").color(ACCENT));
