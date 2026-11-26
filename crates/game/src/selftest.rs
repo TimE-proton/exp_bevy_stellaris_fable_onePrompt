@@ -6,10 +6,12 @@
 //! „OK“ heißt mehr als „nicht abgestürzt“: Zu jedem Foto wird festgehalten, was die Engine
 //! in diesem Augenblick wirklich zeichnet, also im Sichtfeld der Kamera hat und nicht
 //! ausblendet (Schiffe und Wrackteile des Gefechts, Objekte der Karte), und am Ende müssen
-//! die verlangten Fotodateien geschrieben sein. Eine leere Szene, eine Kamera, die am
-//! Geschehen vorbeisieht, oder ein Foto, das nie ankam, ergeben „FEHLER“ und einen
-//! Fehlercode. Ob eine Tafel der Oberfläche etwas verdeckt, prüft der Selbsttest nicht;
-//! dafür sind die Fotos da.
+//! die verlangten Fotodateien geschrieben sein. Gezählt wird für die Kamera, die die
+//! Ansicht ins Fenster bringt: die Schlachtkamera für das Gefecht, die Kartenkamera für die
+//! Karte. Eine leere Szene, eine Kamera, die am Geschehen vorbeisieht, ausgeschaltet ist
+//! oder übermalt wird, und ein Foto, das nie ankam, ergeben „FEHLER“ und einen Fehlercode.
+//! Ob eine Tafel der Oberfläche etwas verdeckt, prüft der Selbsttest nicht; dafür sind die
+//! Fotos da.
 
 use crate::args::{Args, numbered};
 use crate::battle_view::feed::BattleFeed;
@@ -44,6 +46,9 @@ fn take_photo(commands: &mut Commands, path: PathBuf) {
         .observe(save_to_disk(path));
 }
 
+/// Warum eine Kamera nichts ins Fenster bringt.
+const CAMERA_SILENT: &str = "ausgeschaltet oder von einer anderen Kamera übermalt";
+
 /// Liegt das Foto vor, mit Inhalt?
 fn photo_written(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|file| file.len() > 0)
@@ -58,6 +63,8 @@ struct Selftest {
     photo: Option<PathBuf>,
     /// Zahl der Kartenobjekte im Sichtfeld der Kamera, als das Foto ausgelöst wurde.
     visible: Option<usize>,
+    /// Brachte die Kartenkamera in diesem Augenblick ihr Bild ins Fenster?
+    camera_draws: bool,
     /// Frames, die am Ende schon auf das Foto gewartet wurde.
     waited: u32,
 }
@@ -68,11 +75,14 @@ impl Selftest {
         self.photo.as_deref().filter(|path| !photo_written(path))
     }
 
-    /// Was am Ende gegen ein „OK“ spricht: eine Karte, von der nichts im Sichtfeld der
-    /// Kamera lag, und ein Foto, das nicht geschrieben wurde.
+    /// Was am Ende gegen ein „OK“ spricht: eine Kartenkamera, die nicht zeichnet, eine
+    /// Karte, von der nichts in ihrem Sichtfeld lag, und ein Foto, das nicht geschrieben
+    /// wurde.
     fn problems(&self) -> Vec<String> {
         let mut problems = Vec::new();
-        if self.visible.unwrap_or(0) == 0 {
+        if !self.camera_draws {
+            problems.push(format!("die Kartenkamera zeichnet nicht ({CAMERA_SILENT})"));
+        } else if self.visible.unwrap_or(0) == 0 {
             problems.push("von der Karte liegt nichts im Sichtfeld der Kamera".to_string());
         }
         if let Some(path) = self.missing_photo() {
@@ -110,6 +120,7 @@ impl Plugin for SelftestPlugin {
             shot_taken: false,
             photo: None,
             visible: None,
+            camera_draws: false,
             waited: 0,
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
@@ -153,7 +164,8 @@ fn drive(
     }
     if test.frame >= total.saturating_sub(12) && !test.shot_taken {
         test.shot_taken = true;
-        // Was die Kamera in diesem Augenblick von der Karte erfasst, gehört zum Urteil.
+        // Was die Kartenkamera in diesem Augenblick zeichnet, gehört zum Urteil.
+        test.camera_draws = census.camera_shows();
         test.visible = Some(census.visible());
         if let Some(path) = args.screenshot.clone() {
             take_photo(&mut commands, path.clone());
@@ -253,6 +265,8 @@ struct Photo {
     /// Datei, wenn eine verlangt war.
     path: Option<PathBuf>,
     subject: Subject,
+    /// Brachte die Schlachtkamera in diesem Augenblick ihr Bild ins Fenster?
+    camera_draws: bool,
     /// Schiffe auf dem Feld laut Gefecht.
     in_play: usize,
     /// Rümpfe in der Szene und davon im Sichtfeld der Kamera.
@@ -264,10 +278,15 @@ struct Photo {
 }
 
 impl Photo {
-    /// Was an dem Foto nicht stimmt: Die Szene zeigt nicht, was das Gefecht hält, oder das
-    /// Verlangte liegt nicht im Sichtfeld der Kamera.
+    /// Was an dem Foto nicht stimmt: Die Schlachtkamera zeichnet nicht, die Szene zeigt
+    /// nicht, was das Gefecht hält, oder das Verlangte liegt nicht im Sichtfeld der Kamera.
     fn problem(&self) -> Option<String> {
         let number = self.number;
+        if !self.camera_draws {
+            return Some(format!(
+                "Foto {number}: die Schlachtkamera zeichnet nicht ({CAMERA_SILENT})"
+            ));
+        }
         if self.hulls != self.in_play {
             return Some(format!(
                 "Foto {number}: {} Schiffe auf dem Feld, aber {} Rümpfe in der Szene",
@@ -549,6 +568,7 @@ fn drive_practice(
                 number: pending.photo,
                 path,
                 subject: pending.subject,
+                camera_draws: census.camera_shows(),
                 in_play,
                 hulls: census.hulls(),
                 visible_hulls: census.visible_hulls(),
@@ -826,6 +846,7 @@ mod tests {
             number: 1,
             path: None,
             subject,
+            camera_draws: true,
             in_play: 10,
             hulls: 10,
             visible_hulls: 10,
@@ -912,6 +933,18 @@ mod tests {
             ..photo(Subject::AllShips)
         };
         assert_eq!(graveyard.problem(), None);
+
+        // Zeichnet die Schlachtkamera nicht, hilft alles andere nichts.
+        for subject in [Subject::AllShips, Subject::Ships(2), Subject::Wreckage] {
+            let dark = Photo {
+                camera_draws: false,
+                ..photo(subject)
+            };
+            assert!(
+                problem(dark).contains("die Schlachtkamera zeichnet nicht"),
+                "{subject:?}"
+            );
+        }
     }
 
     /// Ein Ort für ein Foto dieses Tests.

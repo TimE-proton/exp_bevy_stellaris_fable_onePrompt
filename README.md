@@ -117,7 +117,7 @@ cargo run -- --practice --fleet-a bastion:2,speer:6 --fleet-b horst:2,waechter:8
 | `--fleet-a LISTE`, `--fleet-b LISTE` | Flotte des blauen und des roten Verbands; ohne Angabe die Vorlage „Linienschlacht“ |
 | `--seed N` | Wählt den Verlauf der Übung (ohne Angabe 1) |
 | `--lineup` | Schaustellung statt Gefecht: je ein Schiff jeder Klasse nebeneinander, die Zeit steht |
-| `--selftest [N]` | Die Übung läuft von allein, höchstens N Frames (ohne Angabe 240), dann beendet sich das Programm. Es endet mit einem Fehler, wenn dabei nichts vom Gefecht im Sichtfeld der Kamera lag oder ein verlangtes Foto nicht entstand |
+| `--selftest [N]` | Die Übung läuft von allein, höchstens N Frames (ohne Angabe 240), dann beendet sich das Programm. Es endet mit einem Fehler, wenn die Schlachtkamera dabei nicht zeichnete, nichts vom Gefecht in ihrem Sichtfeld lag oder ein verlangtes Foto nicht entstand |
 | `--screenshot DATEI` | Im Selbsttest Fotos speichern. Aus `bild.png` werden `bild_1.png` (Übersicht), `bild_2.png` (Nahaufnahme), `bild_3.png` (Trümmerfeld) und, wenn das Gefecht zu Ende kam, `bild_4.png` (Bilanz); die Schaustellung liefert vier Fotos der Klassen |
 
 ### Schlachtansicht

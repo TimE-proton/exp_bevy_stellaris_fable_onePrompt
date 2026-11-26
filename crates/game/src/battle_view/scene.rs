@@ -11,8 +11,8 @@ use super::{
     BattleViewSet, BattleViewShown, CameraRequest, Part, ViewFrame, ViewTimings, heading_rotation,
     to_world,
 };
-use crate::map::MapCamera;
-use bevy::camera::visibility::ViewVisibility;
+use crate::map::{MapCamera, camera_shows};
+use bevy::camera::visibility::VisibleEntities;
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -421,34 +421,54 @@ pub struct SceneState {
     wrecks_seen: usize,
 }
 
-/// Zählt, was die Engine von der Szene wirklich zeichnet. Maßgeblich ist ihr Urteil aus
-/// dem letzten Frame: im Sichtfeld einer eingeschalteten Kamera und nicht ausgeblendet.
-/// Der Selbsttest prüft damit, dass die Fotos nicht bloß den leeren Raum zeigen.
+/// Zählt, was die Schlachtkamera von der Szene wirklich zeichnet: was die Engine im letzten
+/// Frame für genau diese Kamera als sichtbar eingestuft hat (in ihrem Sichtfeld und nicht
+/// ausgeblendet). Der Selbsttest prüft damit, dass die Fotos nicht bloß den leeren Raum
+/// zeigen. Dass irgendeine Kamera die Rümpfe im Sichtfeld hat, genügt nicht: Die
+/// Kartenkamera erfasst sie auch (sie liegen in der Ebene vor ihr), zeichnet aber keine.
 #[derive(SystemParam)]
 pub struct SceneCensus<'w, 's> {
-    hulls: Query<'w, 's, &'static ViewVisibility, With<ShipVisual>>,
-    wreck_parts: Query<'w, 's, &'static ViewVisibility, With<WreckPart>>,
+    camera: Query<'w, 's, (Entity, &'static VisibleEntities), With<BattleCamera>>,
+    cameras: Query<'w, 's, (Entity, &'static Camera)>,
+    hulls: Query<'w, 's, (), With<ShipVisual>>,
+    wreck_parts: Query<'w, 's, (), With<WreckPart>>,
 }
 
 impl SceneCensus<'_, '_> {
+    /// Bringt die Schlachtkamera ihr Bild ins Fenster?
+    pub fn camera_shows(&self) -> bool {
+        self.camera
+            .single()
+            .is_ok_and(|(camera, _)| camera_shows(camera, &self.cameras))
+    }
+
+    /// Was die Schlachtkamera zeichnet. Eine ausgeschaltete Kamera behält die Liste aus
+    /// ihrem letzten Bild; sie zählt nicht.
+    fn drawn(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.camera
+            .single()
+            .ok()
+            .filter(|_| self.camera_shows())
+            .into_iter()
+            .flat_map(|(_, visible)| visible.entities.values().flatten().copied())
+    }
+
     /// Rümpfe in der Szene, ob die Kamera sie erfasst oder nicht.
     pub fn hulls(&self) -> usize {
         self.hulls.iter().count()
     }
 
-    /// Rümpfe im Sichtfeld der Kamera.
+    /// Rümpfe, die die Schlachtkamera zeichnet.
     pub fn visible_hulls(&self) -> usize {
-        self.hulls
-            .iter()
-            .filter(|visibility| visibility.get())
+        self.drawn()
+            .filter(|entity| self.hulls.contains(*entity))
             .count()
     }
 
-    /// Rumpfhälften und Trümmerstücke von Wracks im Sichtfeld der Kamera.
+    /// Rumpfhälften und Trümmerstücke von Wracks, die die Schlachtkamera zeichnet.
     pub fn visible_wreck_parts(&self) -> usize {
-        self.wreck_parts
-            .iter()
-            .filter(|visibility| visibility.get())
+        self.drawn()
+            .filter(|entity| self.wreck_parts.contains(*entity))
             .count()
     }
 }

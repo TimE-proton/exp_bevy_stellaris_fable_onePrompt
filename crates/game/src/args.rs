@@ -17,8 +17,9 @@ Aufruf: game [Optionen]
   --data-dir PFAD     Verzeichnis der RON-Spieldaten (Standard: assets/data)
   --selftest [N]      Selbsttest: Partie starten, N Frames laufen lassen (Standard 240),
                       beenden; mit --practice eine Gefechtsübung, höchstens N Frames.
-                      Endet mit einem Fehler, wenn dabei nichts von Karte oder Gefecht im
-                      Sichtfeld der Kamera lag oder ein verlangtes Foto nicht entstand
+                      Endet mit einem Fehler, wenn die Kamera der Ansicht dabei nicht
+                      zeichnete, nichts von Karte oder Gefecht in ihrem Sichtfeld lag oder
+                      ein verlangtes Foto nicht entstand
   --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
                       nummeriert sie (DATEI_1.png, DATEI_2.png, …)
   --help              Diese Hilfe";
