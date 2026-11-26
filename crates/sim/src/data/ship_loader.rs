@@ -447,6 +447,7 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
         ));
     }
     military.strength_per_value = start_strength / starting_value;
+    military.starting_fleet_value = starting_value;
     let unit = 0.0..=1.0;
     let checks = [
         (
@@ -495,6 +496,10 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
         (
             "fuel_per_distance darf nicht negativ sein",
             military.fuel_per_distance >= 0.0 && military.fuel_per_distance.is_finite(),
+        ),
+        (
+            "fuel_per_day muss in 0..1 liegen",
+            (0.0..=1.0).contains(&military.fuel_per_day),
         ),
         (
             "dry_speed muss über 0 und höchstens 1 sein",

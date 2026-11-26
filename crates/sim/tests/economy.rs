@@ -206,7 +206,8 @@ fn a_blockade_raises_prices_and_idles_factories() {
             to: target,
         },
     );
-    // Die Flotte braucht Zeit für den Anmarsch; danach steht die Sperre zwei Jahre.
+    // Die Flotte braucht Zeit für den Anmarsch. Danach steht die Sperre, solange der
+    // Treibstoff reicht: Fern der Heimat fasst die Flotte nichts nach.
     let mut established = false;
     for _ in 0..3 * DAYS_PER_YEAR {
         blockaded.run_days(1);
@@ -217,9 +218,19 @@ fn a_blockade_raises_prices_and_idles_factories() {
         }
     }
     assert!(established, "die Flotte hat die Blockade nie errichtet");
-    blockaded.run_days(2 * DAYS_PER_YEAR);
-    control.run_days(2 * DAYS_PER_YEAR);
-    assert!(blockaded.world().resource::<Fleets>().is_blockaded(target));
+    let mut held = 0;
+    while blockaded.world().resource::<Fleets>().is_blockaded(target) {
+        blockaded.run_days(1);
+        control.run_days(1);
+        held += 1;
+        assert!(held < 2 * DAYS_PER_YEAR, "die Sperre endet nie");
+    }
+    assert!(
+        held >= 100,
+        "die Sperre hielt nur {held} Tage; für die Messung braucht es Monate"
+    );
+    let fuel = blockaded.world().resource::<Fleets>().list[0].min_fuel();
+    assert_eq!(fuel, 0.0, "die Sperre endet, weil der Treibstoff ausgeht");
 
     // Mittleres Preisverhältnis gesperrt/offen über eine Gütergruppe.
     let ratio = |goods: &[usize]| -> f64 {

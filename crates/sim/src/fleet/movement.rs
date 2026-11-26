@@ -35,11 +35,20 @@ pub fn day_travel(
 
 /// Flotten rücken entlang ihrer Route vor und verbrauchen dabei Treibstoff: je
 /// Streckeneinheit denselben Anteil jedes Tanks. Die Fahrt folgt der Antriebstechnik der
-/// Gemeinschaft ([`map_speed`]); der Verbrauch je Strecke bleibt gleich.
+/// Gemeinschaft ([`map_speed`]); der Verbrauch je Strecke bleibt gleich. Wer in einem
+/// System liegt, verbraucht `fuel_per_day` seines Tanks: Im eigenen Gebiet fasst die
+/// Flotte ihn nach, fern davon läuft sie trocken. Im Gefecht rechnet der Gefechtsrechner
+/// den Verbrauch.
 pub fn move_fleets(galaxy: &Galaxy, fleets: &mut Fleets, research: &Research, data: &GameData) {
     let balance = &data.balance.military;
     for fleet in &mut fleets.list {
-        if !fleet.alive || fleet.route.is_empty() || fleet.in_battle {
+        if !fleet.alive || fleet.in_battle {
+            continue;
+        }
+        if fleet.route.is_empty() {
+            for ship in &mut fleet.ships {
+                ship.fuel = (ship.fuel - balance.fuel_per_day).max(0.0);
+            }
             continue;
         }
         let speed = map_speed(data, research, fleet.owner);
@@ -94,6 +103,7 @@ pub fn update_blockades(
     let stands = |fleet: &Fleet| {
         !fleet.is_regrouping() && (!fleet.in_battle || battles.is_fighting(fleet.id))
     };
+    // Eine Sperre will gefahren sein: Ohne Treibstoff hält sie niemand aufrecht.
     let mut blockaded = Vec::new();
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
@@ -108,6 +118,7 @@ pub fn update_blockades(
             fleet.stance == Stance::Blockade
                 && diplomacy.at_war(fleet.owner, owner)
                 && stands(fleet)
+                && fleet.has_fuel()
         });
         if besieged && !defended {
             blockaded.push(system.id);
@@ -189,9 +200,65 @@ mod tests {
                 ship.fuel
             );
         }
-        // Wer liegt, verbraucht nichts.
+        // Auch wer liegt, verbraucht: je Tag einen festen Anteil des Tanks, bis er leer ist.
+        let idle = balance.fuel_per_day;
+        assert!(idle > 0.0 && idle < 0.05);
         move_fleets(&galaxy, &mut fleets, &Research::default(), &data);
-        assert!((fleets.list[0].min_fuel() - expected).abs() < 1e-4);
+        assert!((fleets.list[0].min_fuel() - (expected - idle)).abs() < 1e-4);
+        let days = (1.0 / idle).ceil() as usize;
+        for _ in 0..days {
+            move_fleets(&galaxy, &mut fleets, &Research::default(), &data);
+        }
+        assert_eq!(fleets.list[0].min_fuel(), 0.0);
+        assert!(!fleets.list[0].has_fuel());
+        // Im Gefecht rechnet der Gefechtsrechner den Verbrauch, nicht die Karte.
+        let (_, _, _, mut busy) = setup();
+        busy.list[0].in_battle = true;
+        move_fleets(&galaxy, &mut busy, &Research::default(), &data);
+        assert_eq!(busy.list[0].min_fuel(), 1.0);
+    }
+
+    #[test]
+    fn a_blockade_needs_fuel() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let target = galaxy.planet(polities.list[1].capital.unwrap()).system;
+        let away = galaxy.neighbors(target)[0].system;
+        fleets.list[1].system = away;
+        fleets.list[0].system = target;
+        fleets.list[0].stance = Stance::Blockade;
+        let blockaded = |fleets: &mut Fleets| {
+            update_blockades(&galaxy, fleets, &diplomacy, &Battles::default());
+            fleets.is_blockaded(target)
+        };
+        assert!(blockaded(&mut fleets));
+        // Fern der Heimat fasst niemand nach: Tag für Tag sinken die Tanks, und mit dem
+        // letzten Tropfen fällt die Sperre.
+        let days = (1.0 / data.balance.military.fuel_per_day).ceil() as usize;
+        for day in 0..days {
+            assert!(blockaded(&mut fleets), "Tag {day}");
+            move_fleets(&galaxy, &mut fleets, &Research::default(), &data);
+        }
+        assert!(!fleets.list[0].has_fuel());
+        assert!(!blockaded(&mut fleets), "ohne Treibstoff keine Sperre");
+        // Ein einziges trockenes Schiff genügt, um die Flotte festzulegen; versorgt sperrt
+        // sie wieder.
+        for ship in &mut fleets.list[0].ships[1..] {
+            ship.fuel = 1.0;
+        }
+        assert!(!blockaded(&mut fleets));
+        fleets.list[0].ships[0].fuel = 0.2;
+        assert!(blockaded(&mut fleets));
+        // Kaperfahrt und Geleit brauchen ihn ebenso.
+        fleets.list[0].stance = Stance::Raid;
+        let strength = fleets.list[0].strength;
+        assert_eq!(
+            fleets.raid_pressure(&diplomacy, target, PolityId(1)).0,
+            strength
+        );
+        fleets.list[0].ships[0].fuel = 0.0;
+        assert_eq!(fleets.raid_pressure(&diplomacy, target, PolityId(1)).0, 0.0);
     }
 
     #[test]

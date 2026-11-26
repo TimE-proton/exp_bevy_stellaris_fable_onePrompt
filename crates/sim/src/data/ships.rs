@@ -429,6 +429,9 @@ pub struct MilitaryBalance {
     /// Anteil des Bordvorrats, den eine Flotte im eigenen System je Tag nachfasst.
     pub resupply_per_day: f32,
     pub fuel_per_distance: f32,
+    /// Anteil des Tankinhalts, den eine Flotte je Tag verbraucht, an dem sie in einem
+    /// System liegt, statt zu marschieren.
+    pub fuel_per_day: f32,
     pub dry_speed: f32,
     pub ammo_goods: f64,
     pub fuel_goods: f64,
@@ -449,6 +452,10 @@ pub struct MilitaryBalance {
     pub debris_fade_per_month: f32,
     #[serde(skip)]
     pub starting_fleet_ids: Vec<(u16, u32)>,
+    /// Bauwert der Startflotte in Credits: der Maßstab, an dem Verluste mindestens
+    /// gemessen werden.
+    #[serde(skip)]
+    pub starting_fleet_value: f64,
     #[serde(skip)]
     pub hull_good_id: GoodId,
     #[serde(skip)]

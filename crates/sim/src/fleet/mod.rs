@@ -31,8 +31,8 @@ mod yard;
 
 pub use battles::{
     BattleOutcome, BattleReport, Battles, Debris, Departed, Departure, SideReport, advance_battles,
-    combat_modifiers, combatant_setup, crew_morale, muster_battles, open_battles, order_retreat,
-    relay_orders, retreat_target, withdrawal_route,
+    combat_modifiers, combatant_setup, crew_morale, loss_share, muster_battles, open_battles,
+    order_retreat, relay_orders, retreat_target, withdrawal_route,
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
@@ -270,6 +270,13 @@ impl Fleet {
         self.alive && !self.in_battle && !self.is_regrouping()
     }
 
+    /// Hat jedes Schiff noch Treibstoff? Eine Flotte mit einem leeren Tank liegt fest:
+    /// Sie kämpft, wenn sie angegriffen wird, aber sie sperrt kein System, kapert nicht
+    /// und gibt kein Geleit, bis sie wieder versorgt ist.
+    pub fn has_fuel(&self) -> bool {
+        self.min_fuel() > 0.0
+    }
+
     /// Bauwert aller Schiffe in Credits, ohne Rücksicht auf ihren Zustand.
     pub fn build_value(&self, data: &GameData) -> f64 {
         self.ships
@@ -488,8 +495,12 @@ impl Fleets {
         let mut raiders = 0.0;
         let mut escorts = 0.0;
         let mut raider = None;
-        // Wer kämpft oder sich sammelt, kapert nicht und gibt kein Geleit.
-        for fleet in self.docked_in(system).filter(|fleet| fleet.is_ready()) {
+        // Wer kämpft, sich sammelt oder ohne Treibstoff festliegt, kapert nicht und gibt
+        // kein Geleit.
+        for fleet in self
+            .docked_in(system)
+            .filter(|fleet| fleet.is_ready() && fleet.has_fuel())
+        {
             if fleet.stance == Stance::Raid && diplomacy.at_war(fleet.owner, victim) {
                 raiders += fleet.strength;
                 raider.get_or_insert(fleet.owner);

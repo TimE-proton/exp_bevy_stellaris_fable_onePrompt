@@ -249,6 +249,11 @@
         resupply_per_day: 0.05,
         // Treibstoff je Streckeneinheit auf der Karte, als Anteil des Tankinhalts.
         fuel_per_distance: 0.0012,
+        // Auch wer liegt, verbraucht: Anteil des Tankinhalts je Tag in einem System. Im
+        // eigenen Gebiet fasst die Flotte ihn am Markt nach; fern davon ist ein voller
+        // Tank nach 250 Tagen leer. Ohne Treibstoff sperrt, kapert und geleitet eine
+        // Flotte nicht mehr.
+        fuel_per_day: 0.004,
         // Ohne Treibstoff fährt eine Flotte nur noch mit diesem Anteil ihrer Fahrt.
         dry_speed: 0.4,
         // Munition: Einheiten des Guts je Punkt Bordvorrat; ebenso Treibstoff.
@@ -274,9 +279,12 @@
         regroup_days: 30,
         // Kriegsmüdigkeit (0..100): Zuwachs, wenn eine Gemeinschaft in einem Gefecht den
         // Bauwert ihrer gesamten Flotte verlöre. Kleinere Verluste zählen anteilig.
+        // Gemessen wird an der Flotte, wie sie in das Gefecht ging, mindestens aber am
+        // Bauwert der Startflotte: Der Verlust des letzten verbliebenen Schiffs wiegt so
+        // viel wie dieses Schiff, nicht so viel wie eine ganze Flotte.
         weariness_per_navy_lost: 20.0,
-        // Schwere Niederlage: Wer das Feld nicht hält und dabei mindestens diesen Anteil
-        // am Bauwert seiner gesamten Flotte verliert, dessen Kurse fallen um den Faktor
+        // Schwere Niederlage: Wer das Feld einem Gegner überlässt und dabei mindestens
+        // diesen Anteil verliert (am selben Maßstab), dessen Kurse fallen um den Faktor
         // defeat_shock (zum Vergleich: Kriegsausbruch finance.war_shock). Ein Gefecht
         // ohne Entscheidung ist keine Niederlage.
         heavy_defeat_share: 0.25,

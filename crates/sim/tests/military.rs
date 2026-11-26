@@ -934,14 +934,21 @@ fn a_fleet_restocks_at_home_from_the_market_and_the_treasury_pays() {
     sim.run_days(1);
     control.run_days(1);
 
-    // Ein Tagesanteil ist nachgefasst …
+    // Ein Tagesanteil ist nachgefasst. Die Gegenprobe liegt mit vollen Tanks im Dock und
+    // fasst nur nach, was sie an diesem Tag verbraucht hat: Der Unterschied ist, was die
+    // leere Flotte darüber hinaus bekam.
     let rate = balance.resupply_per_day;
+    let idle = balance.fuel_per_day;
+    assert!(idle > 0.0 && idle < rate);
     let (mut ammo_units, mut fuel_units) = (0.0, 0.0);
     for ship in &fleet(&sim, FleetId(0)).ships {
         assert!((ship.ammo - rate).abs() < 1e-6 && (ship.fuel - rate).abs() < 1e-6);
         let stats = &data.designs[ship.design as usize].stats;
         ammo_units += (rate * stats.ammo) as f64 * balance.ammo_goods;
-        fuel_units += (rate * stats.fuel) as f64 * balance.fuel_goods;
+        fuel_units += ((rate - idle) * stats.fuel) as f64 * balance.fuel_goods;
+    }
+    for ship in &fleet(&control, FleetId(0)).ships {
+        assert_eq!((ship.ammo, ship.fuel), (1.0, 1.0));
     }
     // … die Ware fehlt dem Markt, und die Staatskasse hat sie dem Kontor bezahlt.
     let ammo = balance.ammo_good_id;
@@ -950,7 +957,7 @@ fn a_fleet_restocks_at_home_from_the_market_and_the_treasury_pays() {
         economy(&control).market(home).stock_of(good) - economy(&sim).market(home).stock_of(good)
     };
     assert!((taken(ammo) - ammo_units).abs() < 1e-9);
-    assert!((taken(fuel) - fuel_units).abs() < 1e-9);
+    assert!((taken(fuel) - fuel_units).abs() < 1e-6);
     let paid = treasury(&control, me) - treasury(&sim, me);
     assert!(paid > 0);
     assert_eq!(
@@ -963,8 +970,9 @@ fn a_fleet_restocks_at_home_from_the_market_and_the_treasury_pays() {
     assert!((to_credits(paid) - price).abs() < 0.01);
     assert_eq!(money_drift(sim.world()), Some(0));
 
-    // Nach genügend Tagen sind Magazine und Tanks voll.
-    sim.run_days((1.0 / rate).ceil() as u64);
+    // Nach genügend Tagen sind Magazine und Tanks voll: Je Tag bleibt vom Nachfassen
+    // übrig, was die Flotte nicht selbst verbraucht.
+    sim.run_days((1.0 / (rate - idle)).ceil() as u64 + 1);
     assert!(
         fleet(&sim, FleetId(0))
             .ships
@@ -1011,16 +1019,23 @@ fn travelling_burns_fuel_and_there_is_no_resupply_abroad() {
         );
     }
 
-    // In der Fremde gibt es nichts: weder Munition noch Treibstoff.
+    // In der Fremde gibt es nichts: weder Munition noch Treibstoff. Die Tanks leeren sich
+    // weiter, auch wenn die Flotte nur liegt: je Tag um einen festen Anteil.
     drain(&mut sim, FleetId(0), true, false);
     assert!(
         stock_of(&sim, abroad, "munition") > 1.0,
         "Munition läge bereit"
     );
     sim.run_days(20);
+    let idle = expected - 20.0 * balance.fuel_per_day;
+    assert!(balance.fuel_per_day > 0.0 && idle > 0.0);
     for ship in &fleet(&sim, FleetId(0)).ships {
         assert_eq!(ship.ammo, 0.0);
-        assert!((ship.fuel - expected).abs() < 1e-3);
+        assert!(
+            (ship.fuel - idle).abs() < 1e-3,
+            "Tank {} statt {idle} nach zwanzig Tagen auf Station",
+            ship.fuel
+        );
     }
 
     // Zurück im eigenen System wird nachgefasst.
@@ -1218,10 +1233,13 @@ fn upkeep_moves_exactly_the_stated_amount_to_the_households_once_a_month() {
     let mut sim = with_player(16);
     let mut control = with_player(16);
     let cruiser = design("speer");
+    let home = home_of(&sim, me).1;
+    // Beide Partien laufen bis an den Monatsersten. Dann wächst in der einen die Flotte um
+    // vier Kreuzer; sonst sind beide gleich.
     for sim in [&mut sim, &mut control] {
-        sim.run_days(10);
+        sim.run_days(DAYS_PER_MONTH);
     }
-    // In der einen Partie wächst die Flotte um vier Kreuzer; sonst sind beide gleich.
+    assert_eq!(sim.clock().day(), DAYS_PER_MONTH);
     {
         let mut fleets = sim.world_mut().resource_mut::<Fleets>();
         for _ in 0..4 {
@@ -1234,22 +1252,15 @@ fn upkeep_moves_exactly_the_stated_amount_to_the_households_once_a_month() {
     assert!((to_credits(extra) - value * data.balance.military.upkeep_per_month).abs() < 0.002);
     assert!(extra > 0);
 
-    // Mitten im Monat kostet die größere Flotte nichts: Sold wird am Monatsanfang gezahlt.
-    let gap = |sim: &Headless, control: &Headless| {
-        (
-            treasury(control, me) - treasury(sim, me),
-            households(sim, me) - households(control, me),
-        )
-    };
-    sim.run_days(DAYS_PER_MONTH - 10);
-    control.run_days(DAYS_PER_MONTH - 10);
-    assert_eq!(sim.clock().day(), DAYS_PER_MONTH);
-    assert_eq!(gap(&sim, &control), (0, 0));
-
-    // Am Monatsanfang fließt genau der Mehrbetrag aus der Staatskasse an die Haushalte.
-    sim.run_days(1);
-    control.run_days(1);
-    assert_eq!(gap(&sim, &control), (extra, extra));
+    // Im Takt des Monatsersten fließt genau der Mehrbetrag als Sold an die Haushalte.
+    // Darüber hinaus kostet die größere Flotte an diesem Tag nur den Treibstoff, den vier
+    // Kreuzer im Dock verbrauchen: Den zahlt die Staatskasse dem Kontor.
+    sim.tick();
+    control.tick();
+    let fuel = economy(&sim).market(home).cash - economy(&control).market(home).cash;
+    assert!(fuel > 0 && fuel < extra);
+    assert_eq!(households(&sim, me) - households(&control, me), extra);
+    assert_eq!(treasury(&control, me) - treasury(&sim, me), extra + fuel);
     assert_eq!(fleets(&sim).arrears_of(me), 0.0);
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
@@ -1284,7 +1295,12 @@ fn an_unaffordable_fleet_empties_the_treasury_and_leaves_arrears() {
     let researched = control.research().get(me).unwrap().spent_last_month;
     assert!(researched > 0, "in der Gegenprobe wird geforscht");
     assert_eq!(sim.research().get(me).unwrap().spent_last_month, 0);
-    let available = treasury(&control, me) + usual + researched;
+    // Nach dem Sold fasst die Gegenprobe noch den Treibstoff des Tages nach; mit leerer
+    // Kasse gibt es auch den nicht.
+    let home = home_of(&sim, me).1;
+    let fuel = economy(&control).market(home).cash - economy(&sim).market(home).cash;
+    assert!(fuel > 0);
+    let available = treasury(&control, me) + usual + researched + fuel;
     assert_eq!(
         households(&sim, me) - households(&control, me),
         available - usual - researched,
@@ -2786,7 +2802,11 @@ fn losses_wear_a_community_down_and_a_heavy_defeat_moves_its_share_prices() {
     assert!(due > 0 && spared > 0);
     sim.tick();
     intact.tick();
-    assert_eq!(treasury(&sim, me) - treasury(&intact, me), spared);
+    // Gespart ist der Sold der verlorenen Schiffe und der Treibstoff, den sie im Dock
+    // verbraucht hätten.
+    let fuel = economy(&intact).market(home).cash - economy(&sim).market(home).cash;
+    assert!(fuel > 0 && fuel < spared);
+    assert_eq!(treasury(&sim, me) - treasury(&intact, me), spared + fuel);
     assert_eq!(households(&intact, me) - households(&sim, me), spared);
     assert_eq!(fleets(&sim).arrears_of(me), 0.0);
 
@@ -4125,6 +4145,213 @@ fn a_fleet_that_gave_way_does_not_drift_back_into_the_same_battle() {
     let report = fight_out(&mut sim, target);
     assert_aftermath(&sim, &report);
     assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+// --- 14b. Station fern der Heimat, Verluste einer aufgeriebenen Flotte -----------------------
+
+#[test]
+fn a_blockade_far_from_home_runs_dry_without_supply() {
+    let data = data();
+    let balance = &data.balance.military;
+    let (a, b) = (PolityId(0), PolityId(1));
+    let (ours, theirs) = (FleetId(0), FleetId(1));
+    let mut sim = with_player(60);
+    let (own_home, home) = (home_of(&sim, a).1, home_of(&sim, b).1);
+    // Wie zuvor: Die Heimatflotte ist fort, die Angreifer sperren das Heimatsystem.
+    let approach = last_stop(&sim, ours, home);
+    let away = sim
+        .galaxy()
+        .neighbors(home)
+        .iter()
+        .map(|neighbor| neighbor.system)
+        .find(|system| *system != approach)
+        .expect("Szenario neu wählen: Das Heimatsystem braucht einen zweiten Nachbarn");
+    march(&mut sim, theirs, away);
+    sim.issue(
+        a,
+        SimCommand::SetStance {
+            fleet: ours,
+            stance: Stance::Blockade,
+        },
+    );
+    let left = sim.clock().day();
+    march(&mut sim, ours, home);
+    let way_out = sim.clock().day() - left;
+    sim.issue(a, SimCommand::DeclareWar { target: b });
+    sim.run_days(2);
+    assert!(fleets(&sim).is_blockaded(home));
+    let arrived = fleet(&sim, ours).min_fuel();
+    assert!(
+        arrived > 0.3 && arrived < 1.0,
+        "Tank bei der Ankunft: {arrived}"
+    );
+
+    // Niemand versorgt die Flotte dort. Jeden Tag sinkt der Tank um denselben Anteil; die
+    // Sperre hält, solange er nicht leer ist, und fällt mit dem letzten Tropfen.
+    let mut days = 0u64;
+    let mut last = arrived;
+    while fleet(&sim, ours).has_fuel() {
+        assert!(fleets(&sim).is_blockaded(home), "Tag {days} auf Station");
+        sim.run_days(1);
+        days += 1;
+        let now = fleet(&sim, ours).min_fuel();
+        assert!(now < last, "kein Nachschub in der Fremde");
+        last = now;
+        assert!(days < 2 * DAYS_PER_YEAR);
+    }
+    let expected = (arrived / balance.fuel_per_day) as u64;
+    assert!(
+        days.abs_diff(expected) <= 3,
+        "{days} Tage auf Station, erwartet rund {expected}"
+    );
+    assert!(
+        days > 60 && days < DAYS_PER_YEAR,
+        "eine Sperre hält Monate, aber kein Jahr: {days} Tage"
+    );
+    sim.run_days(1);
+    assert!(
+        !fleets(&sim).is_blockaded(home),
+        "ohne Treibstoff keine Sperre"
+    );
+    assert!(fleet(&sim, ours).alive && fleet(&sim, ours).system == home);
+    assert_eq!(battles(&sim).next_id, 0, "gekämpft wurde nie");
+    sim.run_days(30);
+    assert!(!fleets(&sim).is_blockaded(home));
+
+    // Der Heimweg ist ein Kriechen: mit leeren Tanks dauert er ein Vielfaches des Hinwegs.
+    // Zu Hause fasst die Flotte nach und ist wieder zu gebrauchen.
+    let turned = sim.clock().day();
+    march(&mut sim, ours, own_home);
+    let way_back = sim.clock().day() - turned;
+    assert!(
+        way_back >= 2 * way_out,
+        "Hinweg {way_out} Tage, Heimweg {way_back}"
+    );
+    sim.run_days(5);
+    assert!(fleet(&sim, ours).has_fuel());
+    sim.run_days(30);
+    assert!(fleet(&sim, ours).min_fuel() > 0.9);
+    assert_eq!(money_drift(sim.world()), Some(0));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+#[test]
+fn losses_are_weighed_against_a_stable_measure_not_against_what_is_left() {
+    use sim::harness::{ScriptedAct, ScriptedEvent, WarScript};
+    let data = data();
+    let balance = &data.balance.military;
+    let start = balance.starting_fleet_value;
+    // Drei Kriege, und alle zehn Monate marschieren die Flotten wieder aufeinander zu: Was
+    // vom ersten Gefecht übrig ist, kämpft weiter, bis manche Flotte aufgerieben ist.
+    let mut events = Vec::new();
+    for round in 0..6u64 {
+        for pair in [(0, 1), (2, 3), (4, 5)] {
+            let (a, b) = if round % 2 == 0 {
+                pair
+            } else {
+                (pair.1, pair.0)
+            };
+            events.push(ScriptedEvent {
+                day: 30 + round * 300,
+                act: ScriptedAct::War,
+                a: PolityId(a),
+                b: PolityId(b),
+            });
+        }
+    }
+    let script = WarScript::new(events);
+    let navy = |sim: &Headless, polity: PolityId| navy_value(sim, polity);
+    // Fälle, in denen eine schon geschwächte Flotte weiter verlor und sich der Zuwachs auf
+    // den Punkt nachrechnen ließ.
+    let mut worn_down = 0;
+    let mut battles_seen = 0;
+    for seed in 0..4u64 {
+        let mut sim = observer(seed);
+        let polities = sim.polities().list.len();
+        let mut reported = 0;
+        for day in 0..6 * DAYS_PER_YEAR {
+            let before: Vec<f64> = (0..polities)
+                .map(|index| weariness(&sim, PolityId::from_index(index)))
+                .collect();
+            script.run_until(&mut sim, day + 1, false);
+            let reports =
+                battles(&sim).reports[reported.min(battles(&sim).reports.len())..].to_vec();
+            reported = battles(&sim).next_id as usize - battles(&sim).active.len();
+            if reports.is_empty() {
+                continue;
+            }
+            battles_seen += reports.len();
+            // Am Monatsersten schreibt auch der Monatsabschluss die Kriegsmüdigkeit fort:
+            // Dann lässt sich der Beitrag des Gefechts nicht auf den Punkt trennen.
+            let month_start = (day + 1).is_multiple_of(DAYS_PER_MONTH);
+            for index in 0..polities {
+                let polity = PolityId::from_index(index);
+                let lost: f64 = reports
+                    .iter()
+                    .flat_map(|report| report.sides.iter())
+                    .filter(|side| side.owner == polity)
+                    .map(|side| side.lost_value as f64)
+                    .sum();
+                if lost <= 0.0 {
+                    continue;
+                }
+                // Die Flotte, wie sie in das Gefecht ging: was blieb, und was verloren ist.
+                let went_in = navy(&sim, polity) + lost;
+                let share = lost / went_in.max(start);
+                let rise = weariness(&sim, polity) - before[index];
+                let expected = balance.weariness_per_navy_lost * share;
+                if !month_start && weariness(&sim, polity) < 100.0 && reports.len() == 1 {
+                    assert!(
+                        (rise - expected).abs() < 0.05,
+                        "Seed {seed}, Tag {day}: Kriegsmüdigkeit +{rise:.2} statt +{expected:.2} \
+                         bei {lost:.0} von {went_in:.0} Credits"
+                    );
+                    // Eine geschwächte Flotte: Gemessen an dem, was von ihr übrig war,
+                    // wöge derselbe Verlust um ein Viertel schwerer oder mehr.
+                    if went_in < 0.8 * start {
+                        worn_down += 1;
+                        assert!(rise < 0.81 * balance.weariness_per_navy_lost * lost / went_in);
+                    }
+                }
+                // Eine schwere Niederlage setzt einen schweren Verlust voraus, gemessen am
+                // selben Maßstab.
+                if share < balance.heavy_defeat_share {
+                    let name = &sim.polities().get(polity).name;
+                    let shaken_now = sim
+                        .world()
+                        .resource::<Chronicle>()
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.text.contains("Die Niederlage bei")
+                                && entry.text.contains(name.as_str())
+                        })
+                        .count();
+                    let shaken_then = sim
+                        .world()
+                        .resource::<Chronicle>()
+                        .entries
+                        .iter()
+                        .take_while(|entry| entry.tick < day * TICKS_PER_DAY)
+                        .filter(|entry| {
+                            entry.text.contains("Die Niederlage bei")
+                                && entry.text.contains(name.as_str())
+                        })
+                        .count();
+                    assert_eq!(
+                        shaken_now, shaken_then,
+                        "Seed {seed}, Tag {day}: kleine Verluste sind keine schwere Niederlage"
+                    );
+                }
+            }
+        }
+        assert_eq!(check_invariants(sim.world()), Ok(()));
+    }
+    assert!(battles_seen >= 12, "nur {battles_seen} Gefechte");
+    assert!(
+        worn_down >= 3,
+        "Szenario neu wählen: nur {worn_down}-mal verlor eine schon geschwächte Flotte weiter"
+    );
 }
 
 // --- 15. Mehr als zwei Parteien, Abspaltung, Erlöschen ---------------------------------------

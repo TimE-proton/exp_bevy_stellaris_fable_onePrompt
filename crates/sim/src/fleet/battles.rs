@@ -1360,14 +1360,16 @@ fn conclude(
             continue;
         }
         // Die Flotte der Gemeinschaft, wie sie in das Gefecht ging: was sie jetzt noch
-        // hat, und was sie darin verlor.
+        // hat, und was sie darin verlor. Gemessen wird mindestens an einer Startflotte:
+        // Sonst wöge das letzte Schiff einer aufgeriebenen Flotte so schwer wie einst die
+        // ganze, und jede einzelne Korvette wäre eine schwere Niederlage.
         let navy = owner.lost
             + fleets
                 .of(*polity)
                 .flat_map(|fleet| fleet.ships.iter())
                 .map(|ship| material_value(data, ship))
                 .sum::<f64>();
-        let share = (owner.lost / navy).clamp(0.0, 1.0);
+        let share = loss_share(data, owner.lost, navy);
         if let Some(state) = finance.polities.get_mut(polity.index()) {
             state.war_weariness =
                 (state.war_weariness + balance.weariness_per_navy_lost * share).clamp(0.0, 100.0);
@@ -1513,6 +1515,18 @@ fn conclude(
         battles.reports.remove(0);
     }
     battles.reports.push(report);
+}
+
+/// Anteil eines Verlusts an der Flotte einer Gemeinschaft (0..1): der Maßstab für
+/// Kriegsmüdigkeit und schwere Niederlage. `navy` ist der Bauwert ihrer ganzen Flotte vor
+/// dem Gefecht; gemessen wird mindestens am Bauwert der Startflotte.
+pub fn loss_share(data: &GameData, lost: f64, navy: f64) -> f64 {
+    let reference = navy.max(data.balance.military.starting_fleet_value);
+    if reference > 0.0 {
+        (lost / reference).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Bilanz einer Gemeinschaft über alle ihre Flotten in einem Gefecht.
@@ -2969,6 +2983,86 @@ mod tests {
         assert_eq!(first.route.len(), 1);
         assert_eq!(first.route, second.route);
         assert!(settled.shaken());
+    }
+
+    #[test]
+    fn the_last_ship_of_a_worn_down_navy_weighs_what_it_is_worth() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        let balance = &data.balance.military;
+        let start = balance.starting_fleet_value;
+        let full = fleets.list[0].build_value(&data);
+        assert!((start - full).abs() < 1e-6, "die Startflotte ist das Maß");
+        // Der Maßstab: der Bauwert der Flotte vor dem Gefecht, mindestens eine Startflotte.
+        assert_eq!(loss_share(&data, start, start), 1.0);
+        assert_eq!(loss_share(&data, start, 10.0 * start), 0.1);
+        assert_eq!(loss_share(&data, 0.5 * start, 0.5 * start), 0.5);
+        assert_eq!(loss_share(&data, 0.0, 0.0), 0.0);
+        assert_eq!(loss_share(&data, 3.0 * start, start), 1.0);
+
+        // Gemeinschaft 1 ist auf eine einzige Korvette zusammengeschmolzen und verliert
+        // auch die gegen eine ganze Flotte.
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        let corvette = fleets.list[1].ships.pop().unwrap();
+        fleets.list[1].ships = vec![corvette];
+        fleets.refresh(&data);
+        let value = fleets.list[1].build_value(&data);
+        assert!(value < balance.heavy_defeat_share * start);
+        let outcome = |fleets: &Fleets, wipe_out: usize| {
+            let mut fleets = fleets.clone();
+            let mut battle = duel(&data, &mut fleets, 0, 1);
+            assert!(battle.is_hostile(0, 1));
+            for ship in &mut battle.ships {
+                if ship.side as usize == wipe_out {
+                    ship.status = ShipStatus::Destroyed;
+                }
+            }
+            battle.combatants[wipe_out].lost_value = battle.combatants[wipe_out].initial_value;
+            battle.finished = true;
+            let mut finance = Finance {
+                polities: vec![Default::default(); polities.list.len()],
+                ..Default::default()
+            };
+            let mut chronicle = Chronicle::default();
+            let mut battles = Battles {
+                next_id: 1,
+                ..Default::default()
+            };
+            conclude(
+                &battle,
+                &galaxy,
+                &mut fleets,
+                &mut battles,
+                &diplomacy,
+                &mut finance,
+                &mut Research::default(),
+                &Logistics::default(),
+                &polities,
+                &mut chronicle,
+                &data,
+                END_TICK,
+            );
+            let shaken = chronicle
+                .entries
+                .iter()
+                .any(|entry| entry.text.contains("Niederlage"));
+            (
+                finance.polities[0].war_weariness,
+                finance.polities[1].war_weariness,
+                shaken,
+            )
+        };
+        // Das wiegt so viel wie die Korvette an einer Startflotte, nicht so viel wie eine
+        // ganze Flotte, und es ist keine schwere Niederlage.
+        let (_, weary, shaken) = outcome(&fleets, 1);
+        let expected = balance.weariness_per_navy_lost * value / start;
+        assert!((weary - expected).abs() < 1e-6, "{weary} statt {expected}");
+        assert!(weary < 0.2 * balance.weariness_per_navy_lost);
+        assert!(!shaken);
+        // Verliert dagegen die andere Seite ihre ganze Startflotte, zählt das voll.
+        let (weary, _, shaken) = outcome(&fleets, 0);
+        assert!((weary - balance.weariness_per_navy_lost).abs() < 1e-6);
+        assert!(shaken);
     }
 
     #[test]

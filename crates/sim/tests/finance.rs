@@ -578,8 +578,24 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
         }
     }
     assert!(blockaded.world().resource::<Fleets>().is_blockaded(system));
-    blockaded.run_days(DAYS_PER_YEAR);
-    control.run_days(DAYS_PER_YEAR);
+    // Die Sperre steht, solange der Treibstoff reicht: Fern der Heimat fasst die Flotte
+    // nichts nach. Gemessen wird, solange sie steht, kurz bevor die Tanks leer sind.
+    let burn = data().balance.military.fuel_per_day;
+    let mut held = 0;
+    loop {
+        let fleets = blockaded.world().resource::<Fleets>();
+        if !fleets.is_blockaded(system) || fleets.list[0].min_fuel() < 3.0 * burn {
+            break;
+        }
+        blockaded.run_days(1);
+        control.run_days(1);
+        held += 1;
+    }
+    assert!(blockaded.world().resource::<Fleets>().is_blockaded(system));
+    assert!(
+        held >= 100,
+        "die Sperre hielt nur {held} Tage; für die Messung braucht es Monate"
+    );
 
     let local = |sim: &Headless, id: &IssuerId| match id {
         IssuerId::Firm { planet, .. } => sim.galaxy().planet(*planet).system == system,
@@ -609,17 +625,16 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
         closed < open * 0.7,
         "Kontor gesperrt {closed:.0}, offen {open:.0}"
     );
-    // Kriegsmüdigkeit baut sich auf beiden Seiten auf.
-    assert!(
-        blockaded
+    // Kriegsmüdigkeit baut sich auf beiden Seiten auf, Monat für Monat, auch nachdem die
+    // Sperre geendet hat: Der Krieg geht weiter.
+    blockaded.run_days(DAYS_PER_YEAR - held);
+    for side in [attacker, victim] {
+        let weariness = blockaded
             .world()
             .resource::<Finance>()
-            .polity(victim)
-            .war_weariness
-            > 5.0
-    );
-    let _ = (
-        blockaded.world().resource::<Galaxy>(),
-        blockaded.world().resource::<Polities>(),
-    );
+            .polity(side)
+            .war_weariness;
+        assert!(weariness > 5.0, "{side:?}: Kriegsmüdigkeit {weariness:.1}");
+    }
+    assert!(check_invariants(blockaded.world()).is_ok());
 }

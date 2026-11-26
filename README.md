@@ -210,8 +210,12 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   System, in dem sie eine Welt besitzt, auch wenn dort eine andere die Mehrheit stellt.
   Liegt sie mit dieser im Krieg, verkauft deren Kontor ihr nichts.
 - **Nachschub.** Im eigenen, nicht blockierten Gebiet fasst eine Flotte Munition und
-  Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff;
-  mit leerem Tank schleppt sich eine Flotte nur noch mit einem Bruchteil ihrer Fahrt.
+  Treibstoff vom Markt nach, bezahlt aus der Staatskasse. Marschieren kostet Treibstoff,
+  und auch wer in einem System liegt, verbraucht täglich einen Anteil seines Tanks
+  (`fuel_per_day`). Zu Hause kauft der Staat ihn laufend nach; fern der Heimat läuft eine
+  Flotte in Monaten trocken. Mit leerem Tank schleppt sie sich nur noch mit einem
+  Bruchteil ihrer Fahrt, und sie sperrt kein System, kapert nicht und gibt kein Geleit:
+  Eine Blockade weit von zu Hause hält nur, wer seine Flotten ablöst.
 - **Instandsetzung.** Im eigenen Gebiet mit Werft, gegen Rumpfsegmente vom Markt; verlorene
   Bordjäger kommen aus ihren eigenen Bauteilen.
 - **Sold.** Monatlich ein Anteil am Bauwert aller Schiffe, aus der Staatskasse an die
@@ -298,8 +302,11 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   kämpft: Ein Entsatz muss sie schlagen, anzukommen und wieder abzudrehen öffnet das
   System nicht. Ein verteidigter Orbit bleibt offen, solange die Verteidiger kämpfen.
 - **Folgen.** Verluste heben die Kriegsmüdigkeit im Verhältnis zum verlorenen Anteil an
-  der ganzen Flotte, und mit ihr steigen Anleihezinsen und Unruhe in den Regionen. Eine
-  schwere Niederlage drückt die Kurse aller Betriebe der Gemeinschaft. Was verschossen und
+  der ganzen Flotte, und mit ihr steigen Anleihezinsen und Unruhe in den Regionen.
+  Gemessen wird an der Flotte, wie sie in das Gefecht ging, mindestens aber an einer
+  Startflotte: Das letzte Schiff einer aufgeriebenen Flotte wiegt, was es wert ist. Eine
+  schwere Niederlage (das Feld einem Gegner überlassen und dabei einen großen Anteil
+  verloren) drückt die Kurse aller Betriebe der Gemeinschaft. Was verschossen und
   beschädigt wurde, kauft der Staat zu Hause am Markt nach. Im System bleibt ein
   Trümmerfeld, das über die Jahre verblasst. Die Gegner kennen die Technik des jeweils
   anderen danach besser.
