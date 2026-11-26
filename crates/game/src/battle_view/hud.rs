@@ -923,6 +923,56 @@ pub fn collect_markers(battle: &Battle, frame: &ViewFrame, projector: &Projector
     markers
 }
 
+/// Markierung eines Wracks im Bildschirmraum: ein kleines Kreuz.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WreckMarker {
+    pub center: egui::Pos2,
+    /// Halbe Kantenlänge des Kreuzes in Pixeln.
+    pub half: f32,
+    pub alpha: f32,
+    pub side: u16,
+}
+
+/// Berechnet die Markierungen der Wracks, die im Bild liegen und zu klein erscheinen, um
+/// als Rumpf erkannt zu werden. So bleibt aus der Ferne zu lesen, wo ein Gefecht seine
+/// Opfer gefordert hat; aus der Nähe sprechen Wrack und Trümmer für sich.
+pub fn collect_wreck_markers(
+    battle: &Battle,
+    frame: &ViewFrame,
+    projector: &Projector,
+) -> Vec<WreckMarker> {
+    // Zwischen zwei Takten liegt die Anzeige noch ein Stück vor dem letzten Takt.
+    let back = if battle.finished {
+        0.0
+    } else {
+        (1.0 - frame.alpha) * frame.tick_seconds
+    };
+    let pixel = projector.pixel();
+    battle
+        .wrecks
+        .iter()
+        .filter_map(|wreck| {
+            let position = super::to_world(wreck.pos - wreck.vel * back);
+            let (screen, depth) = projector.project(position)?;
+            let margin = 20.0;
+            if screen.x < -margin
+                || screen.y < -margin
+                || screen.x > projector.size.x + margin
+                || screen.y > projector.size.y + margin
+            {
+                return None;
+            }
+            let alpha = marker_alpha(2.0 * wreck.radius / (pixel * depth));
+            (alpha > 0.0).then(|| WreckMarker {
+                center: egui::pos2(screen.x, screen.y),
+                half: marker_outline(wreck.class).1 * 0.55,
+                alpha,
+                side: wreck.side,
+            })
+        })
+        .collect()
+}
+
 /// Zeichnet Markierungen, Auswahlklammern und Namen auf die Hintergrundebene, also unter
 /// alle Tafeln.
 fn markers(ctx: &egui::Context, refs: &HudRefs, battle: &Battle) {
@@ -931,6 +981,24 @@ fn markers(ctx: &egui::Context, refs: &HudRefs, battle: &Battle) {
     let with_alpha = |color: Color32, alpha: f32| {
         Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (alpha * 255.0) as u8)
     };
+    // Wracks zuerst, unter den Markierungen der Schiffe: gedämpfte Parteifarbe.
+    for wreck in collect_wreck_markers(battle, refs.frame, &refs.frame.projector) {
+        let side = color32(refs.feed.side_color(wreck.side as usize));
+        let dim = |channel: u8| (channel as f32 * 0.55 + 38.0) as u8;
+        let stroke = Stroke::new(
+            1.3,
+            with_alpha(
+                Color32::from_rgb(dim(side.r()), dim(side.g()), dim(side.b())),
+                wreck.alpha * 0.85,
+            ),
+        );
+        let (a, b) = (
+            egui::vec2(wreck.half, wreck.half),
+            egui::vec2(wreck.half, -wreck.half),
+        );
+        painter.line_segment([wreck.center - a, wreck.center + a], stroke);
+        painter.line_segment([wreck.center - b, wreck.center + b], stroke);
+    }
     let mut labels = 0;
     for marker in &found {
         let ship = &battle.ships[marker.ship as usize];
@@ -1706,6 +1774,63 @@ mod tests {
         assert_eq!(own.alpha, 0.0);
         assert!(own.points.is_empty());
         assert!(own.pixels > 200.0);
+    }
+
+    #[test]
+    fn wrecks_are_marked_from_afar() {
+        let scene = Scene::finished();
+        let battle = &scene.battle;
+        assert!(
+            battle.wrecks.len() > 5,
+            "das Gefecht hat Wracks hinterlassen"
+        );
+        let projector = &scene.frame.projector;
+        // Aus der Übersicht ist jedes Wrack im Bild klein und trägt ein Kreuz, dort, wo es
+        // liegt.
+        let marks = collect_wreck_markers(battle, &scene.frame, projector);
+        let on_screen: Vec<_> = battle
+            .wrecks
+            .iter()
+            .filter_map(|wreck| projector.project(to_world(wreck.pos)))
+            .map(|(at, _)| at)
+            .filter(|at| at.x > 0.0 && at.x < 1600.0 && at.y > 0.0 && at.y < 900.0)
+            .collect();
+        assert!(on_screen.len() > 5);
+        assert!(marks.len() >= on_screen.len());
+        for at in &on_screen {
+            let mark = marks
+                .iter()
+                .find(|mark| {
+                    (mark.center.x - at.x).abs() < 0.5 && (mark.center.y - at.y).abs() < 0.5
+                })
+                .expect("Kreuz am Ort des Wracks");
+            assert!(mark.alpha > 0.8 && mark.half >= 1.5 && mark.half < 6.0);
+        }
+        // Aus der Nähe verschwindet das Kreuz: Das Wrack selbst ist zu erkennen.
+        let wreck = &battle.wrecks[0];
+        let at = to_world(wreck.pos);
+        let near = Transform::from_translation(
+            at + Vec3::new(0.0, wreck.radius * 2.0, wreck.radius * 4.0),
+        )
+        .looking_at(at, Vec3::Y);
+        let close = view_frame(&scene.feed, &near);
+        let marks = collect_wreck_markers(battle, &close, &close.projector);
+        assert!(
+            marks
+                .iter()
+                .all(|mark| mark.center.distance(egui::pos2(800.0, 450.0)) > 2.0),
+            "das nahe Wrack trägt noch ein Kreuz"
+        );
+        // Die Hilfe erklärt das Zeichen.
+        let mut open = true;
+        let mut screen = Screen::new(1600.0, 900.0);
+        let help = screen.settle(|ui| panels::help_window(ui.ctx(), &mut open, true));
+        assert!(help.text("Kreuz = Wrack").is_some());
+        // Die Tafeln zeichnen mit Wracks, ohne etwas auszulösen.
+        let mut actions = Vec::new();
+        let refs = scene.refs(None);
+        screen.settle(|ui| battle_hud(ui, &refs, &mut actions));
+        assert!(actions.is_empty());
     }
 
     #[test]

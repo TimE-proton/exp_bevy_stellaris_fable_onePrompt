@@ -388,16 +388,27 @@ fn ships_in_view(battle: &Battle) -> impl Iterator<Item = &sim::battle::BattleSh
 /// Halbmesser um die Feldmitte, in dem alle Schiffe auf dem Feld mit ganzem Rumpf liegen,
 /// mindestens das Mindestmaß der Übersicht. Auch jenseits des Feldrands: Fliehende sind
 /// bis dorthin noch im Gefecht, und große Linien stehen vor dem ersten Takt weit draußen.
-pub fn overview_extent(battle: &Battle) -> f32 {
-    ships_in_view(battle)
+/// Nach dem Ende gehört auch das Trümmerfeld dazu, soweit es auf dem Feld (Halbmesser
+/// `field`) liegt.
+pub fn overview_extent(battle: &Battle, field: f32) -> f32 {
+    let ships = ships_in_view(battle)
         .map(|ship| ship.pos.length() + ship.radius)
-        .fold(OVERVIEW_MIN, f32::max)
+        .fold(OVERVIEW_MIN, f32::max);
+    if !battle.finished {
+        return ships;
+    }
+    battle
+        .wrecks
+        .iter()
+        .map(|wreck| wreck.pos.length() + wreck.radius)
+        .filter(|reach| *reach <= field)
+        .fold(ships, f32::max)
 }
 
 /// Die Übersicht: schräg von Süden auf das Feld, so nah, dass gerade noch jedes Schiff auf
 /// dem Feld zu sehen ist.
-pub fn overview_view(battle: &Battle, size: Vec2) -> Transform {
-    overview_transform(overview_extent(battle), size)
+pub fn overview_view(battle: &Battle, field: f32, size: Vec2) -> Transform {
+    overview_transform(overview_extent(battle, field), size)
 }
 
 /// Kleinster Kreis um die Mitte der Schiffe auf dem Feld, der sie alle enthält.
@@ -601,6 +612,7 @@ fn tame_free_camera(
     wants: Res<EguiWantsInput>,
     mouse: WorldMouse,
     feed: Res<BattleFeed>,
+    data: Res<sim::GameData>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
     mut kept_speed: Local<Option<f32>>,
@@ -624,7 +636,9 @@ fn tame_free_camera(
     // so weit zurück, wie die Übersicht es braucht.
     if transform.translation.length() > MAX_DISTANCE {
         let overview = feed.battle().map_or(0.0, |battle| {
-            overview_view(battle, window.size()).translation.length()
+            overview_view(battle, data.balance.battle.exit_radius, window.size())
+                .translation
+                .length()
         });
         let limit = MAX_DISTANCE.max(overview * 1.05);
         if transform.translation.length() > limit {
@@ -688,6 +702,7 @@ fn hotkeys(
 fn apply_requests(
     mut requests: MessageReader<CameraRequest>,
     feed: Res<BattleFeed>,
+    data: Res<sim::GameData>,
     frame: Res<ViewFrame>,
     selected: Res<SelectedShip>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -726,7 +741,7 @@ fn apply_requests(
         let target = match *request {
             CameraRequest::Overview => {
                 options.follow = false;
-                Some(overview_view(battle, size))
+                Some(overview_view(battle, data.balance.battle.exit_radius, size))
             }
             CameraRequest::Focus => match selected.0 {
                 Some(ship) => ship_view(ship),
@@ -1005,6 +1020,9 @@ mod tests {
         })
     }
 
+    /// Halbmesser des Gefechtsfelds in den Spieldaten.
+    const FIELD: f32 = 2400.0;
+
     /// Bildgrößen, mit denen die Blicke zurechtkommen müssen: breit, schmal, hochkant.
     const SIZES: [Vec2; 4] = [
         Vec2::new(1600.0, 900.0),
@@ -1102,7 +1120,8 @@ mod tests {
                         .map(|ship| ship.pos.length())
                         .fold(farthest, f32::max);
                     for size in SIZES {
-                        let projector = Projector::new(&overview_view(&battle, size), FOV, size);
+                        let projector =
+                            Projector::new(&overview_view(&battle, FIELD, size), FOV, size);
                         let outside = ships()
                             .filter(|ship| !in_view(&projector, ship.pos))
                             .count();
@@ -1142,8 +1161,8 @@ mod tests {
         // Übersicht rückt entsprechend näher.
         let (start, _) = stepped(&data, MIXED, 0);
         let (fight, _) = stepped(&data, MIXED, 400);
-        let wide = overview_view(&start, size);
-        let tight = overview_view(&fight, size);
+        let wide = overview_view(&start, FIELD, size);
+        let tight = overview_view(&fight, FIELD, size);
         assert!(
             tight.translation.length() < wide.translation.length() * 0.8,
             "{} gegen {}",
@@ -1159,7 +1178,7 @@ mod tests {
         // abgetriebenes Schiff zieht sie nicht ins Unendliche.
         let mut empty = start.clone();
         empty.ships.clear();
-        let least = overview_view(&empty, size);
+        let least = overview_view(&empty, FIELD, size);
         assert!(
             least
                 .translation
@@ -1170,8 +1189,29 @@ mod tests {
         let mut adrift = start.clone();
         adrift.ships[0].pos = V2::new(90_000.0, 0.0);
         assert!(
-            overview_view(&adrift, size).translation.length() < wide.translation.length() * 1.01
+            overview_view(&adrift, FIELD, size).translation.length()
+                < wide.translation.length() * 1.01
         );
+        // Nach dem Ende gehört das Trümmerfeld zur Übersicht, soweit es auf dem Feld liegt:
+        // Sie zeigt dann mehr als nur die Überlebenden.
+        let (mut ended, _) = stepped(&data, MIXED, 0);
+        while !ended.finished {
+            ended.step(&data);
+        }
+        let wrecks_reach = ended
+            .wrecks
+            .iter()
+            .map(|wreck| wreck.pos.length() + wreck.radius)
+            .filter(|reach| *reach <= FIELD)
+            .fold(0.0, f32::max);
+        assert!(wrecks_reach > OVERVIEW_MIN);
+        assert!(overview_extent(&ended, FIELD) >= wrecks_reach);
+        let mut running = ended.clone();
+        running.finished = false;
+        assert!(overview_extent(&running, FIELD) <= overview_extent(&ended, FIELD));
+        // Ein Wrack, das weit vom Feld getrieben ist, zählt nicht.
+        ended.wrecks[0].pos = V2::new(0.0, FIELD * 3.0);
+        assert!(overview_extent(&ended, FIELD) <= FIELD);
     }
 
     /// Welt ohne Fenster und Grafikkarte: ein Gefecht im Feed, die Schlachtkamera und ein
@@ -1182,7 +1222,7 @@ mod tests {
 
         let data = data();
         let (battle, feed) = stepped(&data, MIXED, ticks);
-        let view = overview_view(&battle, Vec2::new(1600.0, 900.0));
+        let view = overview_view(&battle, FIELD, Vec2::new(1600.0, 900.0));
         let frame = ViewFrame {
             epoch: Some(feed.epoch),
             alpha: 1.0,

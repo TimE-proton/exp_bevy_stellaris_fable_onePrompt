@@ -27,8 +27,8 @@ pub const SHIELD_LEVELS: usize = 3;
 /// Bauteile einer Schiffsklasse, noch ohne Parteifarbe.
 pub struct ClassAssets {
     pub hull: MeshData,
-    /// Vorder- und Achterteil eines Großkampfschiffs.
-    pub halves: Option<(MeshData, MeshData)>,
+    /// Vorder- und Achterteil: Ein zerstörtes Schiff liegt in zwei Teilen da.
+    pub halves: (MeshData, MeshData),
     pub glow: Handle<Mesh>,
 }
 
@@ -83,7 +83,7 @@ impl BattleAssets {
             .map(|class| {
                 let model = ClassModel::of(*class);
                 ClassAssets {
-                    halves: class.is_capital().then(|| model.halves()),
+                    halves: model.halves(),
                     glow: meshes.add(model.glow().to_mesh()),
                     hull: model.hull,
                 }
@@ -98,8 +98,9 @@ impl BattleAssets {
             metallic: 0.25,
             ..default()
         };
+        // Verrußt, aber noch so hell, dass ein Wrack aus der Übersicht zu erkennen ist.
         let wreck = |glow: LinearRgba| StandardMaterial {
-            base_color: Color::linear_rgb(0.2, 0.185, 0.18),
+            base_color: Color::linear_rgb(0.46, 0.4, 0.36),
             emissive: glow,
             perceptual_roughness: 0.85,
             ..default()
@@ -129,12 +130,13 @@ impl BattleAssets {
             wreck: [
                 materials.add(wreck(LinearRgba::rgb(0.95, 0.24, 0.04))),
                 materials.add(wreck(LinearRgba::rgb(0.22, 0.05, 0.008))),
-                // Auch ausgekühlt glimmt ein Wrack schwach nach, sonst verschwände es vor dem
-                // schwarzen Himmel.
-                materials.add(wreck(LinearRgba::rgb(0.012, 0.004, 0.002))),
+                // Auch ausgekühlt glimmt ein Wrack nach: Seine Schattenseite verschwände
+                // sonst vor dem schwarzen Himmel.
+                materials.add(wreck(LinearRgba::rgb(0.05, 0.026, 0.014))),
             ],
             debris_material: materials.add(StandardMaterial {
-                base_color: Color::linear_rgb(0.16, 0.155, 0.155),
+                base_color: Color::linear_rgb(0.52, 0.48, 0.45),
+                emissive: LinearRgba::rgb(0.03, 0.018, 0.012),
                 perceptual_roughness: 0.8,
                 ..default()
             }),
@@ -157,7 +159,7 @@ impl BattleAssets {
 /// Rumpf-Meshes einer Klasse im Anstrich einer Partei.
 pub struct SideClass {
     pub hull: Handle<Mesh>,
-    pub halves: Option<(Handle<Mesh>, Handle<Mesh>)>,
+    pub halves: (Handle<Mesh>, Handle<Mesh>),
 }
 
 /// Was eine Partei an eigenen Meshes und Materialien braucht.
@@ -246,12 +248,10 @@ impl SideKit {
             .iter()
             .map(|class| SideClass {
                 hull: meshes.add(class.hull.tinted(tint).to_mesh()),
-                halves: class.halves.as_ref().map(|(fore, aft)| {
-                    (
-                        meshes.add(fore.tinted(tint).to_mesh()),
-                        meshes.add(aft.tinted(tint).to_mesh()),
-                    )
-                }),
+                halves: (
+                    meshes.add(class.halves.0.tinted(tint).to_mesh()),
+                    meshes.add(class.halves.1.tinted(tint).to_mesh()),
+                ),
             })
             .collect();
         let [glow, tracer, missile, beam_light, beam_heavy, beam_pd] =
@@ -281,10 +281,8 @@ impl SideKit {
         let tint = side_tint(color);
         for (own, class) in self.classes.iter().zip(&assets.classes) {
             let _ = meshes.insert(&own.hull, class.hull.tinted(tint).to_mesh());
-            if let (Some((own_fore, own_aft)), Some((fore, aft))) = (&own.halves, &class.halves) {
-                let _ = meshes.insert(own_fore, fore.tinted(tint).to_mesh());
-                let _ = meshes.insert(own_aft, aft.tinted(tint).to_mesh());
-            }
+            let _ = meshes.insert(&own.halves.0, class.halves.0.tinted(tint).to_mesh());
+            let _ = meshes.insert(&own.halves.1, class.halves.1.tinted(tint).to_mesh());
         }
         let handles = [
             &self.glow,
@@ -746,11 +744,11 @@ fn sync_ships(
 /// Zahl der Trümmerstücke je Klasse.
 fn debris_count(class: ShipClass) -> usize {
     match class {
-        ShipClass::Fighter => 2,
-        ShipClass::Corvette => 4,
-        ShipClass::Frigate => 6,
-        ShipClass::Cruiser => 9,
-        ShipClass::Battleship | ShipClass::Carrier => 14,
+        ShipClass::Fighter => 5,
+        ShipClass::Corvette => 7,
+        ShipClass::Frigate => 10,
+        ShipClass::Cruiser => 15,
+        ShipClass::Battleship | ShipClass::Carrier => 22,
     }
 }
 
@@ -792,8 +790,8 @@ fn sync_wrecks(
     }
 }
 
-/// Legt ein Wrack an: den dunklen Rumpf (bei Großkampfschiffen zwei auseinandertreibende
-/// Hälften) und einen Schwarm Trümmerstücke, der sich ausbreitet und liegen bleibt.
+/// Legt ein Wrack an: den verrußten Rumpf in zwei auseinandertreibenden Hälften und einen
+/// Schwarm Trümmerstücke, der sich über mehrere Rumpflängen ausbreitet und liegen bleibt.
 fn spawn_wreck(
     commands: &mut Commands,
     assets: &BattleAssets,
@@ -831,26 +829,23 @@ fn spawn_wreck(
         Transform::from_translation(to_world(wreck.pos)),
         Visibility::default(),
     ));
-    match &class.halves {
-        Some((fore, aft)) => {
-            // Die Hälften treiben längs auseinander, leicht versetzt.
-            let apart = radius * (0.38 + 0.2 * random.unit());
-            let skew = Vec3::new(0.0, random.signed() * 0.12, random.signed() * 0.1) * radius;
-            let fore_part = hull_part(fore.clone(), forward * apart + base * skew, &mut random);
-            let aft_part = hull_part(aft.clone(), -forward * apart - base * skew, &mut random);
-            root.with_child(fore_part);
-            root.with_child(aft_part);
-        }
-        None => {
-            let part = hull_part(class.hull.clone(), Vec3::ZERO, &mut random);
-            root.with_child(part);
-        }
-    }
-    for piece in 0..debris_count(wreck.class) {
+    // Die Hälften treiben längs auseinander, leicht versetzt.
+    let (fore, aft) = &class.halves;
+    let apart = radius * (0.38 + 0.2 * random.unit());
+    let skew = Vec3::new(0.0, random.signed() * 0.12, random.signed() * 0.1) * radius;
+    let fore_part = hull_part(fore.clone(), forward * apart + base * skew, &mut random);
+    let aft_part = hull_part(aft.clone(), -forward * apart - base * skew, &mut random);
+    root.with_child(fore_part);
+    root.with_child(aft_part);
+    let count = debris_count(wreck.class);
+    for piece in 0..count {
         let mut direction = random.direction();
         direction.y *= 0.55;
-        let reach = radius * (0.7 + 2.4 * random.unit().powi(2));
-        let size = radius * (0.07 + 0.16 * random.unit());
+        // Die Stücke verteilen sich von dicht am Wrack bis einige Rumpflängen weit; die
+        // ersten sind die großen Brocken.
+        let spread = (piece as f32 + random.unit()) / count as f32;
+        let reach = radius * (1.1 + 5.2 * spread * spread);
+        let size = radius * (0.1 + 0.26 * (1.0 - spread) * random.unit().max(0.35));
         let stretch = Vec3::new(1.0, 0.5 + 0.5 * random.unit(), 0.6 + 0.4 * random.unit());
         root.with_child((
             WreckPart {
@@ -976,18 +971,19 @@ mod tests {
         for class in ShipClass::ALL {
             let entry = &assets.classes[class.index()];
             assert!(meshes.get(&entry.glow).is_some());
-            assert_eq!(entry.halves.is_some(), class.is_capital());
+            assert!(entry.halves.0.triangle_count() > 0 && entry.halves.1.triangle_count() > 0);
         }
         let (mesh_count, material_count) = (meshes.len(), materials.len());
         let side = SideKit::build((0.2, 0.6, 1.0), &assets, &mut meshes, &mut materials);
-        // Je Partei ein Rumpf je Klasse, dazu zwei Hälften je Großkampfschiff, und sechs
-        // Leuchtfarben. Mehr entsteht nicht, egal wie viele Schiffe kämpfen.
-        assert_eq!(meshes.len(), mesh_count + 6 + 2 * 3);
+        // Je Partei ein Rumpf und zwei Hälften je Klasse, dazu sechs Leuchtfarben. Mehr
+        // entsteht nicht, egal wie viele Schiffe kämpfen.
+        assert_eq!(meshes.len(), mesh_count + 6 + 2 * 6);
         assert_eq!(materials.len(), material_count + 6);
         for class in ShipClass::ALL {
             let entry = &side.classes[class.index()];
             assert!(meshes.get(&entry.hull).is_some());
-            assert_eq!(entry.halves.is_some(), class.is_capital());
+            assert!(meshes.get(&entry.halves.0).is_some());
+            assert!(meshes.get(&entry.halves.1).is_some());
         }
         // Fliehende und treibende Schiffe sind dunkler als kämpfende.
         let brightness = |handle: &Handle<StandardMaterial>| {
@@ -1040,6 +1036,110 @@ mod tests {
         assert_eq!(side_tint((0.5, 0.5, 0.5)), [1.0, 1.0, 1.0]);
         let tint = side_tint((1.0, 0.4, 0.3));
         assert!(tint[0] == 1.0 && tint[1] < 0.2 && tint[2] < tint[1]);
+    }
+
+    fn luminance(color: LinearRgba) -> f32 {
+        0.2126 * color.red + 0.7152 * color.green + 0.0722 * color.blue
+    }
+
+    #[test]
+    fn wrecks_and_debris_are_bright_enough_to_be_seen() {
+        use bevy::mesh::VertexAttributeValues;
+        let (assets, meshes, materials) = testing::assets();
+        let material = |handle: &Handle<StandardMaterial>| materials.get(handle).unwrap();
+        let [hot, cooling, cold] = [0, 1, 2].map(|stage| material(&assets.wreck[stage]));
+        // Ein ausgekühltes Wrack wirft noch einen guten Teil des Lichts zurück und glimmt
+        // aus eigener Kraft: Auch seine Schattenseite hebt sich vom schwarzen Himmel ab.
+        assert!(luminance(cold.base_color.into()) >= 0.35);
+        assert!(luminance(cold.emissive) >= 0.02);
+        // Es bleibt dunkler als ein Schiff, das noch kämpft, und kühlt sichtbar ab.
+        let alive = material(&assets.hull_materials[0]);
+        assert!(luminance(cold.base_color.into()) < 0.6 * luminance(alive.base_color.into()));
+        assert!(luminance(hot.emissive) > 3.0 * luminance(cooling.emissive));
+        assert!(luminance(cooling.emissive) > 1.5 * luminance(cold.emissive));
+        // Trümmer ebenso: helles Material, kein Stück fast schwarz gestrichen.
+        let debris = material(&assets.debris_material);
+        assert!(luminance(debris.base_color.into()) >= 0.4);
+        assert!(luminance(debris.emissive) >= 0.01);
+        for handle in &assets.debris {
+            let Some(VertexAttributeValues::Float32x4(colors)) =
+                meshes.get(handle).unwrap().attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("Farben fehlen");
+            };
+            let darkest = colors
+                .iter()
+                .map(|c| luminance(LinearRgba::rgb(c[0], c[1], c[2])))
+                .fold(f32::MAX, f32::min);
+            assert!(darkest >= 0.25, "Trümmerstück mit Anstrich {darkest}");
+        }
+    }
+
+    #[test]
+    fn every_wreck_breaks_apart_and_scatters_debris() {
+        let (assets, mut meshes, mut materials) = testing::assets();
+        let side = SideKit::build((0.3, 0.6, 1.0), &assets, &mut meshes, &mut materials);
+        for class in ShipClass::ALL {
+            let radius = 20.0;
+            let mut world = World::new();
+            // Mehrere Wracks derselben Klasse: Die Trümmer fallen jedes Mal anders.
+            for index in 0..6 {
+                let wreck = Wreck {
+                    pos: sim::battle::V2::new(100.0 * index as f32, 0.0),
+                    vel: sim::battle::V2::ZERO,
+                    heading: 0.4,
+                    class,
+                    side: 0,
+                    radius,
+                    age: 0.0,
+                };
+                let mut commands = world.commands();
+                spawn_wreck(&mut commands, &assets, &side, 1, index, &wreck);
+                world.flush();
+            }
+            let mut parts = world.query::<(&WreckPart, &Transform)>();
+            let hulls: Vec<_> = parts.iter(&world).filter(|(part, _)| part.hull).collect();
+            let debris: Vec<_> = parts.iter(&world).filter(|(part, _)| !part.hull).collect();
+            // Jedes Wrack, auch das kleinste, liegt in zwei Teilen da: So ist es auch aus
+            // der Nähe nicht mit einem Schiff zu verwechseln, das noch fährt.
+            assert_eq!(hulls.len(), 6 * 2, "{}", class.label());
+            for (part, _) in &hulls {
+                assert!(
+                    part.drift.length() > 0.2 * radius,
+                    "die Hälften treiben auseinander"
+                );
+            }
+            // Dazu ein Trümmerfeld: etliche Stücke, die größten gut zu sehen, verteilt
+            // über mehrere Rumpflängen (eine Rumpflänge sind zwei Halbmesser).
+            assert!(debris.len() >= 6 * 5, "{}: {}", class.label(), debris.len());
+            let reach = debris
+                .iter()
+                .map(|(part, _)| part.drift.length())
+                .fold(0.0, f32::max);
+            assert!(
+                reach >= 4.0 * radius,
+                "{}: Trümmer bis {reach}",
+                class.label()
+            );
+            let largest = debris
+                .iter()
+                .map(|(_, transform)| transform.scale.max_element())
+                .fold(0.0, f32::max);
+            assert!(
+                largest >= 0.25 * radius,
+                "{}: größtes Stück {largest}",
+                class.label()
+            );
+            let smallest = debris
+                .iter()
+                .map(|(_, transform)| transform.scale.max_element())
+                .fold(f32::MAX, f32::min);
+            assert!(
+                smallest >= 0.09 * radius,
+                "{}: kleinstes Stück {smallest}",
+                class.label()
+            );
+        }
     }
 
     #[test]

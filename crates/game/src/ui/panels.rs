@@ -821,7 +821,8 @@ pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
             if battle {
                 ui.label("Kleine Markierungen stehen für Schiffe, die aus der Ferne kaum zu sehen sind:");
                 ui.label("Dreieck = Jäger und Korvette, Raute = Fregatte, Pfeil = Kreuzer,");
-                ui.label("Sechseck = Schlachtschiff, Rechteck = Träger. Hohl = auf dem Rückzug, grau = treibt.");
+                ui.label("Sechseck = Schlachtschiff, Rechteck = Träger. Hohl = auf dem Rückzug, grau = treibt,");
+                ui.label("Kreuz = Wrack.");
                 ui.label("Ein Klick auf ein Schiff zeigt Rumpf, Schild, Panzerung und jedes Modul.");
             } else {
                 ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
