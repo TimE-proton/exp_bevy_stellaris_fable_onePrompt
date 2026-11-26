@@ -66,6 +66,10 @@ darf beliebig oft stehen:
   Startflotte und bestellt jeden Monat nach, was fehlt. `1` ersetzt Verluste, `2`
   verdoppelt die Flotte, `0` beendet das Programm.
 
+Nennt eine Angabe eine Gemeinschaft, die es an dem Tag nicht gibt, ergeht der Befehl
+trotzdem und steht abgelehnt im Protokoll; bei `--order`, `--navy` und `--ai` weist das
+Programm außerdem auf eine Nummer hin, mit der keine Gemeinschaft beginnt.
+
 Die Ausgabe zeigt die Chronik, abgelehnte Befehle, die Bilanz jedes Gefechts samt Ausgang
 und je Gemeinschaft Staatskasse, Kriegsmüdigkeit und Zusammenhalt. `sweep`, `hash` und
 `fleets` nehmen dieselben Angaben: So gehen Gefechte, Verluste und Nachbau auch in Sweeps
@@ -98,7 +102,9 @@ Einnahmen, Ausschüttung, Monate mit Defizit und unter der Rücklage, Soldrücks
 Geld und Bedarfsdeckung der Haushalte. Zum Vergleichen: `--start-fleets N` (jede
 Gemeinschaft beginnt mit N Startflotten), `--research-share X`, `--tax X` (Lohnsteuersatz
 aller Gemeinschaften, per Befehl am ersten Tag) und `--fleet-cost F` (Faktor auf die
-laufenden Kosten der Flotte; 0 schaltet sie ab).
+laufenden Kosten der Flotte; 0 schaltet sie ab). Mit `--start-fleets`,
+`--research-share` oder `--fleet-cost` ruht die militärische Führung der KI, damit die
+Flotten bleiben, wie sie sind; `--ai alle:aktiv` schaltet sie wieder ein.
 
 ```bash
 cargo headless research --seed 7 --years 100
@@ -237,10 +243,15 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   1. **Schuldendienst:** Zinsen und fällige Anleihen.
   2. **Grundleistungen:** laufende Verwaltung und Versorgung, ein fester Anteil
      (`civil_share`) der Einnahmen, gemittelt über zwölf Monate und gerechnet zum
-     üblichen Lohnsteuersatz. Sie gehen an die Haushalte.
+     üblichen Lohnsteuersatz: Von den Einnahmen geht ab, was an Lohnsteuer wirklich
+     einging, und hinzu kommt, was der übliche Satz auf dieselbe Lohnsumme gebracht
+     hätte. Sie gehen an die Haushalte.
   3. **Flotte:** Sold der Besatzungen und Ersatzteile der Wartung.
   4. **Beschaffung:** Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft
      wird, den ganzen Monat über; am Monatsersten wird der Voranschlag zurückgelegt.
+     Ausgeben darf sie, was in der Kasse liegt und niemandem sonst bewilligt ist, auch
+     die Rücklage und was im Monat hinzukommt (Anleihen, Verkäufe), nur nicht die
+     laufenden Einnahmen des Monats: Sie gehören dem nächsten Abschluss.
   5. **Kontore:** Einlagen in Kontore, deren Kasse leer ist, gegen neue Anteile.
   6. **Forschung:** der eingestellte Anteil der Einnahmen.
   7. **Rücklage:** Was übrig ist, füllt sie bis zu ihrem Ziel auf.
@@ -251,7 +262,9 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   der Besatzungen, unbezahlte Forschung kommt langsamer voran, Werften, Nachschub und
   Instandsetzung warten. Die Ansprüche 1 bis 5 greifen notfalls die Rücklage an, die
   Forschung nie: Sie lebt von dem, was der Monat nach ihnen übrig lässt, und von dem, was
-  schon über der Rücklage lag.
+  schon über der Rücklage lag. Die Wartung der Flotte ist zu den Preisen des
+  Monatsersten bewilligt; werden die Ersatzteile im Monat teurer, kauft sie aus der
+  freien Kasse weiter wie die Beschaffung.
 - **Rüstung kostet Wohlfahrt.** Sold und Gehälter gehen an die, die dem Staat dienen
   (Besatzungen, Forschende), nicht an die Haushalte der Welten. Der Staatsdienst kauft am
   Markt des Sitzes seiner Gemeinschaft ein, was Haushalte kaufen; Ersatzteile und
@@ -270,7 +283,8 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
   Monat, die letzten zwölf abgeschlossenen (`history`) und ihre Summe (`year()`). Je
   Monat die Einnahmen, je Anspruch verlangt und bezahlt (`line`), den Rest nach den
   Ansprüchen (`remainder`), die Ausschüttung (`handout`), was aus Geldmangel gekürzt
-  wurde (`unfunded`), Kasse und Rücklagenziel.
+  wurde (`unfunded`, auch was der Wartung im Monat an Geld fehlte), Kasse und
+  Rücklagenziel.
 
 Die Stellschrauben stehen in `assets/data/balance.ron`: `civil_share`, `handout_share` und
 `state_reserve_per_million` unter `economy`, Sold und Wartung unter `military`, der
@@ -340,41 +354,61 @@ für die Gemeinschaft des Spielers und nur, wenn sich etwas ändern soll.
 - **Was sie weiß.** Von fremden Flotten, was die Karte zeigt: Ort, Marschrichtung, ob sie
   kämpfen oder sich sammeln, und ihre Schiffe nach Klasse und Bauwert. Zustand und
   Vorräte kennt sie nur von den eigenen; die Technik des Gegners geht mit der Schätzung
-  ein, die das Spiel anbietet.
+  ein, die das Spiel anbietet. Alles davon steht in `ai/estimate.rs`.
 - **Kräfte schätzen.** Die Kontertabelle `military.counter` sagt, wie gut eine Klasse
   gegen eine andere bei gleichem Bauwert abschneidet; sie stammt aus der Gefechtsmatrix
   des Rechners. Die Kampfkraft einer Flotte gegen eine bestimmte andere ist ihr Wert je
   Klasse, gewichtet mit der Tabelle über die Mischung des Gegners; das Verhältnis beider
-  ist die Schätzung, vor einem Treffen wie im laufenden Gefecht.
+  ist die Schätzung. Im laufenden Gefecht zählt auf beiden Seiten dasselbe: was noch
+  kämpft, mit seinem Bauwert.
 - **Rüstung, monatlich.** Sold und Wartung sollen im Frieden `peace_share` der
   Staatseinnahmen kosten, mehr, wenn eine fremde Flotte nahe den eigenen Systemen die
-  eigene übertrifft, und im Krieg das `war_factor`-Fache, nie über `max_share`. Bestellt
-  wird nur aus gefüllter Rücklage und nur, was in den Rest passt, den der Haushalt der
-  letzten Monate nach allen Ansprüchen ließ (`room_use`). Gewählt wird die Klasse mit der
-  besten Summe gegen die Mischung der bedrohlichsten Gemeinschaft, mit einem Abschlag für
-  das, was die eigene Flotte schon reichlich hat (`mix_weight`); gebaut wird der beste
-  Entwurf, den die Gemeinschaft beherrscht. Wer rüstet, hält `reserve_months` Monate
-  Flottenkosten zusätzlich als Rücklage, weil die Einnahmen stark schwanken.
+  eigene übertrifft, und im Krieg das `war_factor`-Fache, nie über `max_share`. Die
+  Einnahmen kommen in Schüben (Zölle fließen erst, wenn ein Kontor Überschuss hat), und
+  ein Staat, dem das Geld ausgeht, nimmt auch weniger ein: Gemessen wird deshalb an der
+  schwächeren Hälfte der letzten zwölf Monate (`lean_share`) und an einem trägen Mittel
+  über Jahre (`revenue_memory_months`), am kleineren von beiden. Bestellt wird nur aus
+  gefüllter Rücklage und nur, was in den Rest passt, den der Haushalt der letzten zwölf
+  Monate nach allen Ansprüchen ließ (`room_use`); kein Schiff ist mehr wert als das
+  ganze Ziel. Gewählt wird die Klasse mit der besten Summe gegen die Mischung der
+  bedrohlichsten Gemeinschaft, mit einem Abschlag für das, was die eigene Flotte schon
+  reichlich hat (`mix_weight`); gebaut wird der beste Entwurf, den die Gemeinschaft
+  beherrscht. Wer rüstet, hält `reserve_months` Monate Flottenkosten zusätzlich als
+  Rücklage.
 - **Wenn der Sold ausbleibt.** Zuerst kürzt die KI ihren Forschungsetat und streicht
   wartende Aufträge. Bleibt im Frieden in `layup_after_months` der letzten zwölf Monate
-  Sold aus, legt sie Schiffe still: so viel Bauwert, wie zuletzt fehlte, die
-  entbehrlichsten zuerst, nie unter das Rüstungsziel.
+  Sold aus, legt sie Schiffe still, aber nur, was die Einnahmen auf lange Sicht nicht
+  tragen: Einen Einbruch von einigen Monaten sitzt die Flotte mit Soldrückstand aus.
+  Danach baut sie im Frieden nicht gleich wieder: `quiet_months` lang nach
+  ausgebliebenem Sold, `layup_quiet_months` lang nach einer Stilllegung.
 - **Forschung.** Etat der Vorlage, im Krieg höher; gekürzt, solange der Haushalt ihn zwei
   Monate in Folge nicht trägt. Im Krieg wählt sie das Ziel selbst und zieht vor, was
   einen neuen Schiffsentwurf freischaltet.
 - **Flotten im Frieden.** Versorgt und instand gesetzt, vereinigt, im Geleitschutz am
   Warteplatz: dem eigenen Engpasssystem, das der bedrohlichsten Gemeinschaft am nächsten
   liegt, sonst am Sitz. Neue Schiffe fassen erst Treibstoff und stoßen dann zur Flotte.
-- **Flotten im Krieg.** Verteidigung zuerst: Einem Eindringling im eigenen Gebiet stellt
-  sich die Flotte, wenn das Kräfteverhältnis mindestens `defend_odds` ist; ist er klar
-  überlegen, weicht sie in einen Hafen aus, an dem und neben dem kein Gegner steht. Ab
-  `offensive_odds` greift die Hauptflotte an: Sie sucht die Hauptflotte des Gegners, wenn
-  sie stärker ist, sonst sperrt sie sein volkreichstes System, das vom nächsten eigenen
-  Hafen aus in Reichweite liegt (`offensive_reach`). Sie bricht ab unter
-  `break_off_supply` Vorrat, wenn der Rückweg nicht mehr im Tank ist, oder nach
-  `break_off_loss` Verlust, läuft einen Hafen mit Werft an und kommt wieder, wenn Vorrat
-  und Zustand `ready_supply` erreichen. Im Gefecht befiehlt sie den Rückzug, sobald das
-  Kräfteverhältnis unter `retreat_odds` fällt.
+- **Flotten im Krieg, Verteidigung.** Einem Eindringling im eigenen Gebiet stellt sich
+  die Flotte, wenn das Kräfteverhältnis mindestens `defend_odds` ist; sie läuft dazu
+  erst aus, wenn der Tank für den Weg reicht, und bleibt danach dort stehen, bis sie den
+  Platz nicht mehr halten kann. Steht ein klar überlegener Gegner bei ihr oder nebenan,
+  weicht sie in einen Hafen aus, an dem und neben dem keiner steht.
+- **Flotten im Krieg, Angriff.** Ab `offensive_odds` greift die Hauptflotte an, und zwar
+  gemessen an allem, was im Umkreis von `response_jumps` Sprüngen um das Ziel steht und
+  dort eingreifen kann. Sie sucht die Hauptflotte des Gegners, wenn sie stärker ist,
+  sonst sperrt sie sein volkreichstes System, das vom nächsten eigenen Hafen aus in
+  Reichweite liegt (`offensive_reach`). Ein Angriff beginnt im Hafen mit vollen Tanks
+  und hält durch, solange das Verhältnis `defend_odds` nicht unterschreitet. Sie bricht
+  ab unter `break_off_supply` Vorrat, wenn der Rückweg nicht mehr im Tank ist, oder nach
+  `break_off_loss` Verlust, läuft einen Hafen an (eine Werft, wenn der Tank reicht) und
+  kommt wieder, wenn Vorrat und Zustand `ready_supply` erreichen. Im Gefecht befiehlt
+  sie den Rückzug, sobald das Kräfteverhältnis unter `retreat_odds` fällt.
+- **Kein Hin und Her.** Wer einen Angriff vor einem stärkeren Gegner aufgibt, sich aus
+  einem Gefecht zurückzieht oder ausweichen muss, bleibt `caution_days` lang in seinen
+  Häfen. Eine fremde Flotte, mit der die eigene im Gefecht stand, sucht sie
+  `rematch_days` lang nicht wieder auf; ging in dem Gefecht nichts verloren, ist die
+  andere nur ausgewichen, und dann gilt `elusive_days`, auch wenn sie im eigenen Gebiet
+  steht. Marschiert wird außerhalb eines Angriffs nur auf Wegen, an denen kein Gegner
+  steht; eine Flotte mit leerem Tank, die eben weichen musste, bleibt liegen.
 - **Für spätere Planer.** Flotten in `AiState::reserved` lässt die Grundhaltung in Ruhe;
   heute trägt niemand etwas ein. Über `Headless::set_military_mode` (und `--ai`) lässt
   sich die Führung je Gemeinschaft abschalten.
@@ -427,7 +461,8 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   behalten ihre Schäden und was von Munition und Treibstoff übrig ist; überlebende
   Bordjäger kehren auf Träger ihrer Flotte zurück, soweit die Hangars reichen. Wer das
   Feld hält, entscheidet sich je Seite, nicht je Flotte; zur Seite einer Flotte gehört,
-  wer mit ihr nicht im Krieg liegt. Wer noch Schiffe auf dem Feld hat, bleibt. Wer das
+  wer in dem Gefecht einen Gegner mit ihr teilt (nicht schon, wer nach einem
+  Friedensschluss nicht mehr ihr Gegner ist). Wer noch Schiffe auf dem Feld hat, bleibt. Wer das
   Feld einem Gegner überlassen hat, wurde geschlagen und weicht aus: in ein Nachbarsystem
   (woher er kam, sonst eigenes Gebiet, sonst wo kein Feind steht). Wer das Feld geräumt
   hat, während die eigene Seite es hält oder noch darum kämpft, bleibt im System und
@@ -442,6 +477,10 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   nicht mit einer einsatzbereiten vereinigen. Dieselben Gegner stehen einander deshalb
   frühestens nach Ablauf der Frist wieder gegenüber, und nur, wenn dann eine Seite auf
   die andere marschiert oder neben ihr gewartet hat.
+- **Waffenruhe.** Nach einem Friedensschluss erklären die beiden einander `truce_days`
+  lang (mindestens die Sammelfrist) keinen neuen Krieg. Frieden und sofort wieder Krieg
+  beginnt also kein laufendes Gefecht von vorn; wer das Feld schon geräumt hatte, als
+  der Frieden kam, zieht ab und sammelt sich wie jeder andere.
 - **Ohne Entscheidung.** Kommt keine Seite gegen die andere an, lösen sich alle im Patt
   voneinander; ebenso endet ein Gefecht an der Zeitgrenze des Rechners. Dann hat niemand
   gewonnen und niemand eine Niederlage erlitten. Wer im eigenen System steht, bleibt

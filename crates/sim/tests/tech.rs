@@ -1565,33 +1565,67 @@ fn the_research_budget_is_validated_and_sets_the_spending() {
         CommandOutcome::Applied
     );
     // Bis kurz vor dem nächsten Monatsersten: Die Einnahmen, aus denen er rechnen wird,
-    // stehen dann fest, nur die Dividenden des Abschlusses fehlen noch.
-    let to_month_end = DAYS_PER_MONTH - sim.clock().day() % DAYS_PER_MONTH;
-    sim.run_days(to_month_end);
-    let entry = sim.research().get(me).unwrap();
-    assert_eq!(entry.budget_share, share);
-    let income = sim.world().resource::<Economy>().state_income_of(me);
-    let planets = sim.galaxy().planets_of(me).count() as Money;
-    assert!(income > 0);
-    let budget = (share * income as f64).round() as Money;
-    assert!(
-        entry.spent_last_month <= budget && entry.spent_last_month >= budget - planets,
-        "{} von {budget}",
-        entry.spent_last_month
-    );
-    // Eine KI-Gemeinschaft daneben zahlt den Anteil ihrer Vorlage.
+    // stehen dann fest, nur die Dividenden des Abschlusses fehlen noch. Gemessen wird
+    // in einem Monat, in dem der Haushalt die Forschung nicht kürzen musste (sie steht
+    // hinter Flotte und Beschaffung und greift die Rücklage nicht an).
+    let mut measured = false;
+    for _ in 0..12 {
+        let to_month_end = DAYS_PER_MONTH - sim.clock().day() % DAYS_PER_MONTH;
+        sim.run_days(to_month_end);
+        let entry = sim.research().get(me).unwrap();
+        assert_eq!(entry.budget_share, share);
+        let economy = sim.world().resource::<Economy>();
+        let line = economy
+            .budget(me)
+            .unwrap()
+            .current
+            .line(sim::economy::Claim::Research);
+        if line.paid < line.wanted {
+            continue;
+        }
+        let income = economy.state_income_of(me);
+        let planets = sim.galaxy().planets_of(me).count() as Money;
+        assert!(income > 0);
+        let budget = (share * income as f64).round() as Money;
+        assert!(
+            entry.spent_last_month <= budget && entry.spent_last_month >= budget - planets,
+            "{} von {budget}",
+            entry.spent_last_month
+        );
+        measured = true;
+        break;
+    }
+    assert!(measured, "in keinem Monat trug der Haushalt den Etat");
+    // Eine KI-Gemeinschaft daneben zahlt den Anteil ihrer Vorlage, ebenso gemessen in
+    // einem Monat, in dem ihr Haushalt die Forschung trug.
     let other = PolityId(1);
-    let theirs = sim.research().get(other).unwrap();
-    assert_eq!(theirs.budget_share, theirs.usual_share);
-    let their_income = sim.world().resource::<Economy>().state_income_of(other);
-    let their_budget = (theirs.budget_share * their_income as f64).round() as Money;
-    let their_planets = sim.galaxy().planets_of(other).count() as Money;
-    assert!(
-        theirs.spent_last_month <= their_budget
-            && theirs.spent_last_month >= their_budget - their_planets,
-        "{} von {their_budget}",
-        theirs.spent_last_month
-    );
+    let mut measured = false;
+    for _ in 0..12 {
+        let theirs = sim.research().get(other).unwrap();
+        assert_eq!(theirs.budget_share, theirs.usual_share);
+        let economy = sim.world().resource::<Economy>();
+        let line = economy
+            .budget(other)
+            .unwrap()
+            .current
+            .line(sim::economy::Claim::Research);
+        if line.paid < line.wanted {
+            sim.run_days(DAYS_PER_MONTH);
+            continue;
+        }
+        let their_income = economy.state_income_of(other);
+        let their_budget = (theirs.budget_share * their_income as f64).round() as Money;
+        let their_planets = sim.galaxy().planets_of(other).count() as Money;
+        assert!(
+            theirs.spent_last_month <= their_budget
+                && theirs.spent_last_month >= their_budget - their_planets,
+            "{} von {their_budget}",
+            theirs.spent_last_month
+        );
+        measured = true;
+        break;
+    }
+    assert!(measured, "in keinem Monat trug der Haushalt den Etat");
 }
 
 #[test]
