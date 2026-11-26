@@ -15,6 +15,8 @@ mod testing;
 mod time_control;
 mod traffic;
 mod ui;
+#[cfg(test)]
+mod walkthrough;
 
 use bevy::log::{DEFAULT_FILTER, LogPlugin};
 use bevy::prelude::*;

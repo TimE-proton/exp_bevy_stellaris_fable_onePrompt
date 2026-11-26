@@ -18,7 +18,8 @@ use bevy::render::settings::WgpuSettings;
 use bevy::time::TimeUpdateStrategy;
 use bevy::window::{CursorMoved, ExitCondition, PrimaryWindow, WindowEvent};
 use bevy::winit::WinitPlugin;
-use bevy_egui::{EguiContext, EguiPlugin, PrimaryEguiContext, egui};
+use bevy_egui::egui::accesskit::Role;
+use bevy_egui::{EguiContext, EguiOutput, EguiPlugin, PrimaryEguiContext, egui};
 use std::time::Duration;
 
 /// Größe des gedachten Fensters in logischen Pixeln.
@@ -70,7 +71,12 @@ impl TestGame {
         app.cleanup();
         let mut game = Self { app };
         // Die ersten Frames legen Kameras und Oberfläche an und führen ins Hauptmenü.
-        game.frames(3);
+        game.frames(2);
+        // Die Oberfläche führt ihren Baum der Bedienelemente mit, wie für Vorleseprogramme
+        // (das Fenstersystem schaltet ihn sonst ein). Daran finden die Tests Knöpfe nach
+        // ihrer Beschriftung.
+        game.egui().enable_accesskit();
+        game.frames(1);
         game
     }
 
@@ -247,6 +253,38 @@ impl TestGame {
             self.input(message(*key, ButtonState::Released));
         }
         self.frames(2);
+    }
+
+    /// Mitte des Knopfs mit genau dieser Beschriftung, wie er zuletzt gezeichnet wurde;
+    /// `None`, wenn es keinen gibt oder er gesperrt ist.
+    pub fn button(&mut self, label: &str) -> Option<Vec2> {
+        let world = self.world_mut();
+        let output = world
+            .query_filtered::<&EguiOutput, With<PrimaryEguiContext>>()
+            .single(world)
+            .ok()?;
+        let tree = output.platform_output.accesskit_update.as_ref()?;
+        tree.nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| {
+                node.role() == Role::Button && node.label() == Some(label) && !node.is_disabled()
+            })
+            .and_then(|node| node.bounds())
+            .map(|bounds| {
+                Vec2::new(
+                    ((bounds.x0 + bounds.x1) * 0.5) as f32,
+                    ((bounds.y0 + bounds.y1) * 0.5) as f32,
+                )
+            })
+    }
+
+    /// Klickt auf den Knopf mit dieser Beschriftung.
+    pub fn click_on(&mut self, label: &str) {
+        let at = self
+            .button(label)
+            .unwrap_or_else(|| panic!("kein Knopf „{label}“ zu sehen"));
+        self.click(at);
     }
 
     /// Der Kontext der Oberfläche, etwa um nach einem Frame Fenster und Flächen abzufragen.
