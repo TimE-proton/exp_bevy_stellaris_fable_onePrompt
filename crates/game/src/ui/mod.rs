@@ -131,6 +131,10 @@ impl Default for UiState {
     }
 }
 
+/// Was der Spieler erfährt, wenn er bei stehender Zeit einen Befehl gibt.
+pub const COMMAND_WAITS: &str =
+    "Vorgemerkt: Der Befehl gilt, sobald die Zeit weiterläuft (Leertaste).";
+
 /// Lesender Zugriff auf die laufende Partie; fehlt im Hauptmenü.
 #[derive(SystemParam)]
 pub struct SimParams<'w> {
@@ -202,7 +206,7 @@ fn draw_ui(
     app_state: Res<State<AppState>>,
     data: Res<sim::GameData>,
     sim: Option<SimParams>,
-    notice: Res<Notice>,
+    mut notice: ResMut<Notice>,
     history: Res<PriceHistory>,
     mut ui_state: ResMut<UiState>,
     mut speed: ResMut<SimSpeed>,
@@ -305,6 +309,11 @@ fn draw_ui(
                     && let Some(player) = sim.config.player
                 {
                     queue.push(player, CommandSource::Player, command);
+                    if speed.paused {
+                        // Ein Befehl gilt erst mit dem nächsten Takt. Steht die Zeit, sähe
+                        // es sonst aus, als hätte der Klick nichts bewirkt.
+                        notice.info(COMMAND_WAITS);
+                    }
                 }
             }
             UiAction::Quit => {

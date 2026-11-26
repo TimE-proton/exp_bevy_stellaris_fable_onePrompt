@@ -989,6 +989,13 @@ mod tests {
         let name = data.techs[wanted as usize].name.clone();
         let entries = game.resource::<CommandLog>().entries.len();
         game.click_on(&format!("Erforschen: {name}"));
+        // Die Zeit steht: Der Befehl wartet, und der Spieler erfährt es.
+        assert_eq!(game.resource::<CommandLog>().entries.len(), entries);
+        assert_eq!(
+            game.resource::<crate::session::Notice>().text,
+            crate::ui::COMMAND_WAITS
+        );
+        assert!(game.text(crate::ui::COMMAND_WAITS).is_some());
         // Mit dem nächsten Takt wendet der Kern den Befehl an.
         run(&mut game, 3);
         let log = game.resource::<CommandLog>();

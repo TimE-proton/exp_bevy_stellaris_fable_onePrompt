@@ -63,6 +63,11 @@ fn visit_the_technology_window(game: &mut TestGame) {
     let (tech, name) = open_technology(game);
     game.click_on(&format!("Erforschen: {name}"));
     game.frames(6);
+    // Die Zeit läuft: Der Befehl gilt sofort, ein Hinweis auf Wartendes erscheint nicht.
+    assert_ne!(
+        game.resource::<crate::session::Notice>().text,
+        crate::ui::COMMAND_WAITS
+    );
     let player = game.resource::<SimConfig>().player.expect("Spieler");
     let entry = game.resource::<Research>().get(player).expect("Forschung");
     assert_eq!(entry.target, Some(tech), "das Ziel ist {name}");

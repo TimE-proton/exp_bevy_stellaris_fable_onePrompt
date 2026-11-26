@@ -124,8 +124,11 @@ Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene 
 siehe unten.
 
 Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 4) lassen sich nicht
-mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist. Lehnt
-die Simulation einen Befehl ab, steht der Grund als Hinweis oben im Fenster.
+mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist.
+
+Befehle gelten mit dem nächsten Takt der Simulation. Steht die Zeit, sind sie vorgemerkt,
+und ein Hinweis oben im Fenster sagt es. Lehnt die Simulation einen Befehl ab, steht dort
+der Grund.
 
 ### Forschung
 
