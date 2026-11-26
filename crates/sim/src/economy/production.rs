@@ -26,6 +26,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
         tech_yield,
         state_income_running,
         wage_bill_running,
+        wage_tax_running,
         ..
     } = economy;
 
@@ -178,6 +179,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 // Regionen zahlen dem Zentrum keine Steuer und zählen nicht.
                 if !local.tax_exempt {
                     book_income(wage_bill_running, owner, wages);
+                    book_income(wage_tax_running, owner, tax);
                 }
                 local.households += wages - tax;
                 local.income_today += super::to_credits(wages - tax);

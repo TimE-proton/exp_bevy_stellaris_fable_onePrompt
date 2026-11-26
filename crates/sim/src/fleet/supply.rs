@@ -397,10 +397,12 @@ pub fn procurement_estimate(
 }
 
 /// Täglich: Jede Gemeinschaft kauft am Markt ihres Sitzes den Tagesanteil der Ersatzteile,
-/// die ihre Schiffe verbrauchen, aus dem, was der Haushalt der Flotte bewilligt hat. Die
-/// Schiffe mögen liegen, wo sie wollen: Die Teile gehen ihnen nach. Fehlt Ware oder ist die
-/// Bewilligung verbraucht, wird weniger gekauft; der Wunsch zählt am Markt als Nachfrage,
-/// soweit er bezahlbar war.
+/// die ihre Schiffe verbrauchen. Die Schiffe mögen liegen, wo sie wollen: Die Teile gehen
+/// ihnen nach. Bezahlt wird aus dem, was der Haushalt der Flotte bewilligt hat, und ist
+/// das verbraucht (die Bewilligung steht zu den Preisen des Monatsersten), aus der freien
+/// Kasse wie bei der Beschaffung. Fehlt Ware oder Geld, wird weniger gekauft; fehlendes
+/// Geld steht im Haushalt als gekürzt. Der Wunsch zählt am Markt als Nachfrage, soweit er
+/// bezahlbar war.
 pub fn maintain_fleets(
     galaxy: &Galaxy,
     economy: &mut Economy,
@@ -418,7 +420,7 @@ pub fn maintain_fleets(
             continue;
         }
         let system = galaxy.planet(seat).system;
-        let mut purse = economy.allowance(polity.id, Claim::Fleet);
+        let mut purse = economy.fleet_allowance(polity.id);
         let before = purse;
         let market = &mut economy.markets[system.index()];
         let mut asked = 0.0;
@@ -427,7 +429,9 @@ pub fn maintain_fleets(
             asked += today * market.ask(*good, spread);
             procure(market, *good, today, &mut purse, spread);
         }
-        economy.want(polity.id, Claim::Fleet, to_money(asked));
+        let asked = to_money(asked);
+        economy.want(polity.id, Claim::Fleet, asked);
+        economy.book_unfunded(polity.id, asked - before);
         economy.spend(polity.id, Claim::Fleet, before - purse);
     }
 }

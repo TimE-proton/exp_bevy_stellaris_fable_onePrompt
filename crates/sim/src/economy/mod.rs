@@ -303,6 +303,11 @@ pub struct Economy {
     /// sich, was ein anderer Steuersatz brächte (`BudgetMonth::standard_revenue`).
     #[serde(default)]
     pub wage_bill_running: Vec<Money>,
+    /// Lohnsteuer, die im laufenden Monat wirklich eingegangen ist, je Gemeinschaft: Tag
+    /// für Tag zum Satz des Tages. Der Haushalt rechnet mit ihr und nicht mit dem Satz,
+    /// der am Tag des Abschlusses gerade gilt.
+    #[serde(default)]
+    pub wage_tax_running: Vec<Money>,
     /// Der Haushalt je Gemeinschaft: Ansprüche an die Staatskasse in fester Rangfolge,
     /// der laufende Monat und die letzten zwölf.
     #[serde(default)]
@@ -365,6 +370,9 @@ impl Economy {
         }
         if self.wage_bill_running.len() < count {
             self.wage_bill_running.resize(count, 0);
+        }
+        if self.wage_tax_running.len() < count {
+            self.wage_tax_running.resize(count, 0);
         }
         if self.budgets.len() < count {
             self.budgets.resize_with(count, Budget::default);
@@ -450,6 +458,7 @@ impl Economy {
             || self.state_income.len() != count
             || self.state_income_running.len() != count
             || self.wage_bill_running.len() != count
+            || self.wage_tax_running.len() != count
             || self.budgets.len() != count
             || self.staff.len() != count
         {
