@@ -144,10 +144,10 @@ ihren Stand, ihre Kosten in Forschungspunkten und ihre Wirkungen.
 
 Über dem Baum stehen Etat und Ziel. Der Etat ist der Anteil der laufenden Staatseinnahmen,
 der monatlich in die Forschung geht: am Regler einstellen und mit „Etat festsetzen“
-bestätigen; er gilt ab dem nächsten Monatsersten. Gezahlt wird nur, was nach Sold und
-Einkäufen der Flotte über der Rücklage der Staatskasse liegt. Zu Beginn wählt eine
-Automatik das Ziel und prüft es jeden Monat. Ein selbst gesetztes Ziel gilt bis zu seinem
-Abschluss; danach ruht die Forschung, bis ein neues gewählt ist oder „Automatik
+bestätigen; er gilt ab dem nächsten Monatsersten. Gezahlt wird nur aus dem, was die
+Staatskasse über ihrer Rücklage hält; Sold und Einkäufe der Flotte gehen vor. Zu Beginn
+wählt eine Automatik das Ziel und prüft es jeden Monat. Ein selbst gesetztes Ziel gilt bis
+zu seinem Abschluss; danach ruht die Forschung, bis ein neues gewählt ist oder „Automatik
 einschalten“ die Wahl zurückgibt. Unter dem Baum steht die Summe der Wirkungen aller
 erforschten Technologien.
 
@@ -156,7 +156,7 @@ selbst. Der Reiter zeigt je Gemeinschaft und Zweig die Spanne der Stufen, die na
 eigenen Einblick möglich ist, etwa 0–4. In der Leiste daneben sind volle Kästchen bestätigt
 (mindestens diese Stufe), getönte möglich und leere ausgeschlossen; eine einzelne grüne
 Zahl ist genau bekannt. Der Einblick wächst durch Besitz an den Betrieben der anderen und
-durch Gefechte gegen sie; ohne neue Gefechte verblasst er wieder.
+durch Gefechte gegen sie; was Gefechte an Einblick bringen, verblasst ohne neue wieder.
 
 ### Flotten
 

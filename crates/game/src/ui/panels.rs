@@ -1104,6 +1104,97 @@ mod tests {
     }
 
     #[test]
+    fn the_production_tab_reckons_with_the_technology_of_the_owner() {
+        use crate::ui::testing::Screen;
+        use sim::economy::{expected_return, unit_economics_at};
+
+        // Die erste Gemeinschaft beherrscht den ganzen Zweig Wirtschaft: Ihre Werke werfen
+        // deutlich mehr ab, und damit rechnet der Kern.
+        let mut fixture = fixture();
+        let me = sim::ids::PolityId(0);
+        let top = fixture
+            .data
+            .techs
+            .iter()
+            .rposition(|tech| tech.branch == sim::data::TechBranch::Economy)
+            .expect("Zweig Wirtschaft") as u16;
+        fixture.state.research.grant(&fixture.data, me, top);
+        let (economy, logistics) = (&mut fixture.state.economy, &mut fixture.state.logistics);
+        fixture.state.research.publish_effects(economy, logistics);
+        let factor = fixture.state.economy.yield_factor(me);
+        assert!(factor > 1.2, "Ertragsfaktor {factor}");
+
+        let capital = fixture.state.polities.get(me).capital.unwrap();
+        let planet = fixture.state.galaxy.planet(capital);
+        let local = fixture.state.economy.planet(capital);
+        let market = fixture.state.economy.market(planet.system);
+        // Die Rendite jedes Rezepts, das sich hier betreiben lässt, einmal mit der Technik
+        // der Gemeinschaft und einmal ohne.
+        let returns = |tech: f64| -> Vec<(String, String)> {
+            fixture
+                .data
+                .recipes
+                .iter()
+                .map(|recipe| {
+                    let unit =
+                        unit_economics_at(&fixture.data, planet, local.wage, market, recipe, tech);
+                    (recipe, unit)
+                })
+                .filter(|(_, unit)| unit.local_yield > 0.0)
+                .map(|(recipe, unit)| {
+                    let yearly = expected_return(&fixture.data, market, &unit);
+                    (recipe.name.clone(), percent(yearly as f32))
+                })
+                .collect()
+        };
+        let (with_tech, without) = (returns(factor), returns(1.0));
+        assert!(with_tech.len() >= 4 && with_tech != without);
+
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection {
+            system: Some(planet.system),
+            planet: Some(capital),
+        };
+        let mut state = UiState {
+            tab: LeftTab::Production,
+            ..Default::default()
+        };
+        let mut screen = Screen::new(1600.0, 900.0);
+        let painted =
+            screen.settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+        // Unter „Was sich hier lohnt“ steht je Rezept die Rendite rechts neben dem Namen.
+        let heading = painted
+            .text("Was sich hier lohnt")
+            .expect("Abschnitt")
+            .bottom();
+        let mut checked = 0;
+        for ((name, expected), (_, plain)) in with_tech.iter().zip(&without) {
+            let Some(row) = painted
+                .all(name)
+                .into_iter()
+                .find(|rect| rect.top() > heading)
+            else {
+                // Die Liste zeigt nur die acht besten.
+                continue;
+            };
+            let shown = painted
+                .texts
+                .iter()
+                .filter(|(_, rect)| {
+                    (rect.center().y - row.center().y).abs() < 4.0 && rect.left() > row.right()
+                })
+                .min_by(|a, b| a.1.left().total_cmp(&b.1.left()))
+                .map(|(text, _)| text.as_str())
+                .expect("Rendite neben dem Namen");
+            assert_eq!(shown, expected, "{name}: ohne Technik wären es {plain}");
+            checked += 1;
+        }
+        assert!(checked >= 4, "nur {checked} Rezepte geprüft");
+    }
+
+    #[test]
     fn notice_draws_and_expires() {
         let mut text = Notice::default();
         text.error("Etwas ging schief");

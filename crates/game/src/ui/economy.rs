@@ -7,7 +7,8 @@ use bevy_egui::egui::{self, Color32, RichText};
 use egui_plot::{Legend, Line, Plot};
 use sim::clock::{DAYS_PER_YEAR, START_YEAR};
 use sim::data::Sector;
-use sim::economy::{expected_return, to_credits, unit_economics};
+use sim::economy::{expected_return, to_credits, unit_economics_at};
+use sim::galaxy::Planet;
 use sim::ids::{GoodId, PlanetId, SystemId};
 
 const GOOD: Color32 = Color32::from_rgb(120, 200, 130);
@@ -238,7 +239,14 @@ pub fn production_tab(ui: &mut egui::Ui, sim: &SimRefs, planet_id: PlanetId) {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, recipe)| {
-                    let unit = unit_economics(sim.data, planet, local.wage, market, recipe);
+                    let unit = unit_economics_at(
+                        sim.data,
+                        planet,
+                        local.wage,
+                        market,
+                        recipe,
+                        tech_yield(sim, planet),
+                    );
                     (unit.local_yield > 0.0)
                         .then(|| (index, expected_return(sim.data, market, &unit), unit))
                 })
@@ -280,6 +288,14 @@ pub fn production_tab(ui: &mut egui::Ui, sim: &SimRefs, planet_id: PlanetId) {
                     }
                 });
         });
+}
+
+/// Ertragsfaktor der Technik, mit dem die Werke einer Welt rechnen: der ihres Besitzers.
+/// Der Kern rechnet Ausstoß und Rendite damit; die Tafeln zeigen dieselben Zahlen.
+fn tech_yield(sim: &SimRefs, planet: &Planet) -> f64 {
+    planet
+        .owner
+        .map_or(1.0, |owner| sim.economy.yield_factor(owner))
 }
 
 /// Produktionsketten: Wer braucht was, und was kommt heraus.
@@ -337,7 +353,7 @@ pub fn chains_window(
                         ));
                         match &context {
                             Some((planet, local, market)) => {
-                                let unit = unit_economics(sim.data, planet, local.wage, market, recipe);
+                                let unit = unit_economics_at(sim.data, planet, local.wage, market, recipe, tech_yield(sim, planet));
                                 if unit.local_yield <= 0.0 {
                                     ui.label(RichText::new("kein Vorkommen").color(MUTED));
                                 } else {

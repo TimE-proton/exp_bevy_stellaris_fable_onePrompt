@@ -264,9 +264,8 @@ fn budget(
     ui.horizontal(|ui| {
         ui.label(RichText::new("Etat").color(ACCENT)).on_hover_text(
             "Anteil der laufenden Staatseinnahmen des Vormonats (Lohnsteuer, Zölle, \
-             Dividenden). Er ist das Gehalt der Forschenden und fließt an die Haushalte. \
-             Gezahlt wird nur, was nach Sold und Einkäufen der Flotte über der Rücklage der \
-             Staatskasse liegt.",
+             Dividenden): das Gehalt der Forschenden. Gezahlt wird nur aus dem, was die \
+             Staatskasse über ihrer Rücklage hält; Sold und Einkäufe der Flotte gehen vor.",
         );
         let slider = egui::Slider::new(&mut wanted, 0.0..=(max_share * 100.0) as f32)
             .step_by(1.0)
@@ -557,7 +556,7 @@ fn estimates(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
             "Den genauen Stand ihrer Forschung kennt nur jede Gemeinschaft selbst. Von den \
              anderen halten wir je Zweig eine Spanne von Stufen für möglich. Sie wird enger, \
              je mehr Einblick wir haben: durch Besitz an ihren Betrieben und durch Gefechte \
-             gegen sie. Ohne neue Gefechte verblasst dieser Einblick wieder.",
+             gegen sie. Was Gefechte an Einblick bringen, verblasst ohne neue wieder.",
         );
     });
     ui.add_space(4.0);
