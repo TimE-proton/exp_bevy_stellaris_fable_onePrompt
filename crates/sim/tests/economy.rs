@@ -1,6 +1,7 @@
 //! Wirtschaft als Ganzes: Preise, Blockade, Geldsumme, Spezialisierung, Kaperfahrt.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::SimCommand;
 use sim::economy::Economy;
@@ -181,6 +182,11 @@ fn a_blockade_raises_prices_and_idles_factories() {
     // bemisst sich an den laufenden Staatseinnahmen), passt ein anderer Seed.
     let mut blockaded = observer(4);
     let mut control = observer(4);
+    // Die Flotten führt hier die Prüfung: Die militärische Führung der KI ruht in beiden
+    // Partien, sonst rüsteten die Gemeinschaften und wichen der Blockade aus oder brächen sie.
+    for sim in [&mut blockaded, &mut control] {
+        sim.set_military_mode(None, MilitaryMode::Resting);
+    }
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let target = largest_colony_system(&blockaded, victim);
@@ -352,6 +358,8 @@ fn raiders_capture_freighters_and_escorts_protect_them() {
     let victim = PolityId(1);
     let run = |escort: bool| {
         let mut sim = observer(9);
+        // Kaperer und Geleit stellt die Prüfung auf; die militärische Führung der KI ruht.
+        sim.set_military_mode(None, MilitaryMode::Resting);
         sim.run_days(25 * DAYS_PER_YEAR);
         let victim_home = {
             let galaxy = sim.galaxy();

@@ -197,6 +197,16 @@ pub struct Debris {
     pub tick: u64,
 }
 
+/// Ein beendetes Gefecht in seinem letzten Stand: der Rechner, wie er nach dem letzten
+/// Takt stand, mit jedem Schiff. Die Bilanz dazu steht in [`Battles::reports`] unter
+/// derselben Nummer. Reine Auskunft für Ansichten; in der Partie folgt nichts daraus.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConcludedBattle {
+    pub battle: Battle,
+    /// Takt, in dem das Gefecht endete.
+    pub ended: u64,
+}
+
 /// Alle Gefechte der Partie: die laufenden, die Bilanzen der jüngsten, die Trümmer.
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Battles {
@@ -215,6 +225,23 @@ pub struct Battles {
     /// ihres Ausscheidens. Mit dem Ende des Gefechts fallen sie heraus.
     #[serde(default)]
     pub departed: Vec<Departed>,
+    /// Beendete Gefechte je Ausgang über die ganze Partie, in der Reihenfolge von
+    /// [`BattleOutcome::ALL`].
+    #[serde(default)]
+    pub outcomes: [u32; 5],
+    /// Flotten je Gemeinschaft, die in einem Gefecht mit allen Schiffen verloren gingen.
+    /// Lesen mit [`Battles::fleets_lost_by`].
+    #[serde(default)]
+    pub fleets_lost: Vec<u32>,
+    /// Entschiedene Gefechte je Gemeinschaft, in denen sie am Ende das Feld hielt. Lesen
+    /// mit [`Battles::won_by`].
+    #[serde(default)]
+    pub won: Vec<u32>,
+    /// Eben beendete Gefechte in ihrem letzten Stand, ältestes zuerst: höchstens
+    /// [`Battles::CONCLUDED`], jedes [`Battles::CONCLUDED_DAYS`] Tage lang. Lesen mit
+    /// [`Battles::concluded`].
+    #[serde(default)]
+    pub concluded: Vec<ConcludedBattle>,
 }
 
 /// Ist die Partei aus dem Gefecht ausgeschieden?
@@ -235,6 +262,22 @@ fn side_of_fleet(departed: &[Departed], battle: &Battle, fleet: FleetId) -> Opti
 impl Battles {
     /// So viele Bilanzen bleiben im Zustand; ältere fallen heraus.
     pub const REPORTS: usize = 40;
+
+    /// So viele beendete Gefechte bleiben höchstens in ihrem letzten Stand lesbar.
+    pub const CONCLUDED: usize = 8;
+
+    /// So viele Tage nach seinem Ende bleibt der letzte Stand eines Gefechts lesbar.
+    pub const CONCLUDED_DAYS: u64 = 3;
+
+    /// Letzter Stand eines beendeten Gefechts, solange er noch aufbewahrt wird: der
+    /// Rechner nach dem letzten Takt, mit jedem Schiff. Die Bilanz gibt
+    /// [`Battles::report`].
+    pub fn concluded(&self, id: BattleId) -> Option<&Battle> {
+        self.concluded
+            .iter()
+            .find(|entry| entry.battle.id == id)
+            .map(|entry| &entry.battle)
+    }
 
     /// Das Gefecht, das in einem System läuft.
     pub fn in_system(&self, system: SystemId) -> Option<&Battle> {
@@ -282,6 +325,24 @@ impl Battles {
     /// Schiffe, die eine Gemeinschaft in Gefechten verloren hat (ohne Bordjäger).
     pub fn ships_lost_by(&self, polity: PolityId) -> u32 {
         self.ships_lost.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Flotten, die eine Gemeinschaft in Gefechten mit allen Schiffen verloren hat.
+    pub fn fleets_lost_by(&self, polity: PolityId) -> u32 {
+        self.fleets_lost.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Entschiedene Gefechte, in denen die Gemeinschaft am Ende das Feld hielt.
+    pub fn won_by(&self, polity: PolityId) -> u32 {
+        self.won.get(polity.index()).copied().unwrap_or(0)
+    }
+
+    /// Beendete Gefechte mit diesem Ausgang über die ganze Partie.
+    pub fn ended_with(&self, outcome: BattleOutcome) -> u32 {
+        BattleOutcome::ALL
+            .iter()
+            .position(|other| *other == outcome)
+            .map_or(0, |index| self.outcomes[index])
     }
 
     /// Schiffe, die in allen Gefechten der Partie verloren gingen (ohne Bordjäger).
@@ -383,6 +444,19 @@ impl Battles {
         }
         if self.reports.len() > Self::REPORTS {
             return Some("mehr Gefechtsbilanzen als vorgesehen".into());
+        }
+        if self.concluded.len() > Self::CONCLUDED {
+            return Some("mehr beendete Gefechte aufbewahrt als vorgesehen".into());
+        }
+        if let Some(entry) = self
+            .concluded
+            .iter()
+            .find(|entry| !entry.battle.finished || self.get(entry.battle.id).is_some())
+        {
+            return Some(format!(
+                "Gefecht {}: als beendet aufbewahrt, läuft aber noch",
+                entry.battle.id
+            ));
         }
         for pair in self.debris.windows(2) {
             if pair[0].system >= pair[1].system {
@@ -822,6 +896,10 @@ pub fn open_battles(
             .debris
             .retain(|debris| debris.amount >= DEBRIS_FLOOR);
     }
+    // Der letzte Stand beendeter Gefechte bleibt nur wenige Tage lesbar.
+    battles
+        .concluded
+        .retain(|entry| entry.ended / TICKS_PER_DAY + Battles::CONCLUDED_DAYS > day);
 
     // Einsatzbereite Flotten je System, in Nummernfolge.
     let mut present: BTreeMap<SystemId, Vec<usize>> = BTreeMap::new();
@@ -950,11 +1028,19 @@ pub fn advance_battles(
         .into_iter()
         .partition(|battle| battle.finished);
     battles.active = running;
-    for battle in &finished {
+    for battle in finished {
         conclude(
-            battle, galaxy, fleets, battles, diplomacy, finance, research, logistics, polities,
+            &battle, galaxy, fleets, battles, diplomacy, finance, research, logistics, polities,
             chronicle, data, tick,
         );
+        // Der letzte Stand bleibt für Ansichten noch einige Tage lesbar.
+        if battles.concluded.len() >= Battles::CONCLUDED {
+            battles.concluded.remove(0);
+        }
+        battles.concluded.push(ConcludedBattle {
+            battle,
+            ended: tick,
+        });
     }
     // Stärken nachführen; eine Flotte ohne Schiffe besteht nicht mehr.
     fleets.refresh(data);
@@ -1167,14 +1253,21 @@ fn conclude(
     let holding: Vec<bool> = (0..parties)
         .map(|side| left[side].is_none() && holds_field(&results, side))
         .collect();
-    // Je Seite gefragt: Hält ein Gegner das Feld, oder jemand, mit dem die Partei nicht im
-    // Krieg liegt?
+    // Je Seite gefragt: Hält ein Gegner das Feld, oder jemand von der eigenen Seite?
     let foe_holds = |side: usize| {
         (0..parties).any(|other| holding[other] && battle.is_hostile(side as u16, other as u16))
     };
+    // Die eigene Seite ist, wer einen Gegner mit der Partei teilt. Wer nur nicht (oder
+    // nach einem Friedensschluss nicht mehr) ihr Gegner ist, deckt ihren Rückzug nicht.
     let friend_holds = |side: usize| {
         (0..parties).any(|other| {
-            other != side && holding[other] && !battle.is_hostile(side as u16, other as u16)
+            other != side
+                && holding[other]
+                && !battle.is_hostile(side as u16, other as u16)
+                && (0..parties).any(|foe| {
+                    battle.is_hostile(side as u16, foe as u16)
+                        && battle.is_hostile(other as u16, foe as u16)
+                })
         })
     };
 
@@ -1511,6 +1604,36 @@ fn conclude(
         );
     }
     battles.departed.retain(|entry| entry.battle != battle.id);
+    if let Some(index) = BattleOutcome::ALL
+        .iter()
+        .position(|other| *other == outcome)
+    {
+        battles.outcomes[index] += 1;
+    }
+    if outcome == BattleOutcome::Decided {
+        let winners: BTreeSet<PolityId> = report
+            .sides
+            .iter()
+            .filter(|side| side.held_field)
+            .map(|side| side.owner)
+            .collect();
+        for winner in winners {
+            if battles.won.len() <= winner.index() {
+                battles.won.resize(winner.index() + 1, 0);
+            }
+            battles.won[winner.index()] += 1;
+        }
+    }
+    for side in &report.sides {
+        let ships = |counts: &[u32; 6]| counts.iter().sum::<u32>() - counts[0];
+        if ships(&side.initial) > 0 && ships(&side.lost) >= ships(&side.initial) {
+            let index = side.owner.index();
+            if battles.fleets_lost.len() <= index {
+                battles.fleets_lost.resize(index + 1, 0);
+            }
+            battles.fleets_lost[index] += 1;
+        }
+    }
     if battles.reports.len() >= Battles::REPORTS {
         battles.reports.remove(0);
     }
@@ -1611,6 +1734,29 @@ mod tests {
             );
         }
         battle
+    }
+
+    #[test]
+    fn the_estimate_in_a_battle_counts_what_everyone_sees() {
+        use crate::ai::estimate::{battle_values, total};
+        let (data, _, _, mut fleets) = setup();
+        let mut battle = duel(&data, &mut fleets, 0, 1);
+        let battles = Battles::default();
+        let (mine, theirs, foes) = battle_values(&battles, &battle, 0);
+        assert!(total(&mine) > 0.0 && total(&theirs) > 0.0);
+        assert_eq!(foes, vec![fleets.list[1].owner]);
+        // Schäden am Rumpf ändern die Schätzung nicht, auf keiner Seite: Den Zustand der
+        // gegnerischen Schiffe kennt die Führung nicht, und nur die eigenen Schäden
+        // einzurechnen hieße, sich im Lauf jedes Gefechts für unterlegen zu halten.
+        for ship in &mut battle.ships {
+            ship.hull *= 0.3;
+        }
+        assert_eq!(battle_values(&battles, &battle, 0), (mine, theirs, foes));
+        // Was nicht mehr kämpft, zählt nicht mehr.
+        set_active(&mut battle, 1, ShipStatus::Routing);
+        let (still_mine, gone, _) = battle_values(&battles, &battle, 0);
+        assert_eq!(still_mine, mine);
+        assert_eq!(total(&gone), 0.0);
     }
 
     /// Platz eines Schiffs der strategischen Ebene im Gefecht.

@@ -2,19 +2,29 @@
 //!
 //! Stand Meilenstein 2: nur Krieg und Frieden. Verträge, Vertrauen und verborgene
 //! Dispositionen folgen in Meilenstein 6.
+//!
+//! Nach einem Friedensschluss gilt zwischen den beiden eine Waffenruhe
+//! (`military.truce_days`): So lange nimmt keiner dem anderen gegenüber eine neue
+//! Kriegserklärung vor. Frieden und sofort wieder Krieg wäre sonst ein Mittel, ein
+//! laufendes Gefecht von vorn zu beginnen oder eine Sammelfrist zu umgehen.
 
 use crate::chronicle::{Chronicle, ChronicleKind};
+use crate::clock::TICKS_PER_DAY;
 use crate::ids::PolityId;
 use crate::polity::Polities;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Diplomacy {
     /// Kriege als geordnete Paare (kleinere ID zuerst).
     pub wars: BTreeSet<(PolityId, PolityId)>,
+    /// Waffenruhen nach einem Friedensschluss: je Paar (kleinere ID zuerst) der erste
+    /// Tag, an dem wieder ein Krieg erklärt werden kann.
+    #[serde(default)]
+    pub truces: BTreeMap<(PolityId, PolityId), u64>,
 }
 
 fn pair(a: PolityId, b: PolityId) -> (PolityId, PolityId) {
@@ -41,6 +51,15 @@ impl Diplomacy {
     pub fn is_at_war(&self, polity: PolityId) -> bool {
         self.enemies_of(polity).next().is_some()
     }
+
+    /// Erster Tag, an dem zwischen den beiden wieder ein Krieg erklärt werden kann, wenn
+    /// nach einem Friedensschluss noch eine Waffenruhe gilt.
+    pub fn truce_until(&self, a: PolityId, b: PolityId, day: u64) -> Option<u64> {
+        self.truces
+            .get(&pair(a, b))
+            .copied()
+            .filter(|until| *until > day)
+    }
 }
 
 pub fn declare_war(
@@ -52,9 +71,18 @@ pub fn declare_war(
     target: PolityId,
 ) -> Result<(), String> {
     check_pair(polities, aggressor, target)?;
-    if !diplomacy.wars.insert(pair(aggressor, target)) {
+    let day = tick / TICKS_PER_DAY;
+    diplomacy.truces.retain(|_, until| *until > day);
+    if diplomacy.at_war(aggressor, target) {
         return Err("es herrscht bereits Krieg".into());
     }
+    if let Some(until) = diplomacy.truce_until(aggressor, target, day) {
+        return Err(format!(
+            "nach dem Friedensschluss gilt noch {} Tage Waffenruhe",
+            until - day
+        ));
+    }
+    diplomacy.wars.insert(pair(aggressor, target));
     chronicle.push(
         tick,
         ChronicleKind::War,
@@ -69,6 +97,7 @@ pub fn declare_war(
     Ok(())
 }
 
+/// Schließt Frieden. Danach gilt `truce_days` Tage lang Waffenruhe zwischen den beiden.
 pub fn make_peace(
     diplomacy: &mut Diplomacy,
     polities: &Polities,
@@ -76,10 +105,16 @@ pub fn make_peace(
     tick: u64,
     a: PolityId,
     b: PolityId,
+    truce_days: u64,
 ) -> Result<(), String> {
     check_pair(polities, a, b)?;
     if !diplomacy.wars.remove(&pair(a, b)) {
         return Err("es herrscht kein Krieg".into());
+    }
+    let day = tick / TICKS_PER_DAY;
+    diplomacy.truces.retain(|_, until| *until > day);
+    if truce_days > 0 {
+        diplomacy.truces.insert(pair(a, b), day + truce_days);
     }
     chronicle.push(
         tick,

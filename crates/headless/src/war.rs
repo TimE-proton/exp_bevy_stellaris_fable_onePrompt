@@ -159,7 +159,9 @@ mod tests {
         let data = sim::GameData::load_workspace().unwrap();
         // Sechs Gemeinschaften, Nummern 0 bis 5: Die 6 ist der klassische Zählfehler, die 99
         // ein Tippfehler. Beides einmal als Urheber und einmal als Ziel.
+        // Das Drehbuch führt die Flotten selbst: Die militärische Führung der KI ruht.
         let script = WarScript::new(vec![
+            ScriptedEvent::rest_military(),
             ScriptedEvent::war(0, PolityId(6), PolityId(1)),
             ScriptedEvent::war(0, PolityId(0), PolityId(99)),
             ScriptedEvent::war(0, PolityId(2), PolityId(3)),

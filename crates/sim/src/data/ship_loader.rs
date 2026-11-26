@@ -451,6 +451,10 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     let unit = 0.0..=1.0;
     let checks = [
         (
+            "layup_salvage muss in 0..1 liegen",
+            unit.contains(&military.layup_salvage),
+        ),
+        (
             "upkeep_per_month muss in 0..1 liegen",
             unit.contains(&military.upkeep_per_month),
         ),
@@ -532,6 +536,11 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             military.regroup_days >= 1,
         ),
         (
+            // Sonst ließe sich eine Sammelfrist mit Frieden und neuem Krieg abkürzen.
+            "truce_days darf nicht unter regroup_days liegen",
+            military.truce_days >= military.regroup_days,
+        ),
+        (
             "weariness_per_navy_lost muss in 0..100 liegen",
             (0.0..=100.0).contains(&military.weariness_per_navy_lost),
         ),
@@ -551,6 +560,95 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
     for (message, ok) in checks {
         if !ok {
             return Err(invalid("balance.ron", format!("military: {message}")));
+        }
+    }
+    let classes = ShipClass::ALL.len();
+    let table_ok = military.counter.len() == classes
+        && military.counter.iter().all(|row| {
+            row.len() == classes && row.iter().all(|cell| cell.is_finite() && *cell > 0.0)
+        });
+    if !table_ok {
+        return Err(invalid(
+            "balance.ron",
+            format!("military.counter braucht {classes} Zeilen mit je {classes} positiven Werten"),
+        ));
+    }
+    let ai = &military.ai;
+    let ai_checks = [
+        (
+            "peace_share und max_share müssen in 0..1 liegen, max_share nicht unter peace_share",
+            unit.contains(&ai.peace_share)
+                && unit.contains(&ai.max_share)
+                && ai.max_share >= ai.peace_share,
+        ),
+        ("threat_jumps muss mindestens 1 sein", ai.threat_jumps >= 1),
+        (
+            "war_weight und war_factor müssen mindestens 1 sein, threat_gain darf nicht negativ sein",
+            ai.war_weight >= 1.0
+                && ai.war_weight.is_finite()
+                && ai.war_factor >= 1.0
+                && ai.war_factor.is_finite()
+                && ai.threat_gain >= 0.0
+                && ai.threat_gain.is_finite(),
+        ),
+        (
+            "reserve_months darf nicht negativ sein",
+            ai.reserve_months >= 0.0 && ai.reserve_months.is_finite(),
+        ),
+        (
+            "room_use und mix_weight müssen in 0..1 liegen",
+            unit.contains(&ai.room_use) && unit.contains(&ai.mix_weight),
+        ),
+        (
+            "defend_odds muss positiv sein, offensive_odds nicht kleiner, retreat_odds zwischen 0 und defend_odds",
+            ai.defend_odds > 0.0
+                && ai.offensive_odds >= ai.defend_odds
+                && ai.offensive_odds.is_finite()
+                && ai.retreat_odds >= 0.0
+                && ai.retreat_odds <= ai.defend_odds,
+        ),
+        (
+            "break_off_supply muss unter ready_supply liegen, beide in 0..1",
+            ai.break_off_supply >= 0.0
+                && ai.break_off_supply < ai.ready_supply
+                && ai.ready_supply <= 1.0,
+        ),
+        (
+            "break_off_loss muss über 0 und höchstens 1 sein",
+            ai.break_off_loss > 0.0 && ai.break_off_loss <= 1.0,
+        ),
+        (
+            "offensive_reach muss über 0 und unter 1 sein",
+            ai.offensive_reach > 0.0 && ai.offensive_reach < 1.0,
+        ),
+        (
+            "tech_edge muss in 0..1 liegen, research_cut über 0 und unter 1",
+            unit.contains(&ai.tech_edge) && ai.research_cut > 0.0 && ai.research_cut < 1.0,
+        ),
+        (
+            "research_design_bonus muss mindestens 1 sein",
+            ai.research_design_bonus >= 1.0 && ai.research_design_bonus.is_finite(),
+        ),
+        (
+            "layup_after_months muss mindestens 1 sein",
+            ai.layup_after_months >= 1,
+        ),
+        (
+            "lean_share muss über 0 und höchstens 1 sein",
+            ai.lean_share > 0.0 && ai.lean_share <= 1.0,
+        ),
+        (
+            "revenue_memory_months muss mindestens 1 sein",
+            ai.revenue_memory_months >= 1,
+        ),
+        (
+            "response_jumps muss mindestens 1 sein",
+            ai.response_jumps >= 1,
+        ),
+    ];
+    for (message, ok) in ai_checks {
+        if !ok {
+            return Err(invalid("balance.ron", format!("military.ai: {message}")));
         }
     }
     let battle = &data.balance.battle;

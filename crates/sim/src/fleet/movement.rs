@@ -105,6 +105,7 @@ pub fn update_blockades(
     };
     // Eine Sperre will gefahren sein: Ohne Treibstoff hält sie niemand aufrecht.
     let mut blockaded = Vec::new();
+    let mut besiegers = Vec::new();
     for system in &galaxy.systems {
         let Some(owner) = galaxy.system_owner(system.id) else {
             continue;
@@ -122,7 +123,22 @@ pub fn update_blockades(
         });
         if besieged && !defended {
             blockaded.push(system.id);
+            // Für die Berichte: wer das System sperrt (die Flotte mit der kleinsten Nummer).
+            besiegers.extend(
+                fleets
+                    .docked_in(system.id)
+                    .find(|fleet| {
+                        fleet.stance == Stance::Blockade
+                            && diplomacy.at_war(fleet.owner, owner)
+                            && stands(fleet)
+                            && fleet.has_fuel()
+                    })
+                    .map(|fleet| fleet.owner),
+            );
         }
+    }
+    for owner in besiegers {
+        fleets.tally_mut(owner).blockade_days += 1;
     }
     fleets.blockaded = blockaded;
 }

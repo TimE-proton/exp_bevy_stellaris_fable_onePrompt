@@ -2,8 +2,9 @@
 //! Flottenprogramme für `run`, `sweep`, `hash` und `fleets`. Gespielt wird es von
 //! `sim::harness::WarScript`.
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::battle::matchup::Side;
 use sim::clock::DAYS_PER_YEAR;
 use sim::harness::{ScriptedAct, ScriptedEvent, WarScript, YardChoice};
@@ -12,8 +13,9 @@ use sim::ids::PolityId;
 #[derive(Args, Clone, Default)]
 pub struct ScriptArgs {
     /// Krieg nach Drehbuch, beliebig oft: Zu Beginn des Jahres erklärt Gemeinschaft A
-    /// (Nummer ab 0) der Gemeinschaft B den Krieg und schickt ihre Flotten im
-    /// Blockadeauftrag in deren Heimatsystem.
+    /// (Nummer ab 0) der Gemeinschaft B den Krieg. Die Flotten führt die KI; ruht ihre
+    /// militärische Führung (`--ai`), schickt das Drehbuch die Flotten von A im
+    /// Blockadeauftrag in das Heimatsystem von B.
     #[arg(long, value_name = "JAHR:A:B", value_parser = parse_war)]
     pub war: Vec<ScriptedEvent>,
     /// Frieden nach Drehbuch, beliebig oft: Zu Beginn des Jahres schließt A mit B Frieden.
@@ -31,6 +33,25 @@ pub struct ScriptArgs {
     /// Verluste. Faktor 0 beendet das Programm.
     #[arg(long, value_name = "JAHR:WER:FAKTOR")]
     pub navy: Vec<String>,
+    /// Fertiges Drehbuch. `grenzkrieg`: Gemeinschaft 0 erklärt zu Beginn des Jahres 25
+    /// ihrem nächsten Nachbarn den Krieg und schließt zu Beginn des Jahres 45 Frieden.
+    /// `grenzkrieg-angreifer-ruht` und `grenzkrieg-nachbar-ruht`: derselbe Krieg, aber
+    /// die Flotten der einen Seite erhalten von der KI keine Befehle (sie rüstet weiter).
+    #[arg(long, value_enum)]
+    pub preset: Option<Preset>,
+    /// Militärische Führung durch die KI, beliebig oft: WER (Nummer ab 0, `alle` für
+    /// jede) wird `aktiv` geführt (Vorgabe), mit `flotte-ruht` rüstet die Gemeinschaft,
+    /// aber ihre Flotten erhalten keine Befehle, mit `ruht` ruht die militärische Führung
+    /// ganz und ein Krieg nach Drehbuch schickt die Flotten selbst los.
+    #[arg(long, value_name = "WER:ART")]
+    pub ai: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Preset {
+    Grenzkrieg,
+    GrenzkriegAngreiferRuht,
+    GrenzkriegNachbarRuht,
 }
 
 impl ScriptArgs {
@@ -43,6 +64,48 @@ impl ScriptArgs {
         }
         for text in &self.navy {
             events.push(parse_navy(text).map_err(|error| format!("--navy {text}: {error}"))?);
+        }
+        for text in &self.ai {
+            events.push(parse_mode(text).map_err(|error| format!("--ai {text}: {error}"))?);
+        }
+        if let Some(preset) = self.preset {
+            events.extend(sim::harness::border_war());
+            let passive = MilitaryMode::PassiveFleet;
+            match preset {
+                Preset::Grenzkrieg => {}
+                Preset::GrenzkriegAngreiferRuht => events.push(ScriptedEvent {
+                    day: 0,
+                    act: ScriptedAct::Mode {
+                        who: Some(PolityId(0)),
+                        mode: passive,
+                    },
+                }),
+                Preset::GrenzkriegNachbarRuht => events.push(ScriptedEvent {
+                    day: 0,
+                    act: ScriptedAct::NeighbourMode {
+                        of: PolityId(0),
+                        mode: passive,
+                    },
+                }),
+            }
+        }
+        // Eine Nummer, die es zu Beginn nicht gibt, ist meist ein Tippfehler: Die Angabe
+        // gilt dann erst, falls eine solche Gemeinschaft später entsteht.
+        let starting = data.galaxy.polities;
+        for event in &events {
+            let (option, who) = match &event.act {
+                ScriptedAct::Order { who, .. } => ("--order", *who),
+                ScriptedAct::Navy { who, .. } => ("--navy", *who),
+                ScriptedAct::Mode { who, .. } => ("--ai", *who),
+                _ => continue,
+            };
+            if let Some(who) = who.filter(|who| who.0 >= starting) {
+                eprintln!(
+                    "Hinweis: {option} nennt Gemeinschaft {}; die Partie beginnt mit den Gemeinschaften 0 bis {}. Die Angabe wirkt nur, falls eine Gemeinschaft mit dieser Nummer später entsteht.",
+                    who.0,
+                    starting.saturating_sub(1)
+                );
+            }
         }
         Ok(WarScript::new(events))
     }
@@ -135,6 +198,31 @@ pub fn parse_navy(text: &str) -> Result<ScriptedEvent, String> {
     })
 }
 
+/// Liest `WER:ART`, z. B. `alle:ruht` oder `1:flotte-ruht`. Gilt vom ersten Tag an.
+pub fn parse_mode(text: &str) -> Result<ScriptedEvent, String> {
+    let Some((who, mode)) = text.split_once(':') else {
+        return Err("erwartet wird WER:ART, z. B. alle:ruht".into());
+    };
+    let who = match who.trim() {
+        "alle" | "*" => None,
+        other => Some(PolityId(number(other, "Gemeinschaft")?)),
+    };
+    let mode = match mode.trim() {
+        "aktiv" => MilitaryMode::Active,
+        "flotte-ruht" => MilitaryMode::PassiveFleet,
+        "ruht" => MilitaryMode::Resting,
+        other => {
+            return Err(format!(
+                "unbekannte Art „{other}“; möglich sind aktiv, flotte-ruht und ruht"
+            ));
+        }
+    };
+    Ok(ScriptedEvent {
+        day: 0,
+        act: ScriptedAct::Mode { who, mode },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +297,17 @@ mod tests {
                 },
             })
         );
+        assert_eq!(
+            parse_mode("alle:ruht"),
+            Ok(ScriptedEvent {
+                day: 0,
+                act: ScriptedAct::Mode {
+                    who: None,
+                    mode: MilitaryMode::Resting
+                },
+            })
+        );
+        assert!(parse_mode("1:schläft").is_err());
         assert!(parse_navy("10:0:viel").is_err());
         assert!(parse_navy("10:0:-1").is_err());
         // Fehler nennen die Angabe, an der es liegt.

@@ -145,8 +145,9 @@ pub struct BudgetMonth {
     /// Ziel fehlte und was davon aufgefüllt wurde.
     pub lines: BTreeMap<Claim, Line>,
     /// Was der Abschluss den Ansprüchen vor der Rücklage nicht bewilligen konnte, weil
-    /// das Geld fehlte. (Bleibt ein Anspruch dagegen unter dem Verlangten, weil am Markt
-    /// die Ware fehlte, steht das nur in seiner Zeile.)
+    /// das Geld fehlte, und was der Wartung der Flotte danach im Monat an Geld fehlte.
+    /// (Bleibt ein Anspruch dagegen unter dem Verlangten, weil am Markt die Ware fehlte,
+    /// steht das nur in seiner Zeile.)
     pub unfunded: Money,
     /// Staatskasse nach dem Abschluss, ohne das, was Flotte und Forschung bewilligt ist
     /// und noch am selben Tag abgeht: der Bestand, aus dem die Beschaffung den Monat über
@@ -276,11 +277,24 @@ impl Economy {
     }
 
     /// Was ein Anspruch jetzt noch ausgeben darf: der Rest seiner Bewilligung, höchstens
-    /// die Staatskasse. Solange für die Gemeinschaft noch kein Haushaltsmonat eröffnet ist
-    /// (eine eben gegründete, bis zum nächsten Monatsersten), gilt nur die Kasse.
+    /// die Staatskasse. Die Beschaffung hat keine feste Bewilligung: Sie kauft aus allem,
+    /// was heute in der Kasse liegt und niemandem sonst bewilligt ist, auch aus der
+    /// Rücklage und aus dem, was seit dem Abschluss hinzukam (Anleihen, Verkäufe). Nur die
+    /// laufenden Einnahmen des Monats rührt sie nicht an: Sie gehören dem nächsten
+    /// Abschluss. Solange für die Gemeinschaft noch kein Haushaltsmonat eröffnet ist (eine
+    /// eben gegründete, bis zum nächsten Monatsersten), gilt nur die Kasse.
     pub fn allowance(&self, polity: PolityId, claim: Claim) -> Money {
         let treasury = self.treasury(polity).max(0);
         match self.budgets.get(polity.index()) {
+            Some(budget) if budget.opened && claim == Claim::Procurement => {
+                let granted: Money = budget.grants.values().map(|grant| (*grant).max(0)).sum();
+                let running = self
+                    .state_income_running
+                    .get(polity.index())
+                    .copied()
+                    .unwrap_or(0);
+                (treasury - granted - running).max(0)
+            }
             Some(budget) if budget.opened => budget
                 .grants
                 .get(&claim)
@@ -288,6 +302,32 @@ impl Economy {
                 .unwrap_or(0)
                 .clamp(0, treasury),
             _ => treasury,
+        }
+    }
+
+    /// Was die Wartung der Flotte heute ausgeben darf: den Rest ihrer Bewilligung, und
+    /// ist der verbraucht, die freie Kasse wie die Beschaffung. Die Bewilligung steht zu
+    /// den Preisen des Monatsersten; steigen sie im Monat, bliebe die Flotte sonst hinter
+    /// Nachrangigen zurück, die längst bezahlt sind.
+    pub fn fleet_allowance(&self, polity: PolityId) -> Money {
+        let opened = self
+            .budgets
+            .get(polity.index())
+            .is_some_and(|budget| budget.opened);
+        if opened {
+            self.allowance(polity, Claim::Fleet) + self.allowance(polity, Claim::Procurement)
+        } else {
+            self.treasury(polity).max(0)
+        }
+    }
+
+    /// Hält fest, dass einem Anspruch nach dem Abschluss Geld fehlte.
+    pub fn book_unfunded(&mut self, polity: PolityId, amount: Money) {
+        if amount <= 0 {
+            return;
+        }
+        if let Some(budget) = self.budgets.get_mut(polity.index()) {
+            budget.current.unfunded += amount;
         }
     }
 
@@ -351,8 +391,11 @@ impl Economy {
             let treasury = self.treasuries[index];
             let revenue = self.state_income[index];
             let wage_bill = std::mem::take(&mut self.wage_bill_running[index]);
-            let surcharge = (self.tax_rates[index] - standard_tax) * wage_bill as f64;
-            let standard_revenue = (revenue - surcharge.round() as Money).max(0);
+            // Gerechnet wird mit der Lohnsteuer, die wirklich einging, Tag für Tag zum Satz
+            // des Tages; welcher Satz am Tag des Abschlusses gilt, spielt keine Rolle.
+            let collected = std::mem::take(&mut self.wage_tax_running[index]);
+            let usual = (standard_tax * wage_bill as f64).round() as Money;
+            let standard_revenue = (revenue - collected + usual).max(0);
             let budget = &mut self.budgets[index];
             let closed = std::mem::take(&mut budget.current);
             let other = if budget.opened {
@@ -393,9 +436,9 @@ pub type Wants = BTreeMap<Claim, Money>;
 /// `wants` nennt den Bedarf der Ansprüche, die selbst ausgeben (Flotte, Beschaffung,
 /// Forschung und was später hinzukommt). Für die Beschaffung ist es der Voranschlag des
 /// Monats: Er wird vor allem Nachrangigen zurückgelegt. Ausgeben darf sie den ganzen Monat
-/// über alles, was nach dem Abschluss in der Kasse liegt und niemandem sonst bewilligt
-/// ist, auch die Rücklage; die Einnahmen des laufenden Monats rührt sie nicht an, sie
-/// gehören dem nächsten Abschluss.
+/// über alles, was in der Kasse liegt und niemandem sonst bewilligt ist, auch die Rücklage
+/// und was nach dem Abschluss hinzukommt (Anleihen, Verkäufe); die Einnahmen des laufenden
+/// Monats rührt sie nicht an, sie gehören dem nächsten Abschluss.
 ///
 /// Gibt die Einlagen in Kontore zurück (System und Betrag): Die Börse gibt dem Staat dafür
 /// neue Anteile aus.
@@ -507,11 +550,10 @@ pub fn settle_budget(
         }
     }
 
-    // Die Beschaffung kauft den Monat über aus allem, was jetzt in der Kasse liegt und
-    // nicht den anderen bewilligt ist.
+    // Die Beschaffung kauft den Monat über aus allem, was in der Kasse liegt und nicht den
+    // anderen bewilligt ist ([`Economy::allowance`]); hier steht der Stand nach dem Abschluss.
     let purse = (economy.treasuries[index] - granted).max(0);
     let budget = &mut economy.budgets[index];
-    budget.grants.insert(Claim::Procurement, purse);
     budget.current.treasury = purse;
     budget.current.reserve_target = reserve;
     budget.current.unfunded = unfunded;
@@ -852,6 +894,7 @@ mod tests {
             // Lohnsumme 10 000: Die Lohnsteuer bringt den Satz davon, dazu 500 an Zöllen.
             let wages = 10_000.0;
             economy.wage_bill_running[ME.index()] = to_money(wages);
+            economy.wage_tax_running[ME.index()] = to_money(wages * rate);
             let revenue = wages * rate + 500.0;
             let treasury = fresh.treasury(ME) + to_money(revenue);
             let month = close(

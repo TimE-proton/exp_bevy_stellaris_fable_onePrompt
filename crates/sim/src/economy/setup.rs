@@ -29,6 +29,7 @@ pub fn setup_economy(data: &GameData, galaxy: &Galaxy, polities: &Polities) -> E
         state_income: Vec::new(),
         state_income_running: Vec::new(),
         wage_bill_running: Vec::new(),
+        wage_tax_running: Vec::new(),
         budgets: Vec::new(),
         staff: Vec::new(),
     };

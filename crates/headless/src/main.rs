@@ -302,6 +302,38 @@ fn main() -> ExitCode {
                 mean(|r| r.battles as f64),
                 mean(|r| r.ships_lost as f64)
             );
+            let outcomes =
+                |index: usize| -> u32 { runs.iter().map(|run| run.battle_outcomes[index]).sum() };
+            let polity_sum = |f: fn(&sim::harness::PolitySummary) -> f64| -> f64 {
+                runs.iter().flat_map(|run| run.polities.iter()).map(f).sum()
+            };
+            println!(
+                "Gefechte nach Ausgang: {} entschieden, {} Patt, {} an der Zeitgrenze, {} eingestellt, {} ohne Sieger; ganze Flotten verloren: {:.0}",
+                outcomes(0),
+                outcomes(1),
+                outcomes(2),
+                outcomes(3),
+                outcomes(4),
+                polity_sum(|p| p.fleets_lost as f64)
+            );
+            let (applied, rejected) = runs.iter().fold((0u64, 0u64), |(a, r), run| {
+                (a + run.ai_applied, r + run.ai_rejected)
+            });
+            println!(
+                "Marine über alle Läufe: {:.0} Schiffe gebaut, {:.0} verloren, {:.0} stillgelegt; {:.0} Angriffe, {:.0} Blockadetage; {:.0} Monate im Krieg, {:.0} Monate mit Soldrückstand; Bauwert je Gemeinschaft {:.0}",
+                polity_sum(|p| p.ships_built as f64),
+                polity_sum(|p| p.ships_lost as f64),
+                polity_sum(|p| p.ships_laid_up as f64),
+                polity_sum(|p| p.offensives as f64),
+                polity_sum(|p| p.blockade_days as f64),
+                polity_sum(|p| p.months_at_war as f64),
+                polity_sum(|p| p.months_in_arrears as f64),
+                per_polity(|p| p.fleet_value)
+            );
+            println!(
+                "Befehle der KI: {applied} angenommen, {rejected} abgelehnt ({:.2} %)",
+                100.0 * rejected as f64 / (applied + rejected).max(1) as f64
+            );
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -311,12 +343,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -342,7 +374,23 @@ fn main() -> ExitCode {
                             to_credits(polity.budget.revenue),
                             to_credits(polity.budget.line(Claim::Fleet).paid),
                             to_credits(polity.budget.line(Claim::Research).paid),
-                            to_credits(polity.budget.handout())
+                            to_credits(polity.budget.handout()),
+                            polity.ships_built,
+                            polity.ships_laid_up,
+                            polity.fleets_lost,
+                            run.battle_outcomes[0],
+                            run.battle_outcomes[1],
+                            run.battle_outcomes[2],
+                            run.battle_outcomes[3],
+                            run.battle_outcomes[4],
+                            polity.months_at_war,
+                            polity.months_in_arrears,
+                            polity.fleet_value,
+                            polity.blockade_days,
+                            polity.offensives,
+                            run.ai_applied,
+                            run.ai_rejected,
+                            polity.battles_won
                         ));
                     }
                 }
@@ -676,9 +724,15 @@ fn print_summary(summary: &RunSummary) {
         "Gefechte: {}, darin verlorene Schiffe: {}",
         summary.battles, summary.ships_lost
     );
+    println!(
+        "Befehle der KI: {} angenommen, {} abgelehnt ({:.2} %)",
+        summary.ai_applied,
+        summary.ai_rejected,
+        100.0 * summary.ai_rejected_share()
+    );
     for polity in &summary.polities {
         println!(
-            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner  {:>2} {:<7}  {:>3} Schiffe  Stärke {:>5.0}{}{}{}",
+            "  {:<24} {:>3} Planeten  {:>9.0} Mio. Einwohner  {:>2} {:<7}  {:>3} Schiffe  Stärke {:>5.0}{}{}{}{}",
             polity.name,
             polity.planets,
             polity.population,
@@ -697,6 +751,14 @@ fn print_summary(summary: &RunSummary) {
             },
             if polity.ships_lost > 0 {
                 format!("  {} Schiffe verloren", polity.ships_lost)
+            } else {
+                String::new()
+            },
+            if polity.ships_built + polity.ships_laid_up > 0 {
+                format!(
+                    "  {} gebaut, {} stillgelegt",
+                    polity.ships_built, polity.ships_laid_up
+                )
             } else {
                 String::new()
             },

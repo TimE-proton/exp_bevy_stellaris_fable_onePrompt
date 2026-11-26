@@ -31,7 +31,9 @@ pub struct FleetsArgs {
     /// Bestellungen, Flottenprogramme, Kriege und Friedensschlüsse nach Drehbuch.
     #[command(flatten)]
     script: crate::script::ScriptArgs,
-    /// Jede Gemeinschaft beginnt mit so vielen Startflotten.
+    /// Jede Gemeinschaft beginnt mit so vielen Startflotten. Mit dieser Angabe, mit
+    /// `--research-share` und mit `--fleet-cost` ruht die militärische Führung der KI,
+    /// damit die Flotten bleiben, wie sie sind; `--ai alle:aktiv` schaltet sie ein.
     #[arg(long, default_value_t = 1)]
     start_fleets: u32,
     /// Forschungsetat aller Gemeinschaften als Anteil der laufenden Einnahmen, statt der
@@ -280,7 +282,17 @@ fn overview(data: &GameData, args: &FleetsArgs, seeds: (u64, u64), script: &WarS
     }
 }
 
-pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
+pub fn run(data: &GameData, mut args: FleetsArgs) -> ExitCode {
+    // Der Vergleich misst Flotten fester Größe: Eine KI, die selbst rüstet, stilllegt und
+    // ihren Forschungsetat kürzt, veränderte genau das, was verglichen wird.
+    let compares =
+        args.start_fleets != 1 || args.research_share.is_some() || args.fleet_cost != 1.0;
+    if compares && args.script.ai.is_empty() {
+        args.script.ai.push("alle:ruht".into());
+        println!(
+            "Vergleich mit festen Flotten: Die militärische Führung der KI ruht (--ai alle:aktiv schaltet sie ein)."
+        );
+    }
     let script = match args.script.script(data) {
         Ok(script) => script,
         Err(error) => {

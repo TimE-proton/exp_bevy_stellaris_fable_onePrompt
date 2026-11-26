@@ -74,6 +74,10 @@ pub struct BattleArgs {
     /// Aufstellungen (Zeile als Partei A und als Partei B).
     #[arg(long)]
     matrix: bool,
+    /// Mit --matrix: statt der Tabelle die Kontertabelle `counter` für den Block `military`
+    /// in `balance.ron` ausgeben, abgeleitet aus den Verlustanteilen der Matrix.
+    #[arg(long)]
+    ron: bool,
     /// Spiegelgefechte: jede Klasse und eine gemischte Flotte gegen sich selbst.
     #[arg(long)]
     mirror: bool,
@@ -103,7 +107,11 @@ pub fn run(data: &GameData, args: BattleArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.matrix {
-        matrix(data, &args);
+        if args.ron {
+            counter_table(data, &args);
+        } else {
+            matrix(data, &args);
+        }
         return ExitCode::SUCCESS;
     }
     if args.mirror {
@@ -508,6 +516,58 @@ fn matrix(data: &GameData, args: &BattleArgs) {
         }
         println!();
     }
+}
+
+/// Sockel der Kontertabelle: Ein Verlustanteil von null zählt nicht als unendlich gut.
+const COUNTER_FLOOR: f32 = 0.25;
+
+/// Die Kontertabelle für `balance.ron: military.counter`, abgeleitet aus der Matrix: jede
+/// Klasse gegen jede bei gleichem Bauwert, in beiden Aufstellungen. Der Wert einer Zelle
+/// ist die Wurzel aus dem Verhältnis der Verlustanteile (Spalte zu Zeile, je mit einem
+/// Sockel): 1 heißt gleichwertig, über 1 ist die Zeilenklasse der Spaltenklasse überlegen.
+/// Zwei reine Flotten gleichen Werts stehen dann im Kräfteverhältnis Zelle durch
+/// Gegenzelle. Jäger kämpfen nur mit ihrem Träger und stehen mit 1 in der Tabelle.
+fn counter_table(data: &GameData, args: &BattleArgs) {
+    let known = vec![false; data.techs.len()];
+    let budget = args.budget.unwrap_or_else(|| default_budget(data));
+    let side = |class: ShipClass| {
+        (class != ShipClass::Fighter)
+            .then(|| data.best_design(class, &known))
+            .flatten()
+            .map(|design| Side::for_budget(data, design, budget))
+    };
+    println!(
+        "        // Kontertabelle: Zeile gegen Spalte in der Reihenfolge Jäger, Korvette, Fregatte,\n\
+         \x20       // Kreuzer, Schlachtschiff, Träger. Abgeleitet mit `headless battle --matrix --ron\n\
+         \x20       // --seeds {}..{}` bei Bauwert {budget:.0} je Partei.\n\
+         \x20       counter: [",
+        args.seeds.0, args.seeds.1
+    );
+    for row_class in ShipClass::ALL {
+        let mut cells = Vec::new();
+        for column_class in ShipClass::ALL {
+            let value = match (side(row_class), side(column_class)) {
+                (Some(row), Some(column)) if row_class != column_class => {
+                    let forward = fight_many(data, args.seeds, &[row.clone(), column.clone()]);
+                    let backward = fight_many(data, args.seeds, &[column, row]);
+                    let forward = Summary::of(&forward, false);
+                    let backward = Summary::of(&backward, true);
+                    let runs = (forward.runs + backward.runs).max(1) as f32;
+                    let own = (forward.loss[0] + backward.loss[0]) / runs;
+                    let other = (forward.loss[1] + backward.loss[1]) / runs;
+                    ((COUNTER_FLOOR + other) / (COUNTER_FLOOR + own)).sqrt()
+                }
+                _ => 1.0,
+            };
+            cells.push(format!("{value:.2}"));
+        }
+        println!(
+            "            [{}], // {}",
+            cells.join(", "),
+            row_class.label()
+        );
+    }
+    println!("        ],");
 }
 
 /// Zwei gemischte Flotten, dazu Zeit je Takt und Höchststand an Geschossen.

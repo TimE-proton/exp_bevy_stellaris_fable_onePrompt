@@ -1,6 +1,7 @@
 //! Börse, Besitz und Zusammenhalt als Ganzes.
 
 use sim::GameData;
+use sim::ai::MilitaryMode;
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::Sector;
@@ -559,6 +560,11 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
     let victim = PolityId(1);
     let mut blockaded = observer(7);
     let mut control = observer(7);
+    // Die Blockade stellt die Prüfung selbst; die militärische Führung der KI ruht in
+    // beiden Partien.
+    for sim in [&mut blockaded, &mut control] {
+        sim.set_military_mode(None, MilitaryMode::Resting);
+    }
     blockaded.run_days(30 * DAYS_PER_YEAR);
     control.run_days(30 * DAYS_PER_YEAR);
     let colony = largest_colony(&blockaded, victim);
@@ -645,4 +651,37 @@ fn share_prices_follow_profits_and_fall_under_blockade() {
         assert!(weariness > 5.0, "{side:?}: Kriegsmüdigkeit {weariness:.1}");
     }
     assert!(check_invariants(blockaded.world()).is_ok());
+}
+
+/// Die Einnahmen, an denen der Markt die Schuldenlast eines Staates misst, sind die
+/// laufenden Einnahmen des Haushalts, nicht der Zuwachs der Kasse: Der Haushalt gibt die
+/// Einnahmen Monat für Monat wieder aus, die Kasse wächst dabei kaum.
+#[test]
+fn the_revenue_behind_the_bond_yield_is_the_revenue_of_the_budget() {
+    let mut sim = observer(3);
+    sim.run_days(4 * DAYS_PER_YEAR);
+    let world = sim.world();
+    let economy = world.resource::<Economy>();
+    let finance = world.resource::<Finance>();
+    let mut seen = 0;
+    for polity in world.resource::<Polities>().alive() {
+        let budget = economy.budget(polity.id).expect("der Haushalt");
+        let months = budget.history.len().max(1) as f64;
+        let mean = to_credits(budget.year().revenue) / months;
+        let shown = finance.polity(polity.id).revenue;
+        assert!(mean > 0.0, "{}: Haushalt ohne Einnahmen", polity.name);
+        assert!(
+            shown > 0.7 * mean && shown < 1.3 * mean,
+            "{}: Einnahmen {shown:.0} gegen {mean:.0} im Haushalt",
+            polity.name
+        );
+        // Der Zuwachs der Kasse über das Jahr liegt weit darunter: Daran gemessen wäre
+        // jede Schuld erdrückend.
+        let last = to_credits(economy.state_income_of(polity.id));
+        assert!(last > 0.0 && (shown - last).abs() < 0.5 * last);
+        seen += 1;
+    }
+    assert!(seen >= 2);
+    assert_eq!(economy_stats(world).money_drift, 0);
+    assert!(check_invariants(world).is_ok());
 }
