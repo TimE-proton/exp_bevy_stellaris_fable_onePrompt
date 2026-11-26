@@ -449,7 +449,8 @@
         // nicht ein Vielfaches.
         // Das Geld ist das Gehalt der Forschenden: Es fließt aus der Staatskasse an die
         // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
-        // Kriegskasse und Schuldendienst gehen vor.
+        // Kriegskasse, Schuldendienst und die Flotte (Sold, Nachschub, Instandsetzung,
+        // Werften) gehen vor: Sie werden am Monatsersten vor der Forschung bezahlt.
         budget_share: 0.20,
         max_budget_share: 0.30,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
@@ -490,8 +491,9 @@
         // Monat diesen Anteil.
         intel_decay: 0.02,
         // Ein Gefecht zeigt beiden Seiten die Technik der anderen am Werk: Jede gewinnt
-        // so viel Einblick in die Forschung des Gegners. Bei 0,3 engt ein Gefecht die
-        // Schätzung um eine Stufe ein, drei machen sie fast genau.
+        // so viel Einblick in die Forschung des Gegners. Vom Grundwert aus engt ein Gefecht
+        // bei 0,3 die Schätzung um eine Stufe ein, nach dreien ist sie genau; ohne neue
+        // Gefechte verblasst der Gewinn wieder (intel_decay).
         intel_per_battle: 0.3,
         // Schätzungen fremder Stufen sind höchstens 2 * estimate_spread Stufen weit; bei
         // vollem Einblick sind sie genau. Die untere Grenze einer Schätzung ist bestätigt

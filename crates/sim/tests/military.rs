@@ -338,10 +338,11 @@ fn the_military_balance_is_checked_when_the_data_is_loaded() {
     // Morgen von vorn.
     assert!(rejected("sammeln", "regroup_days: 30", "regroup_days: 0").contains("regroup_days"));
     // Was ein Gefecht über die Technik des Gegners verrät, ist ein Anteil.
-    assert!(
-        rejected("einblick", "intel_per_battle: 0.3", "intel_per_battle: 1.5")
-            .contains("intel_per_battle")
+    let insight = format!(
+        "intel_per_battle: {}",
+        data().balance.research.intel_per_battle
     );
+    assert!(rejected("einblick", &insight, "intel_per_battle: 1.5").contains("intel_per_battle"));
     assert!(rejected("schock", "defeat_shock: 0.9", "defeat_shock: 1.5").contains("defeat_shock"));
     assert!(
         rejected(
