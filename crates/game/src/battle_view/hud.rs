@@ -155,6 +155,7 @@ impl Tally {
     }
 
     /// Schiffe einer Klasse, über alle Spalten.
+    #[cfg(test)]
     pub fn total(&self, class: usize) -> u32 {
         self.fighting[class]
             + self.withdrawing[class]
