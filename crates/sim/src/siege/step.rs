@@ -2146,14 +2146,32 @@ mod tests {
         assert!((colony.facts.population - floor).abs() < 1e-9);
         assert!(colony.capital < 0.01, "das Kapital hat keine Untergrenze");
         assert_eq!(colony.defense.scar, 1.0);
-        // Dieselbe Flotte richtet auf einer großen Welt anteilig weniger an.
-        let damage = |population: f64| {
+        // Dieselbe Flotte richtet auf einer großen Welt anteilig weniger an: Der Schaden
+        // fällt mit der Bevölkerung. Die Flotte ist so klein gewählt, dass die Obergrenze
+        // der Rate auch auf der kleinsten Welt nicht greift.
+        let firepower =
+            0.5 * balance.bombard_cap * (50.0 + balance.bombard_pop0) / balance.bombard_k;
+        let damage = |population: f64, firepower: f64| {
             let mut case = Case::new(population, PlanetDefense::default(), &balance);
+            case.orbit.firepower = firepower;
             case.siege.orders.fire = Fire::Area;
             1.0 - case.day(&balance).capital()
         };
-        assert!(damage(50.0) > 5.0 * damage(500.0));
-        assert!(damage(500.0) > 5.0 * damage(4000.0));
+        let spread = |small: f64, big: f64| {
+            let expected = (big + balance.bombard_pop0) / (small + balance.bombard_pop0);
+            let measured = damage(small, firepower) / damage(big, firepower);
+            assert!(
+                (measured / expected - 1.0).abs() < 1e-9,
+                "{small} gegen {big}"
+            );
+            expected
+        };
+        assert!(spread(50.0, 500.0) > 3.0);
+        assert!(spread(500.0, 4000.0) > 3.0);
+        // Eine erdrückende Flotte zerstört je Tag höchstens den Anteil der Obergrenze.
+        let most = balance.area.1 * balance.bombard_cap;
+        assert!((damage(50.0, 1e6) - most).abs() < 1e-12);
+        assert!(damage(50.0, firepower) < most);
     }
 
     #[test]
@@ -2168,12 +2186,14 @@ mod tests {
             };
             let mut case = Case::new(population, defense, &balance);
             case.cede(ZoneKind::Outskirts);
-            // Das Zentrum ist so gut wie gefallen: kaum noch Miliz.
+            // Das Zentrum ist so gut wie gefallen: kaum noch Miliz, und die Truppe ist der
+            // Reserve erdrückend überlegen.
             let center = case.zone(ZoneKind::Center);
             case.siege.zones[center].militia = 0.5;
-            case.siege.army = 150.0;
-            case.siege.army_peak = 150.0;
-            case.siege.army_supply = 10_000.0;
+            let army = 2.0 * (0.5 + regulars) / balance.zone_fall;
+            case.siege.army = army;
+            case.siege.army_peak = army;
+            case.siege.army_supply = 100.0 * army;
             case.siege.landed_day = Some(10);
             case.siege.orders = SiegeOrders {
                 assault: true,
@@ -2188,6 +2208,7 @@ mod tests {
         let (city, center) = (case.zone(ZoneKind::City), case.zone(ZoneKind::Center));
         let city_militia = case.siege.zones[city].militia;
         let garrison = case.defenders();
+        let supply = case.siege.army_supply;
         let mut report = SiegeReport::default();
         take_zone(
             &mut case.siege,
@@ -2211,26 +2232,28 @@ mod tests {
         // Vorräte über dem, was der Untergrund birgt, fallen der Truppe zu.
         assert_eq!(case.defense.depot, balance.bunker_days);
         let captured = (200.0 - balance.bunker_days) * garrison;
-        assert!((case.siege.army_supply - 10_000.0 - captured).abs() < 1e-6);
+        assert!((case.siege.army_supply - supply - captured).abs() < 1e-6);
 
-        // Im Tagesrechner: Auf einer Welt mit einer Stadt bricht mit dem Zentrum die ganze
-        // Oberfläche; die Regulären im Bunker kämpfen im Untergrund weiter.
+        // Im Tagesrechner: Nach dem Zentrum hält die erschütterte Stadt weniger als den
+        // Anteil zone_fall der Oberfläche vom Beginn. Damit bricht die ganze Oberfläche;
+        // die Regulären im Bunker kämpfen im Untergrund weiter.
         let mut case = build(600.0, 20.0);
+        assert!(shaken <= balance.zone_fall * case.siege.surface_start);
         let effects = case.day(&balance);
         assert_eq!(effects.verdict, None);
         assert!(case.siege.surface_lost());
-        assert_eq!(case.siege.deep, balance.deep_per_bunker);
+        // Was vom Tag im Zentrum übrig ist, sitzt jetzt im Bunker.
+        let deep = case.siege.deep;
+        assert!(deep > 0.5 * balance.deep_per_bunker && deep <= balance.deep_per_bunker);
+        assert_eq!(case.defense.regulars, deep);
         assert_eq!(
             case.siege.phase(&case.defense),
             crate::siege::Phase::Underground
         );
-        assert!(
-            (effects.disruption
-                - balance.disrupt.0 * balance.center_share
-                - balance.disrupt.1 * (1.0 - balance.center_share))
-                .abs()
-                < 1e-6
-        );
+        let fought_and_taken = balance.disrupt.0 * balance.center_share
+            + balance.disrupt.1 * (1.0 - balance.center_share);
+        assert!((effects.disruption - fought_and_taken).abs() < 1e-6);
+        let before = (case.attacker_lost, case.defender_lost);
         let mut verdict = None;
         for _ in 0..balance.max_siege_days {
             let effects = case.day(&balance);
@@ -2244,7 +2267,9 @@ mod tests {
         assert_eq!(verdict, Some(Outcome::Stormed));
         assert_eq!(case.siege.deep, 0.0);
         // Den Bunker auszuräumen kostet mehr, als darin sitzt.
-        assert!(case.attacker_lost > 1.5 * balance.deep_per_bunker);
+        let killed = case.defender_lost - before.1;
+        assert!((killed - deep).abs() < 1e-6);
+        assert!(case.attacker_lost - before.0 > killed);
 
         // Auf einer großen Welt halten die Städte auch ohne Zentrum: Die Oberfläche ist
         // nicht verloren, der Bodenkrieg geht weiter.

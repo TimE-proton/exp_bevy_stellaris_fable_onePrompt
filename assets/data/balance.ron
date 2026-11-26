@@ -505,7 +505,10 @@
         shield_regen: 100.0,
         shield_depot: 0.1,
         // Rate = min(bombard_cap, Beschuss × bombard_k / (Bevölkerung + bombard_pop0)).
-        bombard_k: 0.025,
+        // Der wichtigste Hebel für das Tempo des Beschusses: Mit 0,05 ist Flächenbeschuss
+        // zwei- bis dreimal so schnell wie ein Sturm ohne ihn und kostet dabei ein Siebtel
+        // bis ein Drittel der Beute.
+        bombard_k: 0.05,
         bombard_pop0: 50.0,
         bombard_cap: 0.05,
         // (militärische Wirkung, Begleitschaden) als Vielfaches der Rate: gezielt 15 : 1,
@@ -516,16 +519,23 @@
         pop_floor: 0.05,
 
         // --- Boden und Untergrund ---
-        // Anteil der wirksamen Stärke, den eine Seite der anderen je Tag abnimmt.
-        r: 0.03,
-        // Landekopf: Faktor auf die Truppe in den ersten beach_days Tagen.
+        // Anteil der wirksamen Stärke, den eine Seite der anderen je Tag abnimmt. Der
+        // wichtigste Hebel für das Tempo am Boden: Bei anderthalbfacher Überlegenheit
+        // dauert ein Sturm rund vier Wochen, bei Gleichstand sechs bis sieben. Wer r
+        // ändert, zieht beach_days und tunnel_front mit (beide wachsen, wenn r fällt).
+        r: 0.015,
+        // Landekopf: Faktor auf die Truppe in den ersten beach_days Tagen, etwa ein Viertel
+        // eines Sturms: Vorwärts aufgestellte Reguläre treffen die Landung in ihrer Schwäche.
         beach: 0.6,
-        beach_days: 3,
+        beach_days: 6,
         // Faktor ohne Nachschub (Truppe) bzw. ohne Vorräte (Garnison).
         unsupplied: 0.5,
-        // Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Truppe sinken;
-        // unter diesem Anteil ihres Höchststands gilt eine Landung als abgeschlagen.
-        zone_fall: 0.15,
+        // Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Truppe sinken; die
+        // Oberfläche bricht, wenn sie unter diesen Anteil ihres Anfangs sinken; unter diesem
+        // Anteil ihres Höchststands gilt eine Landung als abgeschlagen. Bei einem Zehntel
+        // wird bis zur doppelten Überlegenheit um jede Zone gekämpft, und eine Stadt hält
+        // auch dann noch, wenn das Zentrum gefallen ist.
+        zone_fall: 0.10,
         // Befestigung: Umland, Stadt, Zentrum, Batterie, Schildwerk.
         fort: (1.0, 1.3, 1.8, 1.4, 1.5),
         // Ab so vielen Mio. Einwohnern hat eine Welt eine, ab so vielen zwei Stadtzonen.
@@ -544,8 +554,11 @@
         // Jeder verlorene Verband kostet die Zone diesen Anteil an Bevölkerung und Kapital.
         damage_per_loss: 0.001,
         // Untergrund: so viele Verbände je Seite kämpfen zugleich; Befestigung Sockel und
-        // je Bunkerstufe; Faktor für die Seite mit „Tunnelkriegführung".
-        tunnel_front: 8.0,
+        // je Bunkerstufe; Faktor für die Seite mit „Tunnelkriegführung". Mit r ergibt die
+        // Front, was ein Sturm im Untergrund höchstens je Tag ausräumt (0,24 Verbände):
+        // 40 Reguläre in drei Bunkerstufen kosten rund fünf Monate und das Dreifache an
+        // Angreifern; die Vorräte dort reichen kaum länger.
+        tunnel_front: 16.0,
         under_base: 3.0,
         under_per_bunker: 0.3,
         tunnel_tech: 1.25,
@@ -557,9 +570,10 @@
         // Diesen Anteil ihres Bedarfs kauft eine eingeschlossene Garnison am Markt vor Ort.
         forage_share: 0.4,
         // Ohne Vorräte löst sich je Tag dieser Anteil der Verteidiger auf (geteilt durch
-        // den Durchhaltewillen); eine Truppe ohne Nachschub verliert strand_rate.
+        // den Durchhaltewillen); eine Truppe ohne Nachschub verliert strand_rate und ist
+        // damit nach gut 90 Tagen unter zone_fall ihres Höchststands, also verloren.
         starve_rate: 0.02,
-        strand_rate: 0.02,
+        strand_rate: 0.025,
         // Unter diesem Anteil der Garnison bei Beginn gibt eine ausgehungerte Welt auf.
         capitulate_frac: 0.15,
         // Verbrauch der Truppe an Tagen ohne Gefecht, als Anteil des Kampftags.

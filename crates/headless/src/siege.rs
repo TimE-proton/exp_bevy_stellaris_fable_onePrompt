@@ -105,7 +105,11 @@ pub struct SiegeArgs {
     hold_fire: bool,
 
     // --- Belagerer ---
-    /// Feuerkraft im Orbit (Startflotte 150).
+    /// Truppen an Bord als Vielfaches der Garnison, wenn --troops fehlt.
+    #[arg(long, default_value_t = 1.5)]
+    force_ratio: f64,
+    /// Feuerkraft im Orbit (Standard: Startflotten mit dem Laderaum für die Truppen; eine
+    /// Startflotte hat 150).
     #[arg(long)]
     firepower: Option<f64>,
     /// Standfestigkeit der Flotte: Gewicht je Klasse mal Rumpf, Schild und Panzerung
@@ -147,9 +151,10 @@ pub struct SiegeArgs {
     /// Der Belagerer beherrscht „Orbitale Feuerleitung".
     #[arg(long)]
     support_tech: bool,
-    /// Der Belagerer bzw. der Verteidiger beherrscht „Tunnelkriegführung".
+    /// Der Belagerer beherrscht „Tunnelkriegführung".
     #[arg(long)]
     tunnel_attacker: bool,
+    /// Der Verteidiger beherrscht „Tunnelkriegführung".
     #[arg(long)]
     tunnel_defender: bool,
 
@@ -182,8 +187,9 @@ pub struct SiegeArgs {
 const FLEET_FIREPOWER: f64 = 150.0;
 const FLEET_TOUGHNESS: f64 = 1084.0;
 const FLEET_BERTHS: f64 = 17.5;
-/// Buchwert der Betriebe je Mio. Einwohner, wie ihn Heimatwelten zu Spielbeginn haben.
-const FIRM_VALUE_PER_MILLION: f64 = 30.0;
+/// Buchwert der Betriebe je Mio. Einwohner: Mittel über besiedelte Welten in Partien
+/// (einzelne Welten liegen zwischen 20 und 80).
+const FIRM_VALUE_PER_MILLION: f64 = 38.0;
 
 /// Eine Bezugswelt samt der Flotte, die sie angreift.
 struct Scenario {
@@ -195,8 +201,6 @@ struct Scenario {
     bunkers: u8,
     regulars: f64,
     depot: f64,
-    /// Startflotten des Belagerers, voll beladen.
-    fleets: f64,
 }
 
 fn scenario(preset: PresetArg, balance: &SiegeBalance) -> Scenario {
@@ -210,7 +214,6 @@ fn scenario(preset: PresetArg, balance: &SiegeBalance) -> Scenario {
             bunkers: 0,
             regulars: 0.0,
             depot: 60.0,
-            fleets: 1.0,
         },
         PresetArg::Welt => Scenario {
             name: "Welt",
@@ -221,7 +224,6 @@ fn scenario(preset: PresetArg, balance: &SiegeBalance) -> Scenario {
             bunkers: 0,
             regulars: 0.0,
             depot: 60.0,
-            fleets: 2.0,
         },
         PresetArg::Heimatwelt => Scenario {
             name: "Heimatwelt",
@@ -232,7 +234,6 @@ fn scenario(preset: PresetArg, balance: &SiegeBalance) -> Scenario {
             bunkers: 0,
             regulars: balance.home_start.regulars,
             depot: balance.home_start.depot_days as f64,
-            fleets: 5.0,
         },
     }
 }
@@ -242,11 +243,6 @@ fn scenario(preset: PresetArg, balance: &SiegeBalance) -> Scenario {
 fn build_view(args: &SiegeArgs, preset: PresetArg, balance: &SiegeBalance) -> SiegeView {
     let base = scenario(preset, balance);
     let population = args.population.unwrap_or(base.population).max(0.0);
-    let firepower = args
-        .firepower
-        .unwrap_or(base.fleets * FLEET_FIREPOWER)
-        .max(0.0);
-    let troops = args.troops.unwrap_or(base.fleets * FLEET_BERTHS).max(0.0);
     let mut defense = PlanetDefense {
         stations: args.stations.unwrap_or(base.stations).max(0.0),
         guns: args.guns.unwrap_or(base.guns).max(0.0),
@@ -289,6 +285,16 @@ fn build_view(args: &SiegeArgs, preset: PresetArg, balance: &SiegeBalance) -> Si
         balance,
     );
     siege.orders.focus = args.focus;
+    // Ohne Angabe: Truppen im festen Verhältnis zur Garnison, dazu so viele Startflotten,
+    // wie sie Laderaum brauchen.
+    let troops = args
+        .troops
+        .unwrap_or(args.force_ratio * siege.garrison_start)
+        .max(0.0);
+    let firepower = args
+        .firepower
+        .unwrap_or(troops / FLEET_BERTHS * FLEET_FIREPOWER)
+        .max(0.0);
     let mut attacker_gates = [false; 4];
     attacker_gates[Gate::Support as usize] = args.support_tech;
     attacker_gates[Gate::Tunnel as usize] = args.tunnel_attacker;
@@ -434,6 +440,13 @@ fn reference(args: &SiegeArgs, balance: &SiegeBalance) {
         "Drei Wege zum Fall eines Planeten. Verluste in Verbänden (V), Rumpf als Anteil der \
          schweren Schiffe, Beute als Anteil des heutigen Werts."
     );
+    if args.troops.is_none() {
+        println!(
+            "Der Belagerer bringt das {:.2}-Fache der Garnison an Truppen und die Startflotten, \
+             die sie tragen.",
+            args.force_ratio
+        );
+    }
     for preset in [PresetArg::Kolonie, PresetArg::Welt, PresetArg::Heimatwelt] {
         let view = build_view(args, preset, balance);
         println!();
