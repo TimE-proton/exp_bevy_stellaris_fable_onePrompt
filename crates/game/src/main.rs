@@ -7,6 +7,8 @@ mod map;
 mod selftest;
 mod session;
 mod state;
+#[cfg(test)]
+mod testing;
 mod time_control;
 mod traffic;
 mod ui;
@@ -35,18 +37,25 @@ fn main() -> AppExit {
         }
     };
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "KONFLUENZ".into(),
-                resolution: (1600, 900).into(),
-                present_mode: PresentMode::AutoVsync,
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "KONFLUENZ".into(),
+            resolution: (1600, 900).into(),
+            present_mode: PresentMode::AutoVsync,
             ..default()
-        }))
-        .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.015, 0.018, 0.03)))
+        }),
+        ..default()
+    }))
+    .add_plugins(EguiPlugin::default());
+    add_game(&mut app, data, args);
+    app.run()
+}
+
+/// Das Spiel selbst, ohne Engine und Fenster. Die Systemtests setzen es auf eine Engine
+/// ohne Grafikkarte; so prüfen sie dieselben Plugins in derselben Reihenfolge.
+fn add_game(app: &mut App, data: sim::GameData, args: args::Args) {
+    app.insert_resource(ClearColor(Color::srgb(0.015, 0.018, 0.03)))
         .insert_resource(data)
         .insert_resource(args)
         // Der Kern: dieselbe Plugin-Gruppe wie im Headless-Programm.
@@ -61,6 +70,5 @@ fn main() -> AppExit {
             battle_view::BattleViewPlugin,
             ui::UiPlugin,
             selftest::SelftestPlugin,
-        ))
-        .run()
+        ));
 }
