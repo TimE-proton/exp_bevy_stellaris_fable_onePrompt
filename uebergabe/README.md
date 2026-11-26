@@ -7,6 +7,10 @@ Meilenstein 7 gelöscht.
 
 ## Entscheidungen des Auftraggebers
 
+- 26.11.2026, 13:15 Uhr UTC: Der Auftraggeber hat das Kontingent zurückgesetzt und die
+  Fortsetzung verlangt. Seitdem läuft Teil II von `restplan.md`: Meilenstein 4 zuerst, zwei
+  Stränge (Kern: Staatshaushalt auf dem Zwischenstand abschließen; Spiel: Nachbesserung
+  abschließen, dann Kern 8758cd7 einmergen und Technologiefenster bauen).
 - 26.11.2026, 13 Uhr UTC: Das Kontingent des Hauptmodells war nach fünf Stunden mit vier
   parallelen Strängen erneut erschöpft (Reset 29.11.2026, 03:00 UTC). Freigegebener Plan
   (`restplan.md`): Zwischenstände sichern, Pause ohne automatischen Start; danach
@@ -50,11 +54,14 @@ Gemessen am 26.11.2026 nach dem Sichern mit `cargo test --no-fail-fast`. Reparie
   `pointer::tests` (`a_grabbed_pointer_is_withheld_from_the_interface`,
   `a_press_just_beside_a_button_belongs_to_the_button`, `windows_cover_and_passive_areas_do_not`)
   und drei in `selftest::tests` (Kamera aus oder falsche Kamera).
-- `wip/m4-integ` 8ffaae6: baut. Der Testlauf lief beim Schreiben noch; Zwischenergebnis: in
-  den Unit-Tests ein Test rot (`fleet::supply::tests::an_empty_treasury_pays_what_it_has_and_records_arrears`),
-  in `tests/military.rs` neun von 46 rot (Werft, Auffüllen, Unterhalt, Rückstände: alles, was
-  am Geldfluss des Staates hängt), `battle`, `economy`, `finance` grün.
-- `wip/m5-rechner` 8d0023b: Lauf stand noch aus.
+- `wip/m4-integ` 8ffaae6: baut. `cargo test -p sim`: in den Unit-Tests einer von 149 rot
+  (`fleet::supply::tests::an_empty_treasury_pays_what_it_has_and_records_arrears`), in
+  `tests/military.rs` neun von 46 rot (Werft, Auffüllen, Reparatur, Unterhalt, Rückstände:
+  alles, was am Geldfluss des Staates hängt), in `tests/tech.rs` einer von 34 rot
+  (`research_pay_moves_money_from_the_treasury_to_households`); `battle`, `economy` und
+  `finance` grün.
+- `wip/m5-rechner` 8d0023b: baut, alle 339 Kerntests grün (200 Unit-Tests, `battle` 45,
+  `economy` 6, `finance` 9, `military` 34, `siege` 11, `tech` 34).
 
 ## Inhalt
 
