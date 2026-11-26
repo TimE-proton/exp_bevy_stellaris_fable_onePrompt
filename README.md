@@ -395,7 +395,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte; offen: Militär-KI, Oberfläche |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte, Staatshaushalt mit fester Rangfolge der Ansprüche; offen: Militär-KI, Oberfläche |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
