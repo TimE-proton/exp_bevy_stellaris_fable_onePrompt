@@ -12,10 +12,14 @@ use super::{FleetsTab, UiState};
 use crate::battle_view::campaign::can_watch;
 use crate::map::Selection;
 use bevy_egui::egui::{self, Color32, RichText};
+use sim::chronicle::Chronicle;
 use sim::clock::Date;
 use sim::command::{CommandSource, SimCommand};
 use sim::data::{GameData, ShipClass};
-use sim::fleet::{Battles, Fleet, Fleets, cancel_order, merge_fleets, order_ship, split_fleet};
+use sim::economy::Economy;
+use sim::fleet::{
+    Battles, Fleet, Fleets, cancel_order, lay_up, merge_fleets, order_ship, split_fleet,
+};
 use sim::ids::{FleetId, PolityId, SystemId};
 
 /// Beschriftungen des Fensters. Das README nennt sie; ein Test hält beide beieinander.
@@ -27,6 +31,7 @@ pub const RETREAT: &str = "Rückzug";
 pub const SHOW_ON_MAP: &str = "Auf der Karte zeigen";
 pub const MERGE: &str = "Vereinigen mit";
 pub const SPLIT: &str = "Abteilen";
+pub const LAY_UP: &str = "Stilllegen";
 pub const ORDER: &str = "Bestellen";
 pub const CANCEL: &str = "Streichen";
 
@@ -68,11 +73,17 @@ pub(super) fn is_waiting(sim: &SimRefs, command: &SimCommand) -> bool {
 /// Führt die wartenden Befehle des Spielers an Flotten und Werften auf der Kopie aus, in
 /// ihrer Reihenfolge und mit den Funktionen des Kerns: So prüft der Probelauf gegen den
 /// Stand, den der Kern beim nächsten Takt vorfindet. Was er ablehnte, ändert auch hier
-/// nichts.
-fn apply_waiting(sim: &SimRefs, scratch: &mut Fleets) {
+/// nichts. Ein wartendes Stilllegen verkauft Bauteile am Markt; es läuft auf `economy`,
+/// der Kopie der Wirtschaft des Aufrufers, oder ohne sie auf einer eigenen.
+pub(super) fn apply_waiting(
+    sim: &SimRefs,
+    scratch: &mut Fleets,
+    mut economy: Option<&mut Economy>,
+) {
     let Some(player) = sim.config.player else {
         return;
     };
+    let mut own: Option<Economy> = None;
     let known = sim.research.known(player);
     let day = sim.clock.day();
     let order = |scratch: &mut Fleets, planet, design| {
@@ -106,6 +117,24 @@ fn apply_waiting(sim: &SimRefs, scratch: &mut Fleets) {
             SimCommand::SplitFleet { fleet, ships } => {
                 let _ = split_fleet(sim.data, sim.polities, scratch, player, *fleet, ships);
             }
+            SimCommand::LayUpShips { fleet, ships } => {
+                let economy = match economy.as_deref_mut() {
+                    Some(economy) => economy,
+                    None => own.get_or_insert_with(|| sim.economy.clone()),
+                };
+                let _ = lay_up(
+                    sim.data,
+                    sim.galaxy,
+                    economy,
+                    sim.polities,
+                    scratch,
+                    &mut Chronicle::default(),
+                    sim.clock.tick,
+                    player,
+                    *fleet,
+                    ships,
+                );
+            }
             // Alles andere ändert nicht, was die Prüfungen dieses Fensters lesen.
             _ => {}
         }
@@ -121,7 +150,7 @@ pub(super) fn dry_run<T>(
     order: impl FnOnce(&mut Fleets) -> Result<T, String>,
 ) -> Result<(), String> {
     let mut scratch = sim.fleets.clone();
-    apply_waiting(sim, &mut scratch);
+    apply_waiting(sim, &mut scratch, None);
     order(&mut scratch).map(|_| ()).map_err(sentence)
 }
 
@@ -802,10 +831,19 @@ mod tests {
         let after = fleet(&game, mine).clone();
         assert!(after.alive, "die Flotte hat den Rückzug überstanden");
         let until = after.regroup_until.expect("die Flotte sammelt sich");
+        // Hat der Marsch den Tank geleert, sagt die Liste auch das.
+        let label = FleetState::Regrouping { until }.label();
+        let shown: Vec<String> = game
+            .labels()
+            .into_iter()
+            .map(|(text, _)| text)
+            .filter(|text| text.contains("sammelt sich"))
+            .collect();
         assert!(
-            game.text(&FleetState::Regrouping { until }.label())
-                .is_some(),
-            "die Liste zeigt die Sammelfrist nicht"
+            shown
+                .iter()
+                .any(|text| *text == label || *text == format!("{label}, Tank leer")),
+            "die Liste zeigt die Sammelfrist nicht: {shown:?}"
         );
         assert_eq!(game.button("Marsch zum Ziel"), None);
         assert_eq!(game.button("Rückzug"), None);
@@ -1037,6 +1075,137 @@ mod tests {
         for ship in &ships {
             assert!(game.button(&format!("Schiff {ship}")).is_some());
         }
+    }
+
+    #[test]
+    fn a_ship_is_laid_up_through_the_window() {
+        let (mut game, me) = campaign_with_window();
+        let first = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let ships: Vec<_> = fleet(&game, first).ships.iter().map(|s| s.id).collect();
+        // Ohne gewählte Schiffe ist der Knopf gesperrt, und der Grund des Kerns steht da.
+        assert!(game.disabled_button(LAY_UP).is_some());
+        assert!(game.text("Keine Schiffe zum Stilllegen genannt.").is_some());
+        // Der Tagesanfang mit seinen Zahlungen ist vorbei: Bis zum nächsten Tag bewegt
+        // nur noch der Befehl die Staatskasse.
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 0,
+        };
+        for _ in 0..400 {
+            if game.resource::<sim::clock::SimClock>().tick >= 2 {
+                break;
+            }
+            game.frames(1);
+        }
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(2);
+        let day = game.resource::<sim::clock::SimClock>().day();
+        game.click_on(&format!("Schiff {}", ships[0]));
+        game.frames(2);
+        // Das Fenster nennt, was der Kern auf einer Kopie erlöst und was die Flotte spart.
+        let claim = |game: &TestGame| {
+            let world = game.world();
+            sim::fleet::fleet_claim(
+                world.resource::<GameData>(),
+                world.resource::<Galaxy>(),
+                world.resource::<Economy>(),
+                world.resource::<Fleets>(),
+                world.resource::<Polities>().get(me),
+            )
+        };
+        let treasury = |game: &TestGame| game.resource::<Economy>().treasury(me);
+        let (before, cash) = (claim(&game), treasury(&game));
+        let line = game
+            .labels()
+            .into_iter()
+            .map(|(text, _)| text)
+            .find(|text| text.starts_with(&format!("1 von {} Schiffen: bringt ", ships.len())))
+            .expect("Erlös und Ersparnis stehen neben dem Knopf");
+        game.click_on(LAY_UP);
+        // Vorgemerkt: Die Zeit steht, das Schiff ist noch da, der Knopf ist gesperrt.
+        game.frames(2);
+        game.click_on(&format!("Schiff {}", ships[0]));
+        game.frames(2);
+        assert!(game.disabled_button(LAY_UP).is_some());
+        assert!(game.text(WAITING).is_some());
+        game.click_on(&format!("Schiff {}", ships[0]));
+        // Ein Takt: Der Kern nimmt den Befehl an.
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 0,
+        };
+        for _ in 0..200 {
+            if !game.resource::<CommandLog>().entries.is_empty() {
+                break;
+            }
+            game.frames(1);
+        }
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(2);
+        let log = game.resource::<CommandLog>();
+        let sent = log.entries.last().expect("ein Befehl");
+        assert_eq!(
+            sent.command,
+            SimCommand::LayUpShips {
+                fleet: first,
+                ships: vec![ships[0]]
+            }
+        );
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        assert_eq!(game.resource::<sim::clock::SimClock>().day(), day);
+        // Das Schiff ist fort, die Kasse hat den Erlös, die Flotte verlangt weniger.
+        let left: Vec<_> = fleet(&game, first).ships.iter().map(|s| s.id).collect();
+        assert_eq!(left, ships[1..]);
+        assert_eq!(game.button(&format!("Schiff {}", ships[0])), None);
+        let (after, now) = (claim(&game), treasury(&game));
+        assert!(after < before, "die Flotte kostet {after} statt {before}");
+        assert!(now > cash, "die Kasse hat {now} statt {cash}");
+        let said = format!(
+            "1 von {} Schiffen: bringt {} Credits am heutigen Markt und spart {} Credits im \
+             Monat an Sold und Ersatzteilen.",
+            ships.len(),
+            crate::ui::format::grouped(sim::economy::to_credits(now - cash)),
+            crate::ui::format::grouped(sim::economy::to_credits(before - after))
+        );
+        assert_eq!(line, said);
+    }
+
+    #[test]
+    fn a_truce_locks_the_war_button_and_the_core_names_its_reason() {
+        use crate::ui::panels::truce_label;
+        let (mut game, me) = campaign_with_window();
+        game.click_on(TITLE);
+        let enemy = game
+            .resource::<Polities>()
+            .list
+            .iter()
+            .find(|polity| polity.alive && polity.id != me)
+            .unwrap()
+            .id;
+        command(&mut game, me, SimCommand::DeclareWar { target: enemy });
+        run(&mut game, 3);
+        command(&mut game, me, SimCommand::MakePeace { target: enemy });
+        run(&mut game, 3);
+        let day = game.resource::<sim::clock::SimClock>().day();
+        let until = game
+            .resource::<sim::diplomacy::Diplomacy>()
+            .truce_until(me, enemy, day)
+            .expect("nach dem Frieden gilt eine Waffenruhe");
+        // Der Knopf ist gesperrt und nennt die Tage, die der Kern führt.
+        assert!(
+            game.disabled_button(&truce_label(until - day)).is_some(),
+            "kein gesperrter Knopf „{}“",
+            truce_label(until - day)
+        );
+        // Kommt der Befehl dennoch, sagt der Spieler-Hinweis den Grund des Kerns.
+        command(&mut game, me, SimCommand::DeclareWar { target: enemy });
+        run(&mut game, 3);
+        let notice = game.resource::<Notice>().text.clone();
+        assert!(
+            notice.starts_with("Befehl abgelehnt: nach dem Friedensschluss gilt noch "),
+            "{notice}"
+        );
+        assert!(notice.ends_with("Tage Waffenruhe."), "{notice}");
     }
 
     #[test]

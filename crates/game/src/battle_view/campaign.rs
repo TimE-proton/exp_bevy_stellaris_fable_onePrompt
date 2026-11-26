@@ -393,17 +393,24 @@ fn follow(
                     feed.info.own_sides.clear();
                     feed.info.retreat_waiting.clear();
                     feed.info.calendar = calendar(&data, &clock);
-                    // Den letzten Takt des Gefechts hat die Simulation gerechnet und es
-                    // im selben Takt abgeräumt; was in ihm geschah, steht nur in der
-                    // Bilanz. Der gezeigte Stand wird ihr angeglichen.
-                    let fates: Vec<SideFate> = report
-                        .sides
-                        .iter()
-                        .map(|side| SideFate {
-                            lost: side.lost,
-                            escaped: side.escaped,
-                        })
-                        .collect();
+                    // Die Simulation räumt das Gefecht im Takt seines letzten Schritts ab
+                    // und bewahrt den Endstand des Rechners einige Tage auf: Er ist der
+                    // letzte gezeigte Stand. Fehlt er (ein Spielstand, der ihn nicht
+                    // führt), wird der vorletzte Stand der Bilanz nach Anzahl angeglichen.
+                    let fates: Vec<SideFate> = match battles.concluded(watched.id) {
+                        Some(last) => {
+                            feed.refresh(last);
+                            Vec::new()
+                        }
+                        None => report
+                            .sides
+                            .iter()
+                            .map(|side| SideFate {
+                                lost: side.lost,
+                                escaped: side.escaped,
+                            })
+                            .collect(),
+                    };
                     feed.conclude(result_of(&galaxy, &fleets, &polities, report), &fates);
                     options.summary = true;
                     speed.paused = true;

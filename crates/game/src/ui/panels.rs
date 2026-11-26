@@ -784,6 +784,14 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                                     target: polity.id,
                                 }));
                             }
+                        } else if let Some(until) =
+                            sim.diplomacy
+                                .truce_until(player, polity.id, sim.clock.day())
+                        {
+                            // Der Kern lehnte die Erklärung ab; die Frist nennt er selbst.
+                            let days = until - sim.clock.day();
+                            ui.add_enabled(false, egui::Button::new(truce_label(days)).small())
+                                .on_disabled_hover_text(truce_text(days));
                         } else if ui
                             .small_button("Krieg")
                             .on_hover_text(
@@ -803,6 +811,19 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ui.end_row();
             }
         });
+}
+
+/// Warum der Knopf „Krieg“ gesperrt ist: Nach einem Friedensschluss gilt eine Waffenruhe.
+pub fn truce_text(days: u64) -> String {
+    format!(
+        "Waffenruhe: Nach dem Friedensschluss lässt sich noch {days} Tage kein Krieg \
+         erklären."
+    )
+}
+
+/// Beschriftung des gesperrten Knopfs während der Waffenruhe.
+pub fn truce_label(days: u64) -> String {
+    format!("Krieg in {days} T.")
 }
 
 fn pause_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {

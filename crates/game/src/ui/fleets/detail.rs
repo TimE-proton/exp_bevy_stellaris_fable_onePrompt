@@ -2,22 +2,134 @@
 //! dem Zustand, den der Kern führt.
 
 use super::{
-    FleetState, MERGE, SHOW_ON_MAP, SPLIT, WARN, dry_run, dry_run_once, gated_button, location,
-    pick,
+    FleetState, LAY_UP, MERGE, SHOW_ON_MAP, SPLIT, WAITING, WARN, apply_waiting, dry_run,
+    dry_run_once, gated_button, location, pick, sentence, waiting,
 };
 use crate::map::Selection;
 use crate::ui::UiState;
+use crate::ui::format::grouped;
 use crate::ui::format::percent;
 use crate::ui::panels::{ACCENT, MUTED, SimRefs, UiAction, detail as small, watch_button};
 use bevy_egui::egui::{self, RichText};
 use sim::battle::{Doctrine, Formation};
+use sim::chronicle::Chronicle;
 use sim::command::SimCommand;
-use sim::fleet::{Fleet, Ship, Stance, merge_fleets, split_fleet};
-use sim::ids::PolityId;
+use sim::economy::{Money, to_credits};
+use sim::fleet::{Fleet, Ship, Stance, fleet_claim, lay_up, merge_fleets, split_fleet};
+use sim::ids::{FleetId, PolityId, ShipId};
 
 /// Beschriftung eines Schiffs in der Liste: seine Nummer, wie der Kern sie führt.
 pub fn ship_label(ship: &Ship) -> String {
     format!("Schiff {}", ship.id)
+}
+
+/// Was das Stilllegen der gewählten Schiffe brächte: Erlös und Ersparnis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayUpPreview {
+    /// Erlös aus dem Verkauf der Bauteile, wie der Kern ihn am heutigen Markt erzielte.
+    pub proceeds: Money,
+    /// Um so viel sinkt, was die Flotte im Monat verlangt (Sold und Ersatzteile).
+    pub saving: Money,
+}
+
+/// Der Probelauf von gestern gilt, solange sich nichts geändert hat: Takt, Flotte, Wahl
+/// und Zahl der wartenden Befehle.
+type LayUpKey = (u64, FleetId, Vec<ShipId>, usize);
+
+/// Fragt den Kern, was das Stilllegen brächte: Der Befehl läuft auf einer Kopie von
+/// Flotten und Wirtschaft, die danach verworfen wird. Lehnt der Kern ab, ist sein Grund
+/// das Ergebnis. Vorgemerkte Befehle gelten auf der Kopie als geschehen.
+pub fn lay_up_preview(
+    sim: &SimRefs,
+    player: PolityId,
+    fleet: FleetId,
+    ships: &[ShipId],
+) -> Result<LayUpPreview, String> {
+    let already = waiting(sim).any(|command| match command {
+        SimCommand::LayUpShips { ships: named, .. } => {
+            named.iter().any(|ship| ships.contains(ship))
+        }
+        _ => false,
+    });
+    if already {
+        return Err(WAITING.into());
+    }
+    let polity = sim.polities.get(player);
+    let mut fleets = sim.fleets.clone();
+    let mut economy = sim.economy.clone();
+    apply_waiting(sim, &mut fleets, Some(&mut economy));
+    // Beide Male zu den Preisen von heute: Der Unterschied ist allein der der Schiffe.
+    let before = fleet_claim(sim.data, sim.galaxy, sim.economy, &fleets, polity);
+    let proceeds = lay_up(
+        sim.data,
+        sim.galaxy,
+        &mut economy,
+        sim.polities,
+        &mut fleets,
+        &mut Chronicle::default(),
+        sim.clock.tick,
+        player,
+        fleet,
+        ships,
+    )
+    .map_err(sentence)?;
+    let after = fleet_claim(sim.data, sim.galaxy, sim.economy, &fleets, polity);
+    Ok(LayUpPreview {
+        proceeds,
+        saving: before - after,
+    })
+}
+
+/// Stilllegen der gewählten Schiffe: Erlös und Ersparnis stehen daneben, sonst der Grund
+/// des Kerns.
+fn lay_up_row(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    player: PolityId,
+    fleet: &Fleet,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    let chosen = state.split_ships.clone();
+    let key: LayUpKey = (sim.clock.tick, fleet.id, chosen.clone(), sim.pending.len());
+    let id = egui::Id::new("stilllegen-probelauf");
+    type Kept = (LayUpKey, Result<LayUpPreview, String>);
+    let kept: Option<Kept> = ui.data(|data| data.get_temp(id));
+    let preview = match kept {
+        Some((known, preview)) if known == key => preview,
+        _ => {
+            let preview = lay_up_preview(sim, player, fleet.id, &chosen);
+            ui.data_mut(|data| data.insert_temp::<Kept>(id, (key, preview.clone())));
+            preview
+        }
+    };
+    let check = preview.clone().map(|_| ());
+    if gated_button(
+        ui,
+        LAY_UP,
+        None,
+        &check,
+        "Die gewählten Schiffe verlassen das Spiel für immer; Sold und Wartung enden mit \
+         ihnen. Einen Teil ihrer Bauteile verkauft der Staat am Markt des Systems. Nicht \
+         umkehrbar.",
+    ) {
+        actions.push(UiAction::Command(SimCommand::LayUpShips {
+            fleet: fleet.id,
+            ships: chosen.clone(),
+        }));
+        state.split_ships.clear();
+    }
+    match preview {
+        Ok(preview) => ui.label(small(format!(
+            "{} von {} Schiffen: bringt {} Credits am heutigen Markt und spart {} Credits \
+             im Monat an Sold und Ersatzteilen.",
+            chosen.len(),
+            fleet.ships.len(),
+            grouped(to_credits(preview.proceeds)),
+            grouped(to_credits(preview.saving))
+        ))),
+        Err(reason) => ui.label(small(reason).color(MUTED)),
+    };
 }
 
 /// Auftrag, Aufstellung und Doktrin der Flotte als Auswahlfelder.
@@ -136,6 +248,7 @@ fn reorganize(
             Err(reason) => ui.label(small(reason).color(MUTED)),
         };
     });
+    ui.horizontal_wrapped(|ui| lay_up_row(ui, sim, player, fleet, state, actions));
 }
 
 /// Die Schiffe der Flotte: Klasse, Entwurf und Zustand. Ein Klick auf die Nummer wählt
@@ -164,7 +277,7 @@ fn ship_table(ui: &mut egui::Ui, sim: &SimRefs, fleet: &Fleet, state: &mut UiSta
                 let chosen = state.split_ships.contains(&ship.id);
                 if ui
                     .selectable_label(chosen, ship_label(ship))
-                    .on_hover_text("Zum Abteilen wählen oder abwählen")
+                    .on_hover_text("Zum Abteilen oder Stilllegen wählen oder abwählen")
                     .clicked()
                 {
                     if chosen {

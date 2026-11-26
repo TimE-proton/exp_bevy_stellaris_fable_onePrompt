@@ -322,6 +322,14 @@ impl TestGame {
         })
     }
 
+    /// Mitte des gesperrten Knopfs mit genau dieser Beschriftung; `None`, wenn es keinen
+    /// gibt oder er sich drücken lässt.
+    pub fn disabled_button(&mut self, label: &str) -> Option<Vec2> {
+        self.element(|node| {
+            node.role() == Role::Button && node.label() == Some(label) && node.is_disabled()
+        })
+    }
+
     /// Mitte des ersten Textes mit genau diesem Wortlaut, wie er zuletzt gezeichnet wurde.
     /// Auch Zeilen einer Liste, die gerade aus dem sichtbaren Teil gerollt sind, haben ihren
     /// Ort: An ihm lässt sich ablesen, wie weit die Liste gerollt ist.

@@ -925,6 +925,10 @@ mod campaign {
         let mut game = TestGame::start("--seed 3");
         game.frames(4);
         let me = game.resource::<SimConfig>().player.expect("Spieler");
+        // Der Test stellt die fremden Flotten selbst: Die militärische Führung der KI ruht.
+        game.world_mut()
+            .resource_mut::<sim::ai::AiState>()
+            .default_mode = sim::ai::MilitaryMode::Resting;
         let mine = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
         let home = home_of(&game, me);
         // Zwei andere Gemeinschaften, deren Heimatsysteme einander am nächsten liegen.
