@@ -287,6 +287,15 @@ pub(crate) fn apply_commands(
 
 fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> Result<(), String> {
     let tick = ctx.clock.tick;
+    // Befehlen kann nur, wen es gibt.
+    if !ctx
+        .polities
+        .list
+        .get(polity.index())
+        .is_some_and(|issuer| issuer.alive)
+    {
+        return Err("Gemeinschaft besteht nicht mehr".into());
+    }
     match command {
         SimCommand::ClaimPlanet { planet } => polity::claim_planet(
             &mut ctx.galaxy,

@@ -5391,3 +5391,44 @@ fn peace_and_a_new_war_neither_shelter_a_fleet_nor_restart_a_battle() {
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
 }
+
+#[test]
+fn a_script_naming_a_community_that_does_not_exist_leaves_a_trace() {
+    use sim::harness::{ScriptedAct, ScriptedEvent, WarScript, YardChoice};
+    // Bestellung und Flottenprogramm für eine Gemeinschaft, die es nicht gibt: Die Befehle
+    // ergehen trotzdem und stehen abgelehnt im Protokoll, statt spurlos zu entfallen.
+    let nobody = PolityId(99);
+    let mut sim = observer(1);
+    let script = WarScript::new(vec![
+        ScriptedEvent {
+            day: 5,
+            act: ScriptedAct::Order {
+                who: Some(nobody),
+                ships: vec![(design("speer"), 1)],
+                yard: YardChoice::Capital,
+            },
+        },
+        ScriptedEvent {
+            day: 5,
+            act: ScriptedAct::Navy {
+                who: Some(nobody),
+                factor: 2.0,
+            },
+        },
+    ]);
+    script.run_until(&mut sim, 10, false);
+    let rejected: Vec<_> = sim
+        .command_log()
+        .entries
+        .iter()
+        .filter(|entry| entry.polity == nobody)
+        .collect();
+    assert_eq!(rejected.len(), 2, "{rejected:?}");
+    for entry in rejected {
+        assert_eq!(
+            entry.outcome,
+            CommandOutcome::Rejected("Gemeinschaft besteht nicht mehr".into())
+        );
+    }
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}

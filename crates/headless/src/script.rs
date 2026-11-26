@@ -89,6 +89,24 @@ impl ScriptArgs {
                 }),
             }
         }
+        // Eine Nummer, die es zu Beginn nicht gibt, ist meist ein Tippfehler: Die Angabe
+        // gilt dann erst, falls eine solche Gemeinschaft später entsteht.
+        let starting = data.galaxy.polities;
+        for event in &events {
+            let (option, who) = match &event.act {
+                ScriptedAct::Order { who, .. } => ("--order", *who),
+                ScriptedAct::Navy { who, .. } => ("--navy", *who),
+                ScriptedAct::Mode { who, .. } => ("--ai", *who),
+                _ => continue,
+            };
+            if let Some(who) = who.filter(|who| who.0 >= starting) {
+                eprintln!(
+                    "Hinweis: {option} nennt Gemeinschaft {}; die Partie beginnt mit den Gemeinschaften 0 bis {}. Die Angabe wirkt nur, falls eine Gemeinschaft mit dieser Nummer später entsteht.",
+                    who.0,
+                    starting.saturating_sub(1)
+                );
+            }
+        }
         Ok(WarScript::new(events))
     }
 }

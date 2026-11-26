@@ -669,6 +669,16 @@ impl WarScript {
             .collect()
     }
 
+    /// Die Gemeinschaft, die eine Angabe nennt, wenn es sie an diesem Tag nicht gibt.
+    fn absent(sim: &Headless, who: Option<PolityId>) -> Option<PolityId> {
+        who.filter(|id| {
+            !sim.polities()
+                .list
+                .get(id.index())
+                .is_some_and(|polity| polity.alive)
+        })
+    }
+
     fn issue(sim: &mut Headless, event: &ScriptedEvent) {
         match &event.act {
             ScriptedAct::Peace { a, b } => sim.issue(*a, SimCommand::MakePeace { target: *b }),
@@ -695,6 +705,18 @@ impl WarScript {
                 }
             }
             ScriptedAct::Order { who, ships, yard } => {
+                if let Some(absent) = Self::absent(sim, *who) {
+                    // Die Bestellung ergeht trotzdem: So steht ihre Ablehnung im Protokoll.
+                    for (design, _) in ships {
+                        sim.issue(
+                            absent,
+                            SimCommand::BuildShip {
+                                planet: PlanetId(0),
+                                design: *design,
+                            },
+                        );
+                    }
+                }
                 for polity in Self::scope(sim, *who) {
                     let Some(planet) = Self::yard(sim, polity, *yard) else {
                         continue;
@@ -712,8 +734,27 @@ impl WarScript {
                     }
                 }
             }
-            // Das Programm bestellt zum Monatsbeginn, siehe `top_up`.
-            ScriptedAct::Navy { .. } => {}
+            // Das Programm bestellt zum Monatsbeginn, siehe `top_up`. Gibt es die
+            // Gemeinschaft nicht, steht eine abgelehnte Bestellung im Protokoll.
+            ScriptedAct::Navy { who, .. } => {
+                let design = sim
+                    .world()
+                    .resource::<GameData>()
+                    .balance
+                    .military
+                    .starting_fleet_ids
+                    .first()
+                    .map(|(design, _)| *design);
+                if let (Some(absent), Some(design)) = (Self::absent(sim, *who), design) {
+                    sim.issue(
+                        absent,
+                        SimCommand::BuildShip {
+                            planet: PlanetId(0),
+                            design,
+                        },
+                    );
+                }
+            }
         }
     }
 
