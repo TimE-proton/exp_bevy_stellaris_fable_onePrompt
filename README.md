@@ -149,6 +149,9 @@ befiehlt den Rückzug; ein befohlener Rückzug lässt sich nicht zurücknehmen. 
 ein Schiff öffnet seine Tafel mit Rumpf, Schild, Panzerung je Seite, Munition, Treibstoff,
 Moral, Ziel und allen Modulen; „Heranholen“ und „Verfolgen“ führen die Kamera zu ihm.
 Klicks, Züge und Mausrad auf Leisten und Tafeln wirken nicht auf die Szene dahinter.
+Beim Umsehen ist der Mauszeiger gefangen und unsichtbar. Solange gehört die Maus allein der
+Kamera: Das Mausrad ändert die Fluggeschwindigkeit, und ein Klick gilt weder einer Tafel
+noch einem Schiff.
 
 Die Übersicht rückt so weit ab, dass jedes Schiff auf dem Feld neben den offenen Tafeln zu
 sehen ist. Die Blicke des Ziffernblocks gelten dem gewählten Schiff, ohne Auswahl allen

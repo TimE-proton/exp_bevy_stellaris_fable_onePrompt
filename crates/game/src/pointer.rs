@@ -22,7 +22,7 @@ use bevy::input::InputSystems;
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use bevy_egui::{EguiInput, EguiPreUpdateSet, PrimaryEguiContext, egui};
+use bevy_egui::{EguiContext, EguiInput, EguiPreUpdateSet, PrimaryEguiContext, egui};
 
 /// Was die Oberfläche vom Fenster belegt, Stand ihres letzten Durchlaufs.
 #[derive(Resource, Default)]
@@ -318,22 +318,31 @@ fn keep_wheel_from_world(owner: Res<PointerOwner>, mut scroll: ResMut<Accumulate
 /// was gerade unter der unsichtbaren Stelle liegt.
 fn keep_grabbed_pointer_from_ui(
     owner: Res<PointerOwner>,
-    mut input: Option<Single<&mut EguiInput, With<PrimaryEguiContext>>>,
+    mut ui: Option<Single<(&mut EguiContext, &mut EguiInput), With<PrimaryEguiContext>>>,
 ) {
     if owner.grabbed()
-        && let Some(input) = input.as_mut()
+        && let Some(ui) = ui.as_mut()
     {
-        withhold_pointer(&mut input.events);
+        let (context, input) = &mut **ui;
+        let ctx = context.get_mut().clone();
+        withhold_pointer(&mut input.events, |button| {
+            ctx.input(|input| input.pointer.button_down(button))
+        });
     }
 }
 
 /// Streicht aus den Eingaben eines Frames alles, was einen Zeiger voraussetzt, und meldet
 /// den Zeiger als fort (nichts wird mehr hervorgehoben, kein Hinweistext erscheint).
-/// Losgelassene Tasten kommen durch: Was vor dem Fangen begonnen wurde, etwa ein Zug an
-/// einem Rollbalken, endet so sauber. Einen Klick ergibt ein Loslassen allein nicht.
-fn withhold_pointer(events: &mut Vec<egui::Event>) {
+///
+/// Durch kommt allein das Loslassen einer Taste, die die Oberfläche noch für gedrückt hält
+/// (`held`), weil sie vor dem Fangen niederging: Ein Zug an einem Rollbalken endet so
+/// sauber, und die Oberfläche wartet nicht ewig auf das Ende eines Tastendrucks. Einen
+/// Klick ergibt ein Loslassen allein nicht.
+fn withhold_pointer(events: &mut Vec<egui::Event>, held: impl Fn(egui::PointerButton) -> bool) {
     events.retain(|event| match event {
-        egui::Event::PointerButton { pressed, .. } => !pressed,
+        egui::Event::PointerButton {
+            pressed, button, ..
+        } => !pressed && held(*button),
         egui::Event::PointerMoved(_)
         | egui::Event::MouseMoved(_)
         | egui::Event::MouseWheel { .. }
@@ -850,16 +859,30 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::default(),
         };
-        let mut events = vec![
-            egui::Event::PointerMoved(at),
-            button(true),
-            wheel,
-            key.clone(),
-            button(false),
-            egui::Event::Text("m".into()),
-        ];
-        withhold_pointer(&mut events);
-        // Tasten und Text bleiben, ebenso das Loslassen; am Ende gilt der Zeiger als fort.
+        let all = || {
+            vec![
+                egui::Event::PointerMoved(at),
+                button(true),
+                wheel.clone(),
+                key.clone(),
+                button(false),
+                egui::Event::Text("m".into()),
+            ]
+        };
+        // Tasten und Text bleiben; am Ende gilt der Zeiger als fort. Das Loslassen kommt nur
+        // durch, wenn die Oberfläche die Taste noch für gedrückt hält.
+        let mut events = all();
+        withhold_pointer(&mut events, |_| false);
+        assert_eq!(
+            events,
+            vec![
+                key.clone(),
+                egui::Event::Text("m".into()),
+                egui::Event::PointerGone
+            ]
+        );
+        let mut events = all();
+        withhold_pointer(&mut events, |held| held == egui::PointerButton::Primary);
         assert_eq!(
             events,
             vec![
@@ -871,7 +894,7 @@ mod tests {
         );
 
         // Was das für die Oberfläche heißt: Ein Knopf unter der Stelle wird weder gedrückt
-        // noch hervorgehoben, auch nicht durch das Loslassen allein.
+        // noch hervorgehoben.
         let ctx = egui::Context::default();
         let (_, _, at) = button_pass(&ctx, Vec::new());
         let press = |pressed: bool| egui::Event::PointerButton {
@@ -898,13 +921,30 @@ mod tests {
         }
         assert_eq!(clicks, 1);
         assert!(hovered);
-        // Gefangen: derselbe Ablauf an derselben Stelle.
-        for mut events in steps() {
-            withhold_pointer(&mut events);
+        // Gefangen: derselbe Ablauf an derselben Stelle. Kein Durchlauf drückt den Knopf.
+        // Hervorgehoben ist er höchstens noch im ersten: Dass der Zeiger fort ist, wirkt in
+        // der Oberfläche erst im Durchlauf nach der Meldung.
+        let held = |button| ctx.input(|input| input.pointer.button_down(button));
+        for (step, mut events) in steps().into_iter().enumerate() {
+            withhold_pointer(&mut events, held);
             let (clicked, hovered, _) = button_pass(&ctx, events);
             assert!(!clicked, "ein gefangener Zeiger hat den Knopf gedrückt");
-            assert!(!hovered, "der Knopf unter dem unsichtbaren Zeiger leuchtet");
+            assert!(
+                step == 0 || !hovered,
+                "der Knopf unter dem unsichtbaren Zeiger leuchtet (Durchlauf {step})"
+            );
         }
+
+        // Eine Taste, die vor dem Fangen niederging, wird gefangen losgelassen: Die
+        // Oberfläche erfährt davon und hält sie nicht für immer gedrückt.
+        button_pass(&ctx, vec![egui::Event::PointerMoved(at)]);
+        button_pass(&ctx, vec![press(true)]);
+        assert!(ctx.input(|input| input.pointer.any_down()));
+        let mut events = vec![press(false)];
+        withhold_pointer(&mut events, held);
+        assert_eq!(events, vec![press(false), egui::Event::PointerGone]);
+        button_pass(&ctx, events);
+        assert!(!ctx.input(|input| input.pointer.any_down()));
     }
 
     /// Ein Durchlauf mit einem einzelnen Knopf: Wurde er gedrückt, ist er hervorgehoben,
