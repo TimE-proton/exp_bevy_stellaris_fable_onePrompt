@@ -219,7 +219,7 @@ pub fn in_game(
     let shown_planet = shown_planet(sim, selection);
     economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
     economy::flows_window(&ctx, sim, &mut state.flows_open, None);
-    fleets::fleets_window(&ctx, sim, &mut state.fleets_open, selection, actions);
+    fleets::fleets_window(&ctx, sim, state, selection, actions);
     tech::tech_window(&ctx, sim, state, actions);
     finance::exchange_window(&ctx, sim, state, actions);
     finance::treasury_window(&ctx, sim, state, actions);

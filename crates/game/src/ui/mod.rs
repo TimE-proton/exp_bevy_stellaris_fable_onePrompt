@@ -58,6 +58,16 @@ pub enum TechTab {
     Others,
 }
 
+/// Reiter des Flottenfensters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FleetsTab {
+    /// Die eigenen Flotten und die Schiffe der gewählten.
+    #[default]
+    Fleets,
+    /// Werften, Bauaufträge, Entwürfe und was die Flotte kostet.
+    Yards,
+}
+
 /// Zustand der Oberfläche selbst (kein Spielzustand).
 #[derive(Resource, Debug, Clone)]
 pub struct UiState {
@@ -70,6 +80,15 @@ pub struct UiState {
     pub flows_open: bool,
     pub chains_open: bool,
     pub fleets_open: bool,
+    pub fleets_tab: FleetsTab,
+    /// Flotte, deren Schiffe das Flottenfenster zeigt.
+    pub fleet_chosen: Option<sim::ids::FleetId>,
+    /// Schiffe der gewählten Flotte, die abgeteilt werden sollen.
+    pub split_ships: Vec<sim::ids::ShipId>,
+    /// Werft, bei der bestellt wird.
+    pub yard_chosen: Option<sim::ids::PlanetId>,
+    /// Entwurf, dessen Kosten das Fenster ausweist.
+    pub design_chosen: Option<u16>,
     pub tech_open: bool,
     pub tech_tab: TechTab,
     /// Forschungsetat in Prozent, solange der Spieler am Regler dreht und noch nicht
@@ -91,7 +110,8 @@ pub struct UiState {
 
 impl UiState {
     /// Vergisst, was nur für die Partie galt, die gerade endet oder ersetzt wird: den
-    /// gewählten Emittenten und die Eingaben zu Staatshaushalt und Forschungsetat. Unter
+    /// gewählten Emittenten, die Eingaben zu Staatshaushalt und Forschungsetat und die Wahl
+    /// im Flottenfenster. Unter
     /// gleicher Nummer stünde in der nächsten Partie ein anderer Betrieb, und Steuersatz
     /// und Etat gälten einem anderen Staat. Welche Fenster offen sind, bleibt, wie der
     /// Spieler es eingerichtet hat.
@@ -101,6 +121,10 @@ impl UiState {
         self.tax_percent = fresh.tax_percent;
         self.reserve_target = fresh.reserve_target;
         self.research_percent = fresh.research_percent;
+        self.fleet_chosen = fresh.fleet_chosen;
+        self.split_ships = fresh.split_ships;
+        self.yard_chosen = fresh.yard_chosen;
+        self.design_chosen = fresh.design_chosen;
     }
 }
 
@@ -115,6 +139,11 @@ impl Default for UiState {
             flows_open: false,
             chains_open: false,
             fleets_open: false,
+            fleets_tab: FleetsTab::default(),
+            fleet_chosen: None,
+            split_ships: Vec::new(),
+            yard_chosen: None,
+            design_chosen: None,
             tech_open: false,
             tech_tab: TechTab::default(),
             research_percent: None,

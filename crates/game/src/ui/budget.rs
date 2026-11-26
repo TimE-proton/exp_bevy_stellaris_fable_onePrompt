@@ -169,8 +169,10 @@ pub fn budget_section(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
         });
     ui.label(
         detail(format!(
-            "Beträge in Credits · Staatskasse nach dem Abschluss {} · Ziel der Rücklage {} · \
-             übrige Bewegungen des Monats {} (Anleihen, Notenbank, Anteile, Kolonien)",
+            "Beträge in Credits. Offen ist, was verlangt, aber nicht ausgegeben wurde: weil \
+             das Geld fehlte oder der Markt die Ware nicht hergab. Staatskasse nach dem \
+             Abschluss {} · Ziel der Rücklage {} · übrige Bewegungen des Monats {} (Anleihen, \
+             Notenbank, Anteile, Kolonien)",
             credits(month.treasury),
             credits(month.reserve_target),
             credits(month.other)
