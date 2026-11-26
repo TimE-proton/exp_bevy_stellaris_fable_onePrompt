@@ -17,11 +17,12 @@ use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR, TICKS_PER_DAY};
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::{Sector, ShipClass, TechBranch};
 use sim::diplomacy::Diplomacy;
-use sim::economy::{Economy, Money, to_credits};
+use sim::economy::{BudgetMonth, Claim, Economy, Money, to_credits, to_money};
 use sim::finance::{Finance, Secession, apply_secession, polity_of_issuer};
 use sim::fleet::{
     BattleOutcome, BattleReport, Battles, Fleet, Fleets, Ship, SideReport, Stance,
-    combat_modifiers, fleet_strength, material_value, monthly_upkeep, yard_slots,
+    combat_modifiers, fleet_strength, maintenance_parts, material_value, monthly_upkeep,
+    yard_slots,
 };
 use sim::galaxy::Galaxy;
 use sim::harness::{Headless, check_invariants, summarize};
@@ -105,6 +106,42 @@ fn households(sim: &Headless, polity: PolityId) -> Money {
         .planets_of(polity)
         .map(|planet| economy(sim).planet(planet.id).households)
         .sum()
+}
+
+/// Geld des Staatsdienstes einer Gemeinschaft: dorthin gehen Sold und Gehälter.
+fn staff(sim: &Headless, polity: PolityId) -> Money {
+    economy(sim).staff_money(polity)
+}
+
+/// Der laufende Haushaltsmonat einer Gemeinschaft.
+fn budget_month(sim: &Headless, polity: PolityId) -> &BudgetMonth {
+    &economy(sim).budget(polity).unwrap().current
+}
+
+/// Was ein Anspruch im laufenden Haushaltsmonat bisher bekommen hat.
+fn paid_for(sim: &Headless, polity: PolityId, claim: Claim) -> Money {
+    budget_month(sim, polity).line(claim).paid
+}
+
+/// Ersatzteile, die die Wartung der Flotte einer Gemeinschaft an einem Tag verbraucht.
+fn daily_maintenance(sim: &Headless, polity: PolityId, key: &str) -> f64 {
+    maintenance_parts(data(), fleets(sim), polity)
+        .get(&good(key))
+        .copied()
+        .unwrap_or(0.0)
+        / DAYS_PER_MONTH as f64
+}
+
+/// Wert der Ersatzteile eines Monats zum Briefkurs am Markt des Systems.
+fn maintenance_cost(sim: &Headless, polity: PolityId, system: SystemId) -> Money {
+    let market = economy(sim).market(system);
+    let spread = data().balance.economy.spread;
+    to_money(
+        maintenance_parts(data(), fleets(sim), polity)
+            .iter()
+            .map(|(good, amount)| amount * market.ask(*good, spread))
+            .sum(),
+    )
 }
 
 /// Leert Magazine und Tanks einer Flotte.
@@ -310,10 +347,19 @@ fn the_military_balance_is_checked_when_the_data_is_loaded() {
     assert!(rejected("null", fleet, "starting_fleet: [(\"speer\", 0)]").contains("Anzahl"));
     assert!(rejected("fremd", fleet, "starting_fleet: [(\"galeere\", 1)]").contains("galeere"));
     assert!(rejected("fahrt", "dry_speed: 0.4", "dry_speed: 0.0").contains("dry_speed"));
+    let military = &data().balance.military;
+    let pay = format!("upkeep_per_month: {}", military.upkeep_per_month);
+    assert!(rejected("sold", &pay, "upkeep_per_month: 1.5").contains("upkeep_per_month"));
+    let parts = format!("maintenance_per_month: {}", military.maintenance_per_month);
     assert!(
-        rejected("sold", "upkeep_per_month: 0.012", "upkeep_per_month: 1.5")
-            .contains("upkeep_per_month")
+        rejected("wartung", &parts, "maintenance_per_month: -0.1")
+            .contains("maintenance_per_month")
     );
+    // Auch die Anteile des Staatshaushalts sind Anteile.
+    let civil = format!("civil_share: {}", data().balance.economy.civil_share);
+    assert!(rejected("grund", &civil, "civil_share: 1.5").contains("civil_share"));
+    let handout = format!("handout_share: {}", data().balance.economy.handout_share);
+    assert!(rejected("aussch", &handout, "handout_share: -0.5").contains("handout_share"));
     assert!(
         rejected(
             "werft",
@@ -406,14 +452,25 @@ fn a_shipyard_turns_market_goods_and_treasury_money_into_a_ship() {
         );
     }
     // … der Staat hat sie bezahlt: an das Kontor die Ware, an die Rüstungsfirma der Welt
-    // den Aufschlag der Werft. Kein Tausendstel entsteht oder verschwindet.
-    let paid = treasury(&control, me) - treasury(&sim, me);
+    // den Aufschlag der Werft. Kein Tausendstel entsteht oder verschwindet. Im Haushalt
+    // steht der Kauf beim Anspruch der Beschaffung.
     let to_market = economy(&sim).market(home).cash - economy(&control).market(home).cash;
     let firm = |sim: &Headless| economy(sim).planet(capital).firms[Sector::Arms.index()].cash;
     let to_yard = firm(&sim) - firm(&control);
     assert!(to_market > 0 && to_yard > 0);
-    assert_eq!(paid, to_market + to_yard);
+    let paid = to_market + to_yard;
     assert_eq!(order.spent, paid);
+    assert_eq!(
+        paid_for(&sim, me, Claim::Procurement) - paid_for(&control, me, Claim::Procurement),
+        paid
+    );
+    // Der Tag war ein Monatserster: Der Haushalt hat den Bau des Monats zurückgelegt,
+    // bevor er ausschüttete. Die Haushalte bekamen deshalb weniger als in der Gegenprobe,
+    // und nur um diese Kürzung liegt die Kasse über dem, was der Kauf sie gekostet hat.
+    let withheld = budget_month(&control, me).handout() - budget_month(&sim, me).handout();
+    assert!(withheld > 0);
+    assert_eq!(households(&control, me) - households(&sim, me), withheld);
+    assert_eq!(treasury(&control, me) - treasury(&sim, me), paid - withheld);
     assert!((to_yard as f64 - to_market as f64 * data.balance.military.yard_fee).abs() <= 1.0);
     let spread = data.balance.economy.spread;
     let price: f64 = stats
@@ -551,13 +608,20 @@ fn a_yard_stands_still_without_goods_or_money_and_resumes_when_they_return() {
     let hull = data.balance.military.hull_good_id;
     assert!(economy(&sim).market(home).demand[hull.index()] > 0.0);
 
-    // Zwei von drei Bauteilen genügen nicht, und sie werden auch nicht auf Vorrat gekauft.
+    // Zwei von drei Bauteilen genügen nicht, und die Werft kauft sie auch nicht auf Vorrat:
+    // Vom Markt geht nur, was die Wartung der Flotte an diesem Tag verbraucht.
     set_stock(&mut sim, home, &["rumpfsegmente", "antriebe"], 50.0);
     sim.run_days(1);
     assert_eq!(order(&sim).progress, 0.0);
     assert!(order(&sim).stalled());
-    assert_eq!(stock_of(&sim, home, "rumpfsegmente"), 50.0);
-    assert_eq!(stock_of(&sim, home, "antriebe"), 50.0);
+    for key in ["rumpfsegmente", "antriebe"] {
+        let worn = daily_maintenance(&sim, me, key);
+        assert!(worn > 0.0 && worn < 1.0);
+        assert!(
+            (50.0 - stock_of(&sim, home, key) - worn).abs() < 1e-9,
+            "{key}"
+        );
+    }
 
     // Mit dem dritten läuft der Bau an.
     set_stock(&mut sim, home, &["waffensysteme"], 50.0);
@@ -670,8 +734,29 @@ fn a_blockade_starves_a_yard_that_lives_on_imports() {
         .iter()
         .position(|recipe| recipe.sector == Sector::Arms)
         .unwrap();
+    // Am Ort entsteht kein Bauteil: Die Kolonie hat ein Munitionswerk, das sie zur Werft
+    // macht, aber keine Rumpf-, Waffen- und Triebwerkswerke.
+    let part_works: Vec<usize> = data
+        .recipes
+        .iter()
+        .enumerate()
+        .filter(|(_, recipe)| PARTS.iter().any(|key| good(key) == recipe.output_id))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(part_works.len(), PARTS.len());
+    assert!(!part_works.contains(&arms));
+    let worlds: Vec<PlanetId> = open
+        .galaxy()
+        .planets_in(target)
+        .map(|planet| planet.id)
+        .collect();
     for sim in [&mut blockaded, &mut open] {
         let mut economy = sim.world_mut().resource_mut::<Economy>();
+        for world in &worlds {
+            for recipe in &part_works {
+                economy.planets[world.index()].capital[*recipe] = 0.0;
+            }
+        }
         economy.planets[yard.index()].capital[arms] += 1.0;
         for key in PARTS {
             economy.markets[home.index()].stock[good(key).index()] += 80.0;
@@ -958,12 +1043,17 @@ fn a_fleet_restocks_at_home_from_the_market_and_the_treasury_pays() {
     };
     assert!((taken(ammo) - ammo_units).abs() < 1e-9);
     assert!((taken(fuel) - fuel_units).abs() < 1e-6);
-    let paid = treasury(&control, me) - treasury(&sim, me);
+    let paid = paid_for(&sim, me, Claim::Procurement) - paid_for(&control, me, Claim::Procurement);
     assert!(paid > 0);
     assert_eq!(
         paid,
         economy(&sim).market(home).cash - economy(&control).market(home).cash
     );
+    // Der Tag war ein Monatserster: Was das Auffüllen im Monat kosten wird, hat der
+    // Haushalt zurückgelegt, bevor er ausschüttete.
+    let withheld = budget_month(&control, me).handout() - budget_month(&sim, me).handout();
+    assert!(withheld > 0);
+    assert_eq!(treasury(&control, me) - treasury(&sim, me), paid - withheld);
     let spread = data.balance.economy.spread;
     let market = economy(&sim).market(home);
     let price = ammo_units * market.ask(ammo, spread) + fuel_units * market.ask(fuel, spread);
@@ -1155,7 +1245,10 @@ fn damaged_ships_are_repaired_only_at_a_yard_and_only_with_hull_segments() {
             .iter()
             .all(|hull| (*hull - 0.6 - rate).abs() < 1e-6)
     );
-    assert!((40.0 - stock_of(&sim, home, "rumpfsegmente") - wanted).abs() < 1e-6);
+    // Vom Markt gehen die Segmente der Instandsetzung und der Tagesanteil der Wartung.
+    let worn = daily_maintenance(&sim, me, "rumpfsegmente");
+    assert!(worn > 0.0 && worn < wanted);
+    assert!((40.0 - stock_of(&sim, home, "rumpfsegmente") - wanted - worn).abs() < 1e-6);
     assert!(fleet(&sim, FleetId(0)).strength > weak);
 
     // Eine eigene Kolonie in einem anderen System hat keine Werft: Dort bleibt der Schaden,
@@ -1227,7 +1320,7 @@ fn damaged_ships_are_repaired_only_at_a_yard_and_only_with_hull_segments() {
 // --- 6. Sold ----------------------------------------------------------------------------
 
 #[test]
-fn upkeep_moves_exactly_the_stated_amount_to_the_households_once_a_month() {
+fn the_pay_goes_to_the_crews_once_a_month_and_the_households_get_less() {
     let data = data();
     let me = PolityId(0);
     let mut sim = with_player(16);
@@ -1252,15 +1345,30 @@ fn upkeep_moves_exactly_the_stated_amount_to_the_households_once_a_month() {
     assert!((to_credits(extra) - value * data.balance.military.upkeep_per_month).abs() < 0.002);
     assert!(extra > 0);
 
-    // Im Takt des Monatsersten fließt genau der Mehrbetrag als Sold an die Haushalte.
-    // Darüber hinaus kostet die größere Flotte an diesem Tag nur den Treibstoff, den vier
-    // Kreuzer im Dock verbrauchen: Den zahlt die Staatskasse dem Kontor.
+    // Im Takt des Monatsersten fließt genau der Mehrbetrag als Sold an die Besatzungen,
+    // nicht an die Haushalte der Welten. Dazu kauft der Staat dem Kontor an diesem Tag ab,
+    // was vier Kreuzer mehr verbrauchen: Treibstoff im Dock und Ersatzteile.
     sim.tick();
     control.tick();
-    let fuel = economy(&sim).market(home).cash - economy(&control).market(home).cash;
-    assert!(fuel > 0 && fuel < extra);
-    assert_eq!(households(&sim, me) - households(&control, me), extra);
-    assert_eq!(treasury(&control, me) - treasury(&sim, me), extra + fuel);
+    assert_eq!(staff(&sim, me) - staff(&control, me), extra);
+    let bought = economy(&sim).market(home).cash - economy(&control).market(home).cash;
+    assert!(bought > 0 && bought < extra);
+    assert_eq!(
+        paid_for(&sim, me, Claim::Fleet) + paid_for(&sim, me, Claim::Procurement)
+            - paid_for(&control, me, Claim::Fleet)
+            - paid_for(&control, me, Claim::Procurement),
+        extra + bought
+    );
+    // Die Flotte geht der Ausschüttung vor: Was sie in diesem Monat mehr verlangt, hat der
+    // Haushalt zurückgehalten. Die Haushalte bekommen also weniger als in der Gegenprobe,
+    // statt wie früher den Sold selbst zu erhalten.
+    let withheld = budget_month(&control, me).handout() - budget_month(&sim, me).handout();
+    assert!(withheld > 0, "die größere Flotte kürzt die Ausschüttung");
+    assert_eq!(households(&control, me) - households(&sim, me), withheld);
+    assert_eq!(
+        treasury(&control, me) - treasury(&sim, me),
+        extra + bought - withheld
+    );
     assert_eq!(fleets(&sim).arrears_of(me), 0.0);
     assert_eq!(money_drift(sim.world()), Some(0));
     assert_eq!(check_invariants(sim.world()), Ok(()));
@@ -1275,7 +1383,9 @@ fn an_unaffordable_fleet_empties_the_treasury_and_leaves_arrears() {
     for sim in [&mut sim, &mut control] {
         sim.run_days(DAYS_PER_MONTH);
     }
-    // Eine Flotte, deren Sold keine Staatskasse trägt.
+    // Eine Flotte, deren Sold keine Staatskasse trägt. (Wie eine Gemeinschaft im Lauf
+    // einer Partie dorthin kommt, zeigen die Prüfungen in `tests/budget.rs`; hier geht es
+    // um die Rechnung des einen Monatsersten.)
     {
         let mut fleets = sim.world_mut().resource_mut::<Fleets>();
         for _ in 0..2000 {
@@ -1288,38 +1398,56 @@ fn an_unaffordable_fleet_empties_the_treasury_and_leaves_arrears() {
     sim.run_days(1);
     control.run_days(1);
 
-    // Der Staat zahlt, was er hat, und keinen Credit mehr. Der Sold geht der Forschung
-    // vor: In der Gegenprobe bekommen die Forschenden nach dem Sold ihr Gehalt, hier bleibt
-    // für sie nichts übrig.
+    // Der Haushalt bedient die Ansprüche der Reihe nach. Die Grundleistungen gehen der
+    // Flotte vor und fließen wie in der Gegenprobe; alles Übrige bekommt die Flotte, auch
+    // die Rücklage. Für Beschaffung, Forschung und Ausschüttung bleibt nichts.
     assert_eq!(treasury(&sim, me), 0);
+    let civil = paid_for(&control, me, Claim::Civil);
+    assert!(civil > 0);
+    assert_eq!(paid_for(&sim, me, Claim::Civil), civil);
     let researched = control.research().get(me).unwrap().spent_last_month;
     assert!(researched > 0, "in der Gegenprobe wird geforscht");
     assert_eq!(sim.research().get(me).unwrap().spent_last_month, 0);
-    // Nach dem Sold fasst die Gegenprobe noch den Treibstoff des Tages nach; mit leerer
-    // Kasse gibt es auch den nicht.
+    assert_eq!(paid_for(&sim, me, Claim::Procurement), 0);
+    assert_eq!(budget_month(&sim, me).handout(), 0);
+    let handout = budget_month(&control, me).handout();
+    assert!(handout > 0);
+    assert_eq!(households(&control, me) - households(&sim, me), handout);
+    // Was die Gegenprobe nach den Grundleistungen ausgab oder behielt, ging hier ganz als
+    // Sold an die Besatzungen: Sold, Gehälter, Einkäufe des Tages, Ausschüttung und Rest.
     let home = home_of(&sim, me).1;
-    let fuel = economy(&control).market(home).cash - economy(&sim).market(home).cash;
-    assert!(fuel > 0);
-    let available = treasury(&control, me) + usual + researched + fuel;
+    let bought = economy(&control).market(home).cash - economy(&sim).market(home).cash;
+    assert!(bought > 0);
+    let available = treasury(&control, me) + usual + researched + bought + handout;
     assert_eq!(
-        households(&sim, me) - households(&control, me),
+        staff(&sim, me) - staff(&control, me),
         available - usual - researched,
-        "die ganze Kasse ging an die Haushalte"
+        "die ganze Kasse ging an die Besatzungen"
     );
-    // Der ausgebliebene Anteil steht geglättet als Rückstand in den Büchern …
-    let missed = 1.0 - available as f32 / due as f32;
+    assert_eq!(paid_for(&sim, me, Claim::Fleet), available);
+    // Der ausgebliebene Anteil des Anspruchs (Sold und Wartung) steht geglättet als
+    // Rückstand in den Büchern …
+    let claim = due + maintenance_cost(&sim, me, home);
+    assert!(claim > due);
+    let missed = (1.0 - available as f64 / claim as f64) as f32;
     let arrears = fleets(&sim).arrears_of(me);
     assert!((arrears - data.balance.military.arrears_smoothing * missed).abs() < 1e-5);
     assert!(arrears > 0.3);
     assert_eq!(fleets(&control).arrears_of(me), 0.0);
     assert_eq!(fleets(&sim).arrears_of(PolityId(1)), 0.0);
+    // … im Haushalt als gekürzter Anspruch …
+    assert!(budget_month(&sim, me).unfunded >= claim - available);
+    assert_eq!(budget_month(&control, me).unfunded, 0);
     // … und die Chronik meldet den Beginn, einmal.
     let notices = |sim: &Headless| {
         sim.world()
             .resource::<Chronicle>()
             .entries
             .iter()
-            .filter(|entry| entry.text.contains("Sold schuldig") && entry.polity == Some(me))
+            .filter(|entry| {
+                entry.text.contains("kann seine Flotte nicht mehr bezahlen")
+                    && entry.polity == Some(me)
+            })
             .count()
     };
     assert_eq!(notices(&sim), 1);
@@ -2758,7 +2886,7 @@ fn losses_wear_a_community_down_and_a_heavy_defeat_moves_its_share_prices() {
     }
     sim.run_days(1);
     whole.run_days(1);
-    let paid = treasury(&whole, me) - treasury(&sim, me);
+    let paid = paid_for(&sim, me, Claim::Procurement) - paid_for(&whole, me, Claim::Procurement);
     let to_market = economy(&sim).market(home).cash - economy(&whole).market(home).cash;
     assert!(paid > 0, "Nachschub und Instandsetzung kosten Geld");
     assert_eq!(paid, to_market, "die Staatskasse zahlt es dem Kontor");
@@ -2802,12 +2930,21 @@ fn losses_wear_a_community_down_and_a_heavy_defeat_moves_its_share_prices() {
     assert!(due > 0 && spared > 0);
     sim.tick();
     intact.tick();
-    // Gespart ist der Sold der verlorenen Schiffe und der Treibstoff, den sie im Dock
-    // verbraucht hätten.
-    let fuel = economy(&intact).market(home).cash - economy(&sim).market(home).cash;
-    assert!(fuel > 0 && fuel < spared);
-    assert_eq!(treasury(&sim, me) - treasury(&intact, me), spared + fuel);
-    assert_eq!(households(&intact, me) - households(&sim, me), spared);
+    // Gespart ist der Sold der verlorenen Schiffe und was sie an diesem Tag verbraucht
+    // hätten: Treibstoff im Dock und Ersatzteile.
+    assert_eq!(staff(&intact, me) - staff(&sim, me), spared);
+    let bought = economy(&intact).market(home).cash - economy(&sim).market(home).cash;
+    assert!(bought > 0 && bought < spared);
+    // Was die kleinere Flotte den Haushalt weniger kostet, kann er ausschütten: Die
+    // Haushalte bekommen nie weniger als in der Gegenprobe, und die Kasse liegt um das
+    // Gesparte höher, soweit es nicht ausgeschüttet wurde.
+    let released = budget_month(&sim, me).handout() - budget_month(&intact, me).handout();
+    assert!(released >= 0);
+    assert_eq!(households(&sim, me) - households(&intact, me), released);
+    assert_eq!(
+        treasury(&sim, me) - treasury(&intact, me),
+        spared + bought - released
+    );
     assert_eq!(fleets(&sim).arrears_of(me), 0.0);
 
     // Frieden: Die Kriegsmüdigkeit klingt Monat für Monat ab.
@@ -4918,6 +5055,13 @@ fn an_order_in_an_untouched_economy_is_built_from_the_market_and_moves_it() {
     let me = PolityId(0);
     let (corvette, cruiser) = (design("dolch"), design("speer"));
     let days_of = |design: u16| u64::from(data().designs[design as usize].stats.build_days);
+    // Rüstungskapital auf allen Welten der Gemeinschaft.
+    let arms = |sim: &Headless| -> f64 {
+        sim.galaxy()
+            .planets_of(me)
+            .map(|planet| sim::fleet::arms_capital(data(), economy(sim), planet.id))
+            .sum()
+    };
     for seed in [3, 12, 18, 40] {
         let mut ordered = observer(seed);
         let mut control = observer(seed);
@@ -4939,6 +5083,7 @@ fn an_order_in_an_untouched_economy_is_built_from_the_market_and_moves_it() {
         let mut first_ship = None;
         let mut all_ships = None;
         let mut peak = [0.0f64; 3];
+        let (mut works, mut usual) = (0.0, 0.0);
         for day in 1..=2 * DAYS_PER_YEAR {
             ordered.run_days(1);
             control.run_days(1);
@@ -4953,6 +5098,8 @@ fn an_order_in_an_untouched_economy_is_built_from_the_market_and_moves_it() {
             for index in 0..3 {
                 peak[index] = peak[index].max(with[index] / without[index]);
             }
+            works += arms(&ordered);
+            usual += arms(&control);
         }
         // Die Wirtschaft liefert, was die Werft braucht: Die Schiffe sind kaum später
         // fertig, als ihre Bauzeit verlangt.
@@ -4966,22 +5113,30 @@ fn an_order_in_an_untouched_economy_is_built_from_the_market_and_moves_it() {
             all_ships <= (days_of(corvette) + 2 * days_of(cruiser)) * 5 / 4,
             "Seed {seed}: Programm nach {all_ships} Tagen"
         );
-        // Der Bedarf der Werft kommt am Markt an: Jedes Bauteil wird zeitweise deutlich
-        // teurer als in der Partie ohne Auftrag …
+        // Der Bedarf der Werft kommt am Markt an: Jedes Bauteil wird zeitweise spürbar
+        // teurer als in der Partie ohne Auftrag, im Mittel der drei um die Hälfte. (Die
+        // Vergleichspartie ist kein toter Markt: Auch dort kauft die Wartung der Flotte
+        // Bauteile, und Rüstungsbetriebe liefern sie.)
         for (index, key) in PARTS.iter().enumerate() {
             assert!(
-                peak[index] >= 1.5,
+                peak[index] >= 1.2,
                 "Seed {seed}: {key} höchstens {:.2}-mal so teuer",
                 peak[index]
             );
         }
-        // … und die Rüstungsbetriebe der Hauptwelt wachsen daran.
-        let arms = |sim: &Headless| sim::fleet::arms_capital(data(), economy(sim), capital);
+        let mean = peak.iter().sum::<f64>() / 3.0;
         assert!(
-            arms(&ordered) > arms(&control) * 1.1,
-            "Seed {seed}: Rüstungskapital {:.2} gegen {:.2}",
-            arms(&ordered),
-            arms(&control)
+            mean >= 1.5,
+            "Seed {seed}: Bauteile im Mittel höchstens {mean:.2}-mal so teuer"
+        );
+        // … und die Rüstungsbetriebe der Gemeinschaft wachsen daran. Gemessen wird über
+        // die ganzen zwei Jahre: An einem einzelnen Tag entscheidet, wo gerade eine
+        // Investition fiel.
+        assert!(
+            works > usual * 1.2,
+            "Seed {seed}: Rüstungskapital im Mittel {:.2} gegen {:.2}",
+            works / (2 * DAYS_PER_YEAR) as f64,
+            usual / (2 * DAYS_PER_YEAR) as f64
         );
         assert_eq!(money_drift(ordered.world()), Some(0));
         assert_eq!(check_invariants(ordered.world()), Ok(()));
