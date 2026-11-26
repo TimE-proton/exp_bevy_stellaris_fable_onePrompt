@@ -405,6 +405,12 @@ pub struct EconomyBalance {
     /// Höchste Geldschöpfung je Monat als Anteil am Geld der Haushalte.
     pub mint_per_month: f64,
     pub state_reserve_per_million: f64,
+    /// Grundleistungen des Staates je Monat als Anteil seiner laufenden Einnahmen zum
+    /// üblichen Steuersatz (Mittel der letzten zwölf Monate).
+    pub civil_share: f64,
+    /// Anteil dessen, was nach allen Ansprüchen über der Rücklage liegt, den der Staat je
+    /// Monat an die Haushalte ausschüttet.
+    pub handout_share: f64,
     pub market_reserve_days: f64,
     pub firm_reserve_days: f64,
     #[serde(skip)]

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::data::{GameData, Sector};
 use crate::galaxy::Galaxy;
-use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
+use crate::ids::{HolderId, IssuerId, PlanetId, PolityId, SystemId};
 
 const MONTHS_PER_YEAR: f64 = 12.0;
 
@@ -340,8 +340,9 @@ pub fn migrate(galaxy: &mut Galaxy, economy: &mut Economy, data: &GameData, poli
     }
 }
 
-/// Kontore führen Überschüsse als Zölle ab, Staaten geben aus, was über ihre Rücklage
-/// hinausgeht (bis zum Ausbau des Haushalts: als Leistungen an die Haushalte).
+/// Kontore führen Überschüsse als Zölle ab. Was der Staat mit seinen Einnahmen tut, regelt
+/// sein Haushalt ([`super::settle_budget`]); dazu gehört das Kapital, das er Kontoren ohne
+/// Kasse nachschießt ([`market_capital_needs`]).
 pub fn settle_public_accounts(
     galaxy: &Galaxy,
     economy: &mut Economy,
@@ -366,22 +367,6 @@ pub fn settle_public_accounts(
         let working =
             to_money(market.turnover * balance.market_reserve_days + 0.5 * stock_value + 1500.0);
         let excess = market.cash - working;
-        // Ein Kontor ohne Kasse kann keinem Frachter etwas abkaufen. Der Staat schießt
-        // dann Kapital nach und erhält dafür neue Anteile.
-        let floor = to_money(600.0);
-        if market.cash < floor {
-            let needed = to_money(1500.0) - market.cash;
-            let got = pay(
-                &mut economy.treasuries[owner.index()],
-                &mut market.cash,
-                needed,
-            );
-            if got > 0 {
-                flows
-                    .injections
-                    .push((IssuerId::Kontor(system.id), HolderId::State(owner), got));
-            }
-        }
         if excess > 0 {
             // Die Hälfte ist Zoll, die andere Hälfte Gewinn der Anteilseigner des Kontors.
             let tariff = pay(
@@ -397,19 +382,31 @@ pub fn settle_public_accounts(
             book_income(&mut economy.state_income_running, owner, tariff);
         }
     }
-    for polity in 0..economy.treasuries.len() {
-        let id = PolityId::from_index(polity);
-        let population = galaxy.population_of(id);
-        if population <= 0.0 {
-            continue;
-        }
-        let reserve = state_reserve(economy, data, id, population);
-        let excess = economy.treasuries[polity] - reserve;
-        if excess <= 0 {
-            continue;
-        }
-        pay_households(galaxy, economy, id, excess / 2);
-    }
+}
+
+/// Kasse, unter der ein Kontor als leer gilt, und der Stand, auf den der Staat sie auffüllt.
+const MARKET_CASH_FLOOR: f64 = 600.0;
+const MARKET_CASH_REFILL: f64 = 1500.0;
+
+/// Kontore im Gebiet einer Gemeinschaft, deren Kasse leer ist, mit dem Kapital, das ihnen
+/// fehlt, in der Reihenfolge der Systeme. Ein Kontor ohne Kasse kann keinem Frachter etwas
+/// abkaufen; der Staat schießt Kapital nach, soweit sein Haushalt es hergibt, und erhält
+/// dafür neue Anteile.
+pub fn market_capital_needs(
+    galaxy: &Galaxy,
+    economy: &Economy,
+    polity: PolityId,
+) -> Vec<(SystemId, Money)> {
+    galaxy
+        .systems
+        .iter()
+        .filter(|system| galaxy.system_owner(system.id) == Some(polity))
+        .filter_map(|system| {
+            let cash = economy.markets[system.index()].cash;
+            (cash < to_money(MARKET_CASH_FLOOR))
+                .then(|| (system.id, to_money(MARKET_CASH_REFILL) - cash))
+        })
+        .collect()
 }
 
 /// Rücklage, die ein Staat mit `population` Millionen Einwohnern hält: ein Sockel je

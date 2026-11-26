@@ -29,8 +29,8 @@ pub use intel::{
 };
 pub use plugin::TechPlugin;
 pub use step::{
-    ai_budget_share, choose_target, contact_weights, research_month, research_points, set_budget,
-    set_target, spillover_discount, visible_spillover,
+    ai_budget_share, choose_target, contact_weights, research_claim, research_month,
+    research_points, set_budget, set_target, spillover_discount, visible_spillover,
 };
 
 use crate::data::{BranchWeights, GameData, TechBranch, TechEffect};

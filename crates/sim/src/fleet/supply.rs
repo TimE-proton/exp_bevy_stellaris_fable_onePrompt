@@ -1,19 +1,25 @@
-//! Nachschub, Instandsetzung und Sold: was eine Flotte den Staat laufend kostet.
+//! Sold, Wartung, Nachschub und Instandsetzung: was eine Flotte den Staat laufend kostet.
 //!
-//! Munition, Treibstoff und Rumpfsegmente sind Waren. Der Staat kauft sie am Markt des
-//! Systems, in dem die Flotte liegt, und nur dort, wo ihre Gemeinschaft zu Hause ist. Fehlt
-//! die Ware, bleibt das Magazin leer und der Rumpf beschädigt.
+//! Sold und Wartung sind der Anspruch „Flotte“ des Staatshaushalts: Der Sold geht am
+//! Monatsersten an die Haushalte, die Ersatzteile der Wartung kauft der Staat Tag für Tag
+//! am Markt seiner Hauptwelt, wo immer die Flotte liegt. Munition, Treibstoff und
+//! Rumpfsegmente für Nachschub und Instandsetzung gehören zum Anspruch „Beschaffung“: Der
+//! Staat kauft sie am Markt des Systems, in dem die Flotte liegt, und nur dort, wo ihre
+//! Gemeinschaft zu Hause ist. Fehlt die Ware, bleibt das Magazin leer und der Rumpf
+//! beschädigt.
 
-use super::{Fleets, Ship, yard_slots};
+use super::{BuildOrder, Fleets, Ship, yard_slots};
 use crate::chronicle::{Chronicle, ChronicleKind};
+use crate::clock::DAYS_PER_MONTH;
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{
-    Economy, Market, Money, pay, pay_households, procure, purchase, to_credits, to_money,
+    Claim, Economy, Market, Money, pay, pay_households, procure, purchase, to_credits, to_money,
 };
 use crate::galaxy::Galaxy;
-use crate::ids::{GoodId, PolityId, SystemId};
-use crate::polity::Polities;
+use crate::ids::{GoodId, PlanetId, PolityId, SystemId};
+use crate::polity::{Polities, Polity};
+use std::collections::BTreeMap;
 
 /// Bis auf diesen Rest gilt ein Vorrat oder ein Rumpf als voll.
 const FULL: f32 = 1.0 - 1e-6;
@@ -91,13 +97,19 @@ pub fn resupply_fleets(
         {
             continue;
         }
+        let mut purse = economy.allowance(owner, Claim::Procurement);
+        let before = purse;
         let market = &mut economy.markets[system.index()];
-        let treasury = &mut economy.treasuries[owner.index()];
+        let wanted = to_money(
+            ammo * market.ask(balance.ammo_good_id, spread) + fuel * market.ask(fuel_good, spread),
+        );
         let ammo_share = filled(
-            procure(market, balance.ammo_good_id, ammo, treasury, spread).0,
+            procure(market, balance.ammo_good_id, ammo, &mut purse, spread).0,
             ammo,
         );
-        let fuel_share = filled(procure(market, fuel_good, fuel, treasury, spread).0, fuel);
+        let fuel_share = filled(procure(market, fuel_good, fuel, &mut purse, spread).0, fuel);
+        economy.want(owner, Claim::Procurement, wanted);
+        economy.spend(owner, Claim::Procurement, before - purse);
         for ship in &mut fleets.list[index].ships {
             ship.ammo = top_up(ship.ammo, rate, ammo_share);
             ship.fuel = top_up(ship.fuel, rate, fuel_share);
@@ -193,10 +205,12 @@ pub fn repair_fleets(
             let share = repair_share(ship, rate, balance.repair_hull_share);
             wanted += (share * segments) as f64 * balance.repair_parts;
         }
+        let mut purse = economy.allowance(owner, Claim::Procurement);
+        let before = purse;
         let market = &mut economy.markets[system.index()];
-        let treasury = &mut economy.treasuries[owner.index()];
+        let mut asked = wanted * market.ask(balance.hull_good_id, spread);
         let share = filled(
-            procure(market, balance.hull_good_id, wanted, treasury, spread).0,
+            procure(market, balance.hull_good_id, wanted, &mut purse, spread).0,
             wanted,
         );
         for ship in &mut fleets.list[index].ships {
@@ -215,15 +229,18 @@ pub fn repair_fleets(
                 && ship.fighters < stats.fighters
             {
                 let per_day = ((rate * stats.fighters as f32).ceil() as u32).max(1);
-                ship.fighters += buy_kits(
-                    market,
-                    &data.designs[craft as usize].stats.parts,
-                    per_day.min(stats.fighters - ship.fighters),
-                    treasury,
-                    spread,
-                );
+                let count = per_day.min(stats.fighters - ship.fighters);
+                let parts = &data.designs[craft as usize].stats.parts;
+                asked += count as f64
+                    * parts
+                        .iter()
+                        .map(|(good, amount)| *amount as f64 * market.ask(*good, spread))
+                        .sum::<f64>();
+                ship.fighters += buy_kits(market, parts, count, &mut purse, spread);
             }
         }
+        economy.want(owner, Claim::Procurement, to_money(asked));
+        economy.spend(owner, Claim::Procurement, before - purse);
         repaired = true;
     }
     if repaired {
@@ -237,9 +254,197 @@ pub fn monthly_upkeep(data: &GameData, fleets: &Fleets, polity: PolityId) -> Mon
     to_money(value * data.balance.military.upkeep_per_month)
 }
 
-/// Monatlich: Jede Gemeinschaft zahlt den Sold ihrer Besatzungen aus der Staatskasse an
-/// die Haushalte ihrer Welten. Reicht die Kasse nicht, zahlt sie, was sie hat; der
-/// ausgebliebene Anteil geht geglättet in den Soldrückstand ein.
+/// Ersatzteile, die die Schiffe einer Gemeinschaft in einem Monat verbrauchen: je Schiff
+/// der Anteil `maintenance_per_month` der Bauteile, aus denen es gebaut wurde.
+pub fn maintenance_parts(
+    data: &GameData,
+    fleets: &Fleets,
+    polity: PolityId,
+) -> BTreeMap<GoodId, f64> {
+    let share = data.balance.military.maintenance_per_month;
+    let mut parts: BTreeMap<GoodId, f64> = BTreeMap::new();
+    if share <= 0.0 {
+        return parts;
+    }
+    for ship in fleets.of(polity).flat_map(|fleet| fleet.ships.iter()) {
+        for (good, amount) in &data.designs[ship.design as usize].stats.parts {
+            *parts.entry(*good).or_default() += *amount as f64 * share;
+        }
+    }
+    parts
+}
+
+/// Die Welt, über die eine Gemeinschaft ihre Flotte versorgt und bezahlt: ihre Hauptwelt,
+/// solange sie ihr gehört, sonst ihre erste Welt.
+fn seat_of(galaxy: &Galaxy, polity: &Polity) -> Option<PlanetId> {
+    polity
+        .capital
+        .filter(|planet| galaxy.planet(*planet).owner == Some(polity.id))
+        .or_else(|| galaxy.planets_of(polity.id).next().map(|planet| planet.id))
+}
+
+/// Wert der Ersatzteile eines Monats zum heutigen Briefkurs am Markt des Sitzes.
+fn maintenance_cost(
+    data: &GameData,
+    galaxy: &Galaxy,
+    economy: &Economy,
+    fleets: &Fleets,
+    polity: &Polity,
+) -> f64 {
+    let Some(seat) = seat_of(galaxy, polity) else {
+        return 0.0;
+    };
+    let market = economy.market(galaxy.planet(seat).system);
+    let spread = data.balance.economy.spread;
+    maintenance_parts(data, fleets, polity.id)
+        .iter()
+        .map(|(good, amount)| amount * market.ask(*good, spread))
+        .sum()
+}
+
+/// Was die Flotte einer Gemeinschaft im beginnenden Monat vom Staatshaushalt verlangt:
+/// den Sold und die Ersatzteile der Wartung zum heutigen Preis.
+pub fn fleet_claim(
+    data: &GameData,
+    galaxy: &Galaxy,
+    economy: &Economy,
+    fleets: &Fleets,
+    polity: &Polity,
+) -> Money {
+    monthly_upkeep(data, fleets, polity.id)
+        + to_money(maintenance_cost(data, galaxy, economy, fleets, polity))
+}
+
+/// Monatsanteil eines Bauauftrags, der gerade einen Bauplatz hat: was ein Monat Bau an
+/// Bauteilen und Werftaufschlag kostet, zum heutigen Preis.
+fn order_month_cost(data: &GameData, market: &Market, order: &BuildOrder) -> f64 {
+    let stats = &data.designs[order.design as usize].stats;
+    let share = (DAYS_PER_MONTH as f32 / stats.build_days.max(1) as f32)
+        .min(1.0 - order.progress)
+        .max(0.0) as f64;
+    let spread = data.balance.economy.spread;
+    let parts: f64 = stats
+        .parts
+        .iter()
+        .map(|(good, amount)| *amount as f64 * market.ask(*good, spread))
+        .sum();
+    parts * share * (1.0 + data.balance.military.yard_fee)
+}
+
+/// Voranschlag der Beschaffung einer Gemeinschaft für den beginnenden Monat, zu heutigen
+/// Preisen: ein Monat Bau auf den belegten Bauplätzen, das Auffüllen von Munition und
+/// Treibstoff samt dem Verbrauch auf Station und ein Monat Instandsetzung. Der Haushalt
+/// legt diesen Betrag vor Forschung und Ausschüttung zurück; gekauft wird, was der Markt
+/// dann hergibt.
+pub fn procurement_estimate(
+    data: &GameData,
+    galaxy: &Galaxy,
+    economy: &Economy,
+    polities: &Polities,
+    fleets: &Fleets,
+    diplomacy: &Diplomacy,
+    polity: PolityId,
+) -> Money {
+    let balance = &data.balance.military;
+    let spread = data.balance.economy.spread;
+    let mut total = 0.0f64;
+    // Werften: die ersten Aufträge je Welt, so viele wie Bauplätze.
+    let mut busy: BTreeMap<PlanetId, u32> = BTreeMap::new();
+    for order in fleets.orders_of(polity) {
+        let world = galaxy.planet(order.planet);
+        let slots = yard_slots(data, galaxy, economy, polities, fleets, order.planet);
+        let used = busy.entry(order.planet).or_default();
+        if order.progress >= 1.0 || *used >= slots {
+            continue;
+        }
+        *used += 1;
+        if supply_base(galaxy, diplomacy, polity, world.system) {
+            total += order_month_cost(data, economy.market(world.system), order);
+        }
+    }
+    // Nachschub und Instandsetzung der Flotten, die versorgt werden können.
+    let days = DAYS_PER_MONTH as f32;
+    for fleet in fleets.of(polity) {
+        if !fleet.is_docked()
+            || fleet.in_battle
+            || !supply_base(galaxy, diplomacy, polity, fleet.system)
+        {
+            continue;
+        }
+        let market = economy.market(fleet.system);
+        let has_yard = galaxy.planets_in(fleet.system).any(|planet| {
+            planet.owner == Some(polity)
+                && yard_slots(data, galaxy, economy, polities, fleets, planet.id) > 0
+        });
+        for ship in &fleet.ships {
+            let stats = &data.designs[ship.design as usize].stats;
+            if !fleets.is_blockaded(fleet.system) {
+                let ammo = (1.0 - ship.ammo).max(0.0) * stats.ammo;
+                let fuel = ((1.0 - ship.fuel).max(0.0) + days * balance.fuel_per_day).min(days)
+                    * stats.fuel;
+                total +=
+                    ammo as f64 * balance.ammo_goods * market.ask(balance.ammo_good_id, spread)
+                        + fuel as f64
+                            * balance.fuel_goods
+                            * market.ask(data.balance.economy.fuel_id, spread);
+            }
+            if has_yard && ship.is_damaged(data) {
+                let segments =
+                    data.hulls[data.designs[ship.design as usize].hull_id as usize].segments;
+                let share = repair_share(
+                    ship,
+                    (days * balance.repair_per_day).min(1.0),
+                    balance.repair_hull_share,
+                );
+                total += (share * segments) as f64
+                    * balance.repair_parts
+                    * market.ask(balance.hull_good_id, spread);
+            }
+        }
+    }
+    to_money(total)
+}
+
+/// Täglich: Jede Gemeinschaft kauft am Markt ihres Sitzes den Tagesanteil der Ersatzteile,
+/// die ihre Schiffe verbrauchen, aus dem, was der Haushalt der Flotte bewilligt hat. Die
+/// Schiffe mögen liegen, wo sie wollen: Die Teile gehen ihnen nach. Fehlt Ware oder ist die
+/// Bewilligung verbraucht, wird weniger gekauft; der Wunsch zählt am Markt als Nachfrage,
+/// soweit er bezahlbar war.
+pub fn maintain_fleets(
+    galaxy: &Galaxy,
+    economy: &mut Economy,
+    fleets: &Fleets,
+    polities: &Polities,
+    data: &GameData,
+) {
+    let spread = data.balance.economy.spread;
+    for polity in polities.alive() {
+        let parts = maintenance_parts(data, fleets, polity.id);
+        let Some(seat) = seat_of(galaxy, polity) else {
+            continue;
+        };
+        if parts.is_empty() {
+            continue;
+        }
+        let system = galaxy.planet(seat).system;
+        let mut purse = economy.allowance(polity.id, Claim::Fleet);
+        let before = purse;
+        let market = &mut economy.markets[system.index()];
+        let mut asked = 0.0;
+        for (good, amount) in &parts {
+            let today = amount / DAYS_PER_MONTH as f64;
+            asked += today * market.ask(*good, spread);
+            procure(market, *good, today, &mut purse, spread);
+        }
+        economy.want(polity.id, Claim::Fleet, to_money(asked));
+        economy.spend(polity.id, Claim::Fleet, before - purse);
+    }
+}
+
+/// Monatlich: Jede Gemeinschaft zahlt den Sold ihrer Besatzungen an die Haushalte ihrer
+/// Welten, aus dem, was der Haushalt der Flotte bewilligt hat. Reicht die Bewilligung nicht
+/// für Sold und Wartung, bleibt Sold aus: Der Anteil des Anspruchs, den der Haushalt nicht
+/// decken konnte, geht geglättet in den Soldrückstand ein.
 pub fn pay_upkeep(
     galaxy: &Galaxy,
     economy: &mut Economy,
@@ -256,17 +461,15 @@ pub fn pay_upkeep(
     for polity in &polities.list {
         let index = polity.id.index();
         let due = monthly_upkeep(data, fleets, polity.id);
-        // Die Heuer wird nach Bevölkerung verteilt; der Rundungsrest geht an die Hauptwelt,
-        // damit genau der geschuldete Betrag fließt.
-        let seat = polity
-            .capital
-            .filter(|planet| galaxy.planet(*planet).owner == Some(polity.id))
-            .or_else(|| galaxy.planets_of(polity.id).next().map(|planet| planet.id));
+        let claim = due + to_money(maintenance_cost(data, galaxy, economy, fleets, polity));
+        let granted = economy.allowance(polity.id, Claim::Fleet);
+        // Der Sold wird nach Bevölkerung verteilt; der Rundungsrest geht an den Sitz, damit
+        // genau der gezahlte Betrag fließt.
         let mut paid: Money = 0;
-        if let Some(seat) = seat
+        if let Some(seat) = seat_of(galaxy, polity)
             && due > 0
         {
-            let budget = due.min(economy.treasury(polity.id).max(0));
+            let budget = due.min(granted);
             paid = pay_households(galaxy, economy, polity.id, budget);
             paid += pay(
                 &mut economy.treasuries[index],
@@ -274,8 +477,10 @@ pub fn pay_upkeep(
                 budget - paid,
             );
         }
-        let missed = if due > 0 {
-            (1.0 - paid as f64 / due as f64) as f32
+        economy.want(polity.id, Claim::Fleet, due);
+        economy.book_paid(polity.id, Claim::Fleet, paid);
+        let missed = if claim > 0 {
+            (1.0 - granted.min(claim) as f64 / claim as f64) as f32
         } else {
             0.0
         };
@@ -292,10 +497,11 @@ pub fn pay_upkeep(
                 Some(polity.id),
                 None,
                 format!(
-                    "{} bleibt den Besatzungen der Flotte Sold schuldig: Von {:.0} Credits fehlen {:.0}.",
+                    "{} kann seine Flotte nicht mehr bezahlen: Von {:.0} Credits für Sold und \
+                     Wartung fehlen {:.0}.",
                     polity.name,
-                    to_credits(due),
-                    to_credits(due - paid)
+                    to_credits(claim),
+                    to_credits(claim - granted.min(claim))
                 ),
             );
         }

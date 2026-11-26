@@ -1,6 +1,6 @@
 use super::{
-    Battles, Fleets, advance_battles, advance_yards, move_fleets, muster_battles, open_battles,
-    pay_upkeep, repair_fleets, resupply_fleets, update_blockades, update_yards,
+    Battles, Fleets, advance_battles, advance_yards, maintain_fleets, move_fleets, muster_battles,
+    open_battles, pay_upkeep, repair_fleets, resupply_fleets, update_blockades, update_yards,
 };
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
@@ -28,9 +28,9 @@ impl Plugin for FleetPlugin {
             (
                 // Zuerst der Stand der laufenden Gefechte: Was sie gekostet haben, steht in
                 // den Flotten, bevor marschiert, bezahlt und eingekauft wird. Dann der
-                // Marsch, dann der Sold (er geht dem Einkauf vor), dann Nachschub,
-                // Instandsetzung und Werften aus derselben Staatskasse. Die Forschung folgt
-                // erst danach (`SimSet::Research`) und bekommt, was über der Rücklage bleibt.
+                // Marsch, dann der Sold, dann die Einkäufe des Tages: Ersatzteile der
+                // Wartung, Nachschub, Instandsetzung und Werften. Wer wie viel ausgeben
+                // darf, hat der Haushalt am Monatsersten bewilligt (`economy::settle_budget`).
                 (
                     muster.run_if(day_start),
                     movement.run_if(day_start),
@@ -95,8 +95,8 @@ fn upkeep(
     );
 }
 
-/// Was der Staat täglich für seine Flotten einkauft, in fester Reihenfolge: Munition und
-/// Treibstoff, Instandsetzung, Neubauten.
+/// Was der Staat täglich für seine Flotten einkauft, in fester Reihenfolge: Ersatzteile
+/// der Wartung, Munition und Treibstoff, Instandsetzung, Neubauten.
 fn service(
     data: Res<GameData>,
     clock: Res<SimClock>,
@@ -108,6 +108,7 @@ fn service(
     mut chronicle: ResMut<Chronicle>,
 ) {
     update_yards(&data, &galaxy, &economy, &mut fleets);
+    maintain_fleets(&galaxy, &mut economy, &fleets, &polities, &data);
     resupply_fleets(&galaxy, &mut economy, &mut fleets, &diplomacy, &data);
     repair_fleets(
         &galaxy,

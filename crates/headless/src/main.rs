@@ -2,6 +2,7 @@
 //! Kommandozeile und Ausgabe.
 
 mod battle;
+mod budget;
 mod fleets;
 mod research;
 mod script;
@@ -105,7 +106,7 @@ enum Command {
     Fleets(fleets::FleetsArgs),
 }
 
-fn parse_range(text: &str) -> Result<(u64, u64), String> {
+pub(crate) fn parse_range(text: &str) -> Result<(u64, u64), String> {
     let (start, end) = text
         .split_once("..")
         .ok_or("erwartet wird START..ENDE, z. B. 0..32")?;

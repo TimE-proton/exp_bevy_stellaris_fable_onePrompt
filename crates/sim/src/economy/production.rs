@@ -24,6 +24,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
         tax_rates,
         tech_yield,
         state_income_running,
+        wage_bill_running,
         ..
     } = economy;
 
@@ -171,6 +172,9 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                 firm.cash -= wages;
                 *treasury += tax;
                 book_income(state_income_running, owner, tax);
+                if tax_rate > 0.0 {
+                    book_income(wage_bill_running, owner, wages);
+                }
                 local.households += wages - tax;
                 local.income_today += super::to_credits(wages - tax);
 

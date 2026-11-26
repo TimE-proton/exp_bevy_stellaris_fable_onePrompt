@@ -364,6 +364,14 @@ impl GameData {
                 "Preisschranken oder cover_days unplausibel".into(),
             ));
         }
+        if !(0.0..=1.0).contains(&economy.civil_share)
+            || !(0.0..=1.0).contains(&economy.handout_share)
+        {
+            return Err(invalid(
+                "balance.ron",
+                "economy.civil_share und economy.handout_share müssen in 0..1 liegen".into(),
+            ));
+        }
 
         // Galaxie
         let g = &self.galaxy;

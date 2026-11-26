@@ -4,14 +4,16 @@
 //! Kapital wandert monatlich. Geld ist ganzzahlig und wird nur verschoben; neu entsteht es
 //! allein durch die ausgewiesene Geldschöpfung für Neugeborene (`minted`).
 
+mod budget;
 mod capital;
 mod plugin;
 pub mod production;
 mod setup;
 
+pub use budget::{BUDGET_HISTORY, Budget, BudgetMonth, Claim, Line, Wants, settle_budget};
 pub use capital::{
-    invest_and_depreciate, migrate, pay_households, settle_public_accounts, state_reserve,
-    steer_money_supply,
+    invest_and_depreciate, market_capital_needs, migrate, pay_households, settle_public_accounts,
+    state_reserve, steer_money_supply,
 };
 pub use plugin::{EconomyPlugin, ProductionStep};
 pub use production::{
@@ -296,6 +298,15 @@ pub struct Economy {
     /// Dieselben Einnahmen des laufenden Monats, bis der Monatsabschluss sie übernimmt.
     #[serde(default)]
     pub state_income_running: Vec<Money>,
+    /// Besteuerte Lohnsumme des laufenden Monats je Gemeinschaft: die Löhne, von denen
+    /// der Staat Lohnsteuer erhält. Aus ihr ergibt sich, was ein anderer Steuersatz
+    /// brächte (`BudgetMonth::standard_revenue`).
+    #[serde(default)]
+    pub wage_bill_running: Vec<Money>,
+    /// Der Haushalt je Gemeinschaft: Ansprüche an die Staatskasse in fester Rangfolge,
+    /// der laufende Monat und die letzten zwölf.
+    #[serde(default)]
+    pub budgets: Vec<Budget>,
 }
 
 /// Faktor einer Gemeinschaft aus einer Liste je Gemeinschaft; fehlt der Eintrag, 1.
@@ -345,6 +356,12 @@ impl Economy {
         }
         if self.state_income_running.len() < count {
             self.state_income_running.resize(count, 0);
+        }
+        if self.wage_bill_running.len() < count {
+            self.wage_bill_running.resize(count, 0);
+        }
+        if self.budgets.len() < count {
+            self.budgets.resize_with(count, Budget::default);
         }
     }
 
@@ -413,6 +430,8 @@ impl Economy {
         if self.tech_yield.len() != count
             || self.state_income.len() != count
             || self.state_income_running.len() != count
+            || self.wage_bill_running.len() != count
+            || self.budgets.len() != count
         {
             return Some("Listen je Gemeinschaft sind unvollständig".into());
         }
@@ -430,6 +449,26 @@ impl Economy {
             .any(|factor| !factor.is_finite() || *factor <= 0.0)
         {
             return Some("Ertragsfaktor der Technik entgleist".into());
+        }
+        for (index, budget) in self.budgets.iter().enumerate() {
+            if budget.history.len() > BUDGET_HISTORY {
+                return Some(format!("Haushalt {index}: zu viele Monate aufbewahrt"));
+            }
+            let negative = |month: &BudgetMonth| {
+                month.revenue < 0
+                    || month.wage_bill < 0
+                    || month.standard_revenue < 0
+                    || month
+                        .lines
+                        .values()
+                        .any(|line| line.wanted < 0 || line.paid < 0)
+            };
+            if negative(&budget.current)
+                || budget.history.iter().any(negative)
+                || budget.grants.values().any(|grant| *grant < 0)
+            {
+                return Some(format!("Haushalt {index}: negativer Betrag"));
+            }
         }
         None
     }

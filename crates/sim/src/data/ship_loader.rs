@@ -455,6 +455,10 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             unit.contains(&military.upkeep_per_month),
         ),
         (
+            "maintenance_per_month muss in 0..1 liegen",
+            unit.contains(&military.maintenance_per_month),
+        ),
+        (
             "arrears_smoothing muss über 0 und höchstens 1 sein",
             military.arrears_smoothing > 0.0 && military.arrears_smoothing <= 1.0,
         ),

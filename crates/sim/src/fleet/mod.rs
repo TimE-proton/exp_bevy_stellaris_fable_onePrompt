@@ -36,7 +36,10 @@ pub use battles::{
 };
 pub use movement::{day_travel, move_fleets, update_blockades};
 pub use plugin::FleetPlugin;
-pub use supply::{monthly_upkeep, pay_upkeep, repair_fleets, resupply_fleets, supply_base};
+pub use supply::{
+    fleet_claim, maintain_fleets, maintenance_parts, monthly_upkeep, pay_upkeep,
+    procurement_estimate, repair_fleets, resupply_fleets, supply_base,
+};
 pub use yard::{
     BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable,
     order_ship, update_yards, yard_slots,

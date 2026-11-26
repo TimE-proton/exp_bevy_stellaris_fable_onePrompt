@@ -3,15 +3,18 @@
 //! Gemeinschaften: So lässt sich ohne Militär-KI sehen, was Werften, Märkte und
 //! Staatskassen aus Rüstung, Verlusten und Nachbau machen.
 
+use crate::budget::{
+    BudgetTotals, print_budget, print_months, print_table_header, print_table_row,
+};
 use clap::Args;
 use sim::GameData;
 use sim::clock::{DAYS_PER_YEAR, Date};
 use sim::data::GoodTier;
 use sim::economy::{Economy, to_credits};
 use sim::fleet::{Fleets, arms_capital, monthly_upkeep, yard_slots};
-use sim::harness::{check_invariants, run_scripted};
+use sim::harness::{Headless, WarScript, check_invariants};
 use sim::ids::{GoodId, PolityId};
-use sim::state::SaveGame;
+use sim::state::{SaveGame, SimConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -19,17 +22,38 @@ use std::process::ExitCode;
 pub struct FleetsArgs {
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Mehrere Seeds, z. B. `0..8`: statt der Einzelheiten die Haushaltsübersicht je Seed,
+    /// gemittelt über alle Gemeinschaften und die ganze Laufzeit.
+    #[arg(long, value_parser = crate::parse_range)]
+    seeds: Option<(u64, u64)>,
     #[arg(long, default_value_t = 10)]
     years: u64,
     /// Bestellungen, Flottenprogramme, Kriege und Friedensschlüsse nach Drehbuch.
     #[command(flatten)]
     script: crate::script::ScriptArgs,
+    /// Jede Gemeinschaft beginnt mit so vielen Startflotten.
+    #[arg(long, default_value_t = 1)]
+    start_fleets: u32,
+    /// Forschungsetat aller Gemeinschaften als Anteil der laufenden Einnahmen, statt der
+    /// Anteile ihrer Vorlagen.
+    #[arg(long)]
+    research_share: Option<f64>,
+    /// Lohnsteuersatz aller Gemeinschaften, statt des üblichen.
+    #[arg(long)]
+    tax: Option<f64>,
+    /// Faktor auf die laufenden Kosten der Flotte (Sold, Wartung, Verbrauch auf Station);
+    /// 0 schaltet sie ab.
+    #[arg(long, default_value_t = 1.0)]
+    fleet_cost: f64,
     /// Nur diese Gemeinschaft ausgeben (Nummer ab 0).
     #[arg(long)]
     polity: Option<u32>,
     /// Jedes Schiff einzeln auflisten.
     #[arg(long)]
     ships: bool,
+    /// Die letzten zwölf Haushaltsmonate einzeln auflisten.
+    #[arg(long)]
+    months: bool,
     /// Spielstand am Ende hierhin schreiben.
     #[arg(long)]
     save: Option<PathBuf>,
@@ -37,6 +61,216 @@ pub struct FleetsArgs {
 
 fn percent(share: f32) -> String {
     format!("{:.0} %", 100.0 * share)
+}
+
+/// Die Spieldaten mit den Abweichungen, die die Angaben verlangen. Nichts davon wird
+/// geschrieben; es gilt für diesen Lauf.
+fn variant(data: &GameData, args: &FleetsArgs) -> Result<GameData, String> {
+    let mut data = data.clone();
+    let military = &mut data.balance.military;
+    if args.start_fleets == 0 {
+        return Err("--start-fleets muss mindestens 1 sein".into());
+    }
+    for entry in &mut military.starting_fleet_ids {
+        entry.1 *= args.start_fleets;
+    }
+    for entry in &mut military.starting_fleet {
+        entry.1 *= args.start_fleets;
+    }
+    if !(0.0..=10.0).contains(&args.fleet_cost) {
+        return Err("--fleet-cost muss zwischen 0 und 10 liegen".into());
+    }
+    military.upkeep_per_month = (military.upkeep_per_month * args.fleet_cost).min(1.0);
+    military.maintenance_per_month = (military.maintenance_per_month * args.fleet_cost).min(1.0);
+    military.fuel_per_day = (military.fuel_per_day * args.fleet_cost as f32).min(1.0);
+    if let Some(share) = args.research_share {
+        let max = data.balance.research.max_budget_share;
+        if !(0.0..=max).contains(&share) {
+            return Err(format!(
+                "--research-share muss zwischen 0 und {max} liegen (research.max_budget_share)"
+            ));
+        }
+        data.balance.research.budget_share = share;
+        for template in &mut data.polities {
+            template.research_share = Some(share);
+        }
+    }
+    if let Some(tax) = args.tax {
+        if !(0.0..=0.9).contains(&tax) {
+            return Err("--tax muss zwischen 0 und 0.9 liegen".into());
+        }
+        data.balance.economy.income_tax = tax;
+    }
+    Ok(data)
+}
+
+/// Wie es den Haushalten geht, gemittelt über die Jahresenden eines Laufs.
+#[derive(Clone, Copy, Debug, Default)]
+struct Welfare {
+    /// Summe der Bevölkerung (Mio.) über die Jahresenden.
+    people: f64,
+    /// Geglättetes Tageseinkommen der Haushalte, über dieselben Jahresenden summiert.
+    income: f64,
+    /// Deckung aller Bedarfe, bevölkerungsgewichtet summiert.
+    needs: f64,
+}
+
+impl Welfare {
+    fn sample(&mut self, sim: &Headless) {
+        let economy = sim.world().resource::<Economy>();
+        for planet in &sim.galaxy().planets {
+            if planet.owner.is_none() || planet.population <= 0.0 {
+                continue;
+            }
+            let local = economy.planet(planet.id);
+            self.people += planet.population;
+            self.income += local.income;
+            self.needs += planet.population * local.needs_met.iter().sum::<f64>()
+                / local.needs_met.len().max(1) as f64;
+        }
+    }
+
+    /// Tageseinkommen je Mio. Einwohner.
+    fn income_per_million(&self) -> f64 {
+        self.income / self.people.max(1e-9)
+    }
+
+    fn needs_met(&self) -> f64 {
+        self.needs / self.people.max(1e-9)
+    }
+}
+
+/// Eine gespielte Partie mit dem, was ihr Haushalt über die Jahre ergab.
+struct Played {
+    sim: Headless,
+    violation: Option<String>,
+    /// Je Gemeinschaft die Summe aller abgeschlossenen Haushaltsmonate.
+    totals: Vec<BudgetTotals>,
+    welfare: Welfare,
+}
+
+impl Played {
+    /// Alle Gemeinschaften zusammen.
+    fn all(&self) -> BudgetTotals {
+        let mut sum = BudgetTotals::default();
+        for totals in &self.totals {
+            sum.merge(totals);
+        }
+        sum
+    }
+}
+
+/// Spielt eine Partie nach Drehbuch, prüft jedes Jahr die Invarianten und sammelt die
+/// Haushaltsmonate ein.
+fn play(data: &GameData, seed: u64, years: u64, script: &WarScript) -> Played {
+    let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+    let mut violation = None;
+    let mut totals: Vec<BudgetTotals> = Vec::new();
+    let mut welfare = Welfare::default();
+    for year in 1..=years {
+        script.run_until(&mut sim, year * DAYS_PER_YEAR, false);
+        if violation.is_none()
+            && let Err(message) = check_invariants(sim.world())
+        {
+            violation = Some(format!("Jahr {year}: {message}"));
+        }
+        let count = sim.polities().list.len();
+        if totals.len() < count {
+            totals.resize_with(count, BudgetTotals::default);
+        }
+        for (index, entry) in totals.iter_mut().enumerate() {
+            entry.add_year(&sim, PolityId::from_index(index));
+        }
+        welfare.sample(&sim);
+    }
+    Played {
+        sim,
+        violation,
+        totals,
+        welfare,
+    }
+}
+
+/// Die Haushaltsübersicht über mehrere Seeds: je Seed alle Gemeinschaften zusammen.
+fn overview(data: &GameData, args: &FleetsArgs, seeds: (u64, u64), script: &WarScript) -> ExitCode {
+    let seeds: Vec<u64> = (seeds.0..seeds.1).collect();
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, seeds.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(seeds.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(seed) = seeds.get(index) else {
+                        break;
+                    };
+                    let played = play(data, *seed, args.years, script);
+                    let fleets = played.sim.world().resource::<Fleets>();
+                    let ships: usize = played
+                        .sim
+                        .polities()
+                        .alive()
+                        .map(|polity| fleets.ship_count(polity.id))
+                        .sum();
+                    let alive = played.sim.polities().alive().count();
+                    results.lock().expect("Lauf abgestürzt").push((
+                        index,
+                        played.all(),
+                        played.welfare,
+                        ships as f64 / alive.max(1) as f64,
+                        played.violation,
+                    ));
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().expect("Lauf abgestürzt");
+    results.sort_by_key(|(index, ..)| *index);
+    println!(
+        "Haushalt über {} Jahre, alle Gemeinschaften eines Seeds zusammen. Einnahmen in Credits \
+         je Monat und Gemeinschaft; Ansprüche (bezahlt), Rest, Ausschüttung und Sonstiges in \
+         Prozent der laufenden Einnahmen; dann der Anteil der Monate mit Defizit, mit gekürzten \
+         Ansprüchen und mit der Kasse unter der Rücklage, und der höchste Soldrückstand.",
+        args.years
+    );
+    print_table_header("Seed");
+    let mut mean = BudgetTotals::default();
+    let mut welfare = Welfare::default();
+    let mut failed = false;
+    for (index, totals, lives, ships, violation) in &results {
+        print_table_row(&seeds[*index].to_string(), totals);
+        println!(
+            "{:>6} Schiffe je Gemeinschaft {ships:.1}, Tageseinkommen der Haushalte je Mio. \
+             Einwohner {:.3}, Bedarf gedeckt {:.3}",
+            "",
+            lives.income_per_million(),
+            lives.needs_met()
+        );
+        mean.merge(totals);
+        welfare.people += lives.people;
+        welfare.income += lives.income;
+        welfare.needs += lives.needs;
+        if let Some(message) = violation {
+            eprintln!("INVARIANTE VERLETZT, Seed {}: {message}", seeds[*index]);
+            failed = true;
+        }
+    }
+    print_table_row("Mittel", &mean);
+    println!(
+        "{:>6} Tageseinkommen der Haushalte je Mio. Einwohner {:.3}, Bedarf gedeckt {:.3}",
+        "",
+        welfare.income_per_million(),
+        welfare.needs_met()
+    );
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
@@ -47,7 +281,18 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (sim, violation) = run_scripted(data, args.seed, args.years * DAYS_PER_YEAR, &script);
+    let data = &match variant(data, &args) {
+        Ok(data) => data,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(seeds) = args.seeds {
+        return overview(data, &args, seeds, &script);
+    }
+    let played = play(data, args.seed, args.years, &script);
+    let (sim, violation) = (&played.sim, played.violation.clone());
     if let Some(only) = args.polity
         && only as usize >= sim.polities().list.len()
     {
@@ -65,14 +310,26 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
     let fleets = world.resource::<Fleets>();
     let military = &data.balance.military;
     println!(
-        "Seed {} nach {} Jahren. Unterhalt {:.1} % des Bauwerts je Monat, Werftaufschlag {:.0} %.",
+        "Seed {} nach {} Jahren. Je Monat Sold {:.1} % des Bauwerts und Ersatzteile für {:.1} % \
+         der Bauteile; Werftaufschlag {:.0} %.",
         args.seed,
         args.years,
         100.0 * military.upkeep_per_month,
+        100.0 * military.maintenance_per_month,
         100.0 * military.yard_fee
     );
     if !script.is_empty() {
-        crate::war::print_aftermath(&sim);
+        crate::war::print_aftermath(sim);
+    }
+    println!(
+        "Haushalt über die ganze Laufzeit je Gemeinschaft (Einnahmen in Credits je Monat, \
+         alles andere in Prozent der laufenden Einnahmen bzw. der Monate):"
+    );
+    print_table_header("Nr.");
+    for (index, totals) in played.totals.iter().enumerate() {
+        if args.polity.is_none_or(|only| only as usize == index) {
+            print_table_row(&index.to_string(), totals);
+        }
     }
     // Wovon Flotten und Werften leben: Treibstoff und alle Rüstungsgüter.
     let fuel = data.balance.economy.fuel_id;
@@ -101,6 +358,10 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             to_credits(monthly_upkeep(data, fleets, polity.id)),
             percent(fleets.arrears_of(polity.id))
         );
+        print_budget(sim, polity.id);
+        if args.months {
+            print_months(sim, polity.id);
+        }
         // Werften und der Markt, aus dem sie und die Flotte leben. Eine Welt, die ihre
         // Werft verloren hat, steht hier weiter, solange dort Aufträge ruhen.
         for planet in galaxy.planets_of(polity.id) {

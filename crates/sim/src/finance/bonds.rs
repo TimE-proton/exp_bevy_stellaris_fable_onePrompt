@@ -7,7 +7,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::DAYS_PER_YEAR;
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, Money, to_credits, to_money};
+use crate::economy::{Claim, Economy, Money, to_credits, to_money};
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, PolityId};
 use crate::logistics::Logistics;
@@ -145,6 +145,9 @@ pub fn service_bonds(
         let paid = due.min(treasury);
         economy.treasuries[bond.issuer.index()] -= paid;
         *holder_cash(economy, &mut finance.elites, bond.holder) += paid;
+        // Der Schuldendienst ist der erste Anspruch des Haushalts.
+        economy.want(bond.issuer, Claim::DebtService, due);
+        economy.book_paid(bond.issuer, Claim::DebtService, paid);
         if day >= bond.matures_on {
             // Was über die Zinsen hinaus gezahlt wurde, tilgt.
             bond.principal -= (paid - interest).clamp(0, bond.principal);

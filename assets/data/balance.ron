@@ -92,6 +92,18 @@
         // Rücklagen: Staat in Credits je Mio. Einwohner, Kontore und Firmen in Tagen
         // ihres Umsatzes bzw. ihrer Kosten. Was darüber liegt, fließt weiter.
         state_reserve_per_million: 1.5,
+        // --- Staatshaushalt ---
+        // Am Monatsersten bedient der Staat seine Ansprüche in fester Rangfolge:
+        // Schuldendienst, Grundleistungen, Flotte (Sold und Wartung), Beschaffung (Werften,
+        // Nachschub, Instandsetzung), Forschung, Rücklage, Ausschüttung.
+        // Grundleistungen (laufende Verwaltung und Versorgung) binden je Monat diesen Anteil
+        // der laufenden Einnahmen, gemittelt über zwölf Monate und gerechnet zum üblichen
+        // Lohnsteuersatz (income_tax); sie gehen an die Haushalte. Wer die Steuer anhebt,
+        // gewinnt den Zuwachs für alles andere; wer sie senkt, muss anderswo kürzen.
+        civil_share: 0.5,
+        // Von dem, was nach allen Ansprüchen über der Rücklage liegt, geht je Monat dieser
+        // Anteil an die Haushalte.
+        handout_share: 0.5,
         market_reserve_days: 10.0,
         firm_reserve_days: 10.0,
     ),
@@ -213,8 +225,15 @@
     military: (
         // Flotte, mit der jede Gemeinschaft beginnt: (Entwurf, Anzahl).
         starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
-        // Monatlicher Unterhalt als Anteil am Bauwert; der Sold geht an die Haushalte.
-        upkeep_per_month: 0.012,
+        // Was eine Flotte laufend kostet, je Monat: der Sold der Besatzungen als Anteil am
+        // Bauwert der Schiffe (er geht an die Haushalte) und die Ersatzteile der Wartung
+        // als Anteil der Bauteile jedes Schiffs. Die Ersatzteile kauft der Staat Tag für
+        // Tag am Markt seiner Hauptwelt, wo immer die Flotte liegt. Dazu kommt der
+        // Treibstoff, den sie auch auf Station verbraucht (fuel_per_day). Zusammen kostet
+        // eine Startflotte in den ersten zehn Jahren rund ein Zehntel der laufenden
+        // Staatseinnahmen; jede weitere Flotte kostet noch einmal so viel.
+        upkeep_per_month: 0.03,
+        maintenance_per_month: 0.04,
         // Reicht die Staatskasse nicht, bleibt Sold aus. Der Rückstand (0..1) folgt dem
         // ausgebliebenen Anteil je Monat um diesen Anteil der Lücke.
         arrears_smoothing: 0.5,
@@ -258,7 +277,7 @@
         dry_speed: 0.4,
         // Munition: Einheiten des Guts je Punkt Bordvorrat; ebenso Treibstoff.
         ammo_goods: 0.02,
-        fuel_goods: 0.03,
+        fuel_goods: 0.2,
         // Güter für Rumpfreparaturen und für die Munition an Bord.
         hull_good: "rumpfsegmente",
         ammo_good: "munition",
@@ -472,10 +491,10 @@
         // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
         // Kriegskasse, Schuldendienst und die Flotte (Sold, Nachschub, Instandsetzung,
         // Werften) gehen vor: Sie werden am Monatsersten vor der Forschung bezahlt.
-        budget_share: 0.20,
-        max_budget_share: 0.30,
+        budget_share: 0.125,
+        max_budget_share: 0.25,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
-        efficiency: 0.026,
+        efficiency: 0.0416,
         // Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).
         population_exponent: 0.25,
 
