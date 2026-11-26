@@ -745,11 +745,17 @@ fn conclude(
     let mut debris = 0.0f32;
     // Wohin die Parteien ausweichen, die das System räumen.
     let mut withdrawn: Vec<(usize, SystemId)> = Vec::new();
+    let holding: Vec<bool> = (0..parties)
+        .map(|side| holds_field(&results, side))
+        .collect();
     for (side, combatant) in battle.combatants.iter().enumerate() {
-        let held = holds_field(&results, side);
-        // Für diese Partei ohne Entscheidung: im Patt gelöst, oder an der Zeitgrenze noch
-        // auf dem Feld. Wer vorher geflohen ist, wurde geschlagen.
-        let drawn = combatant.stalemate || (battle.timed_out && held);
+        let held = holding[side];
+        // Für diese Partei ohne Entscheidung: an der Zeitgrenze noch auf dem Feld, oder
+        // im Patt gelöst, ohne dass danach ein Gegner (etwa eine Verstärkung) das Feld
+        // behauptet hätte. Wer sonst das Feld räumt, wurde geschlagen.
+        let foe_holds = (0..parties)
+            .any(|other| holding[other] && battle.is_hostile(side as u16, other as u16));
+        let drawn = (battle.timed_out && held) || (combatant.stalemate && !foe_holds);
         // Die Bilanz führt der Rechner: Verluste samt den Bordjägern, die mit ihrem Träger
         // untergingen oder keinen Hangar mehr fanden; im Bauwert zählt jeder Jäger einmal.
         let report = SideReport {
@@ -1846,6 +1852,60 @@ mod tests {
         let settled = settle(&data, &galaxy, &polities, &abroad, &diplomacy, &neutral);
         assert_eq!(settled.report().outcome, BattleOutcome::Stalemate);
         assert!(settled.fleets.list[..2].iter().all(Fleet::is_regrouping));
+    }
+
+    #[test]
+    fn a_stalemate_is_no_draw_once_another_enemy_holds_the_field() {
+        let (data, galaxy, polities, mut fleets) = setup();
+        // Gemeinschaft 0 ist zu Hause und liegt mit 1 und 2 im Krieg; die beiden anderen
+        // sind einander nicht feind.
+        let mut diplomacy = Diplomacy::default();
+        diplomacy.wars.insert((PolityId(0), PolityId(1)));
+        diplomacy.wars.insert((PolityId(0), PolityId(2)));
+        for index in [1, 2] {
+            fleets.list[index].system = fleets.list[0].system;
+        }
+        let mut battle = Battle::new(BattleId(0), fleets.list[0].system, 1);
+        for index in [0, 1, 2] {
+            join(
+                &data,
+                &Finance::default(),
+                &no_research(),
+                &diplomacy,
+                &mut fleets,
+                &mut battle,
+                index,
+            );
+        }
+        // Heimatflotte und erster Gegner haben sich im Patt gelöst; danach traf der zweite
+        // Gegner ein und steht am Ende allein auf dem Feld.
+        for side in 0..2 {
+            battle.order_retreat(side);
+            battle.combatants[side].stalemate = true;
+        }
+        for ship in &mut battle.ships {
+            if ship.side < 2 {
+                ship.status = ShipStatus::Escaped;
+            }
+        }
+        battle.combatants[0].lost_value = battle.combatants[0].initial_value * 0.5;
+        battle.finished = true;
+        let settled = settle(&data, &galaxy, &polities, &fleets, &diplomacy, &battle);
+        let report = settled.report();
+        assert_eq!(report.outcome, BattleOutcome::Decided);
+        assert!(report.sides[2].held_field && !report.sides[0].held_field);
+        // Die Heimatflotte hat das Feld einem Gegner überlassen: Sie räumt auch ihr eigenes
+        // System, und ihre Verluste zählen als Niederlage.
+        assert!(settled.fleets.list[0].is_regrouping());
+        assert_eq!(settled.fleets.list[0].route.len(), 1);
+        assert!(settled.shaken());
+        // Für den ersten Gegner bleibt es beim Patt: Wer das Feld hält, ist ihm nicht
+        // feind. Er ist hier nicht zu Hause und weicht aus.
+        assert!(report.sides[1].stalemate);
+        assert!(settled.fleets.list[1].is_regrouping());
+        // Wer das Feld hält, bleibt.
+        assert!(settled.fleets.list[2].is_ready() && settled.fleets.list[2].route.is_empty());
+        assert_eq!(settled.chronicle.entries[0].polity, Some(PolityId(2)));
     }
 
     #[test]

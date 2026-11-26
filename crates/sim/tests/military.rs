@@ -16,6 +16,7 @@ use sim::chronicle::Chronicle;
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR, TICKS_PER_DAY};
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::{Sector, ShipClass, TechBranch};
+use sim::diplomacy::Diplomacy;
 use sim::economy::{Economy, Money, to_credits};
 use sim::finance::{Finance, Secession, apply_secession, polity_of_issuer};
 use sim::fleet::{
@@ -3066,7 +3067,7 @@ fn a_save_in_the_middle_of_a_battle_continues_identically() {
     assert!(error.to_string().contains("Format 2"), "{error}");
 }
 
-// --- 14. Blockade, Sammelfrist, Gefechtspause ------------------------------------------------
+// --- 14. Blockade, Sammelfrist, Gefechte ohne Entscheidung -----------------------------------
 
 #[test]
 fn a_fleet_in_battle_or_regrouping_does_not_blockade() {
@@ -3413,16 +3414,23 @@ fn opponents_who_disengage_abroad_do_not_meet_again_next_door() {
 // --- 15. Mehr als zwei Parteien, Abspaltung, Erlöschen ---------------------------------------
 
 /// Nach einem Gefecht steht keine Flotte mehr darin. Entschieden: Wer das Feld hält,
-/// bleibt und ist einsatzbereit; wer es räumt und noch Schiffe hat, marschiert in ein
-/// Nachbarsystem und sammelt sich. Ohne Entscheidung (Patt, Zeitgrenze) bleibt nur, wer im
-/// eigenen System steht. Wer keine Schiffe mehr hat, besteht nicht mehr.
+/// bleibt und ist einsatzbereit; wer es räumt und noch Schiffe hat, weicht in ein
+/// Nachbarsystem aus und sammelt sich (oder sammelt sich an Ort und Stelle, wenn Gegner
+/// schon jeden Ausweg genommen haben). Ohne Entscheidung (Patt, Zeitgrenze) bleibt nur,
+/// wer im eigenen System steht. Wer keine Schiffe mehr hat, besteht nicht mehr.
 fn assert_aftermath(sim: &Headless, report: &BattleReport) {
     let home = sim.galaxy().system_owner(report.system);
+    let diplomacy = sim.world().resource::<Diplomacy>();
     for side in &report.sides {
         let fleet = fleet(sim, side.fleet.expect("jede Partei ist eine Flotte"));
         assert!(!fleet.in_battle && fleet.battle.is_none(), "{}", fleet.name);
-        let drawn =
-            side.stalemate || (report.outcome == BattleOutcome::TimedOut && side.held_field);
+        // Ein Patt bleibt nur ohne Entscheidung, solange danach kein Gegner das Feld hält.
+        let foe_holds = report
+            .sides
+            .iter()
+            .any(|other| other.held_field && diplomacy.at_war(side.owner, other.owner));
+        let drawn = (report.outcome == BattleOutcome::TimedOut && side.held_field)
+            || (side.stalemate && !foe_holds);
         let stays = if drawn {
             home == Some(side.owner)
         } else {
@@ -3438,11 +3446,28 @@ fn assert_aftermath(sim: &Headless, report: &BattleReport) {
             );
         } else {
             assert!(fleet.is_regrouping(), "{}", fleet.name);
-            assert_eq!(fleet.route.len(), 1);
+            assert!(fleet.route.len() <= 1);
+            if let Some(target) = fleet.route.first() {
+                assert!(sim.galaxy().lane_between(report.system, *target).is_some());
+            }
+        }
+    }
+    // Gegner aus demselben Gefecht weichen nie in dasselbe System aus.
+    let leaving: Vec<(PolityId, SystemId)> = report
+        .sides
+        .iter()
+        .filter_map(|side| {
+            let fleet = fleet(sim, side.fleet?);
+            (fleet.alive && fleet.is_regrouping())
+                .then(|| fleet.route.first().map(|target| (side.owner, *target)))
+                .flatten()
+        })
+        .collect();
+    for (index, (owner, target)) in leaving.iter().enumerate() {
+        for (other, same) in &leaving[..index] {
             assert!(
-                sim.galaxy()
-                    .lane_between(report.system, fleet.route[0])
-                    .is_some()
+                target != same || !diplomacy.at_war(*owner, *other),
+                "zwei Gegner weichen in dasselbe System aus"
             );
         }
     }
@@ -3470,9 +3495,8 @@ fn three_communities_fight_in_one_system() {
         let battle = battles(&sim)
             .in_system(target)
             .expect("das Gefecht hat begonnen");
-        // Jede Flotte ist eine Partei, in ausgeloster Reihenfolge.
-        let mut parties: Vec<Option<FleetId>> = battle.combatants.iter().map(|c| c.fleet).collect();
-        parties.sort();
+        // Jede Flotte ist eine Partei, in der Nummernfolge der Flotten.
+        let parties: Vec<Option<FleetId>> = battle.combatants.iter().map(|c| c.fleet).collect();
         assert_eq!(parties, ids.map(Some).to_vec());
         for x in 0..3u16 {
             for y in 0..3u16 {
@@ -3530,6 +3554,15 @@ fn three_communities_fight_in_one_system() {
     sim.run_days(5);
     assert_eq!(battles(&sim).next_id, 1);
     assert_eq!(check_invariants(sim.world()), Ok(()));
+
+    // Sind die ersten beiden Flotten nicht miteinander im Krieg, rückt der erste Gegner
+    // der ersten an die zweite Stelle: Die ersten beiden Parteien stellt der Rechner
+    // einander gegenüber auf.
+    let (sim, target) = meet(&[(a, c), (b, c)]);
+    let battle = battles(&sim).in_system(target).unwrap();
+    let parties: Vec<Option<FleetId>> = battle.combatants.iter().map(|c| c.fleet).collect();
+    assert_eq!(parties, vec![Some(ids[0]), Some(ids[2]), Some(ids[1])]);
+    assert!(battle.is_hostile(0, 1) && battle.is_hostile(1, 2) && !battle.is_hostile(0, 2));
 }
 
 #[test]
