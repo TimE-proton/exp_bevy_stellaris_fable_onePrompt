@@ -1184,6 +1184,7 @@ mod tests {
         let (battle, feed) = stepped(&data, MIXED, ticks);
         let view = overview_view(&battle, Vec2::new(1600.0, 900.0));
         let frame = ViewFrame {
+            epoch: Some(feed.epoch),
             alpha: 1.0,
             time: battle.time,
             tick_seconds: 0.1,

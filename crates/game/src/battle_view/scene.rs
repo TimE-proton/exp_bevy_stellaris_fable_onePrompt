@@ -162,6 +162,8 @@ pub struct SideClass {
 
 /// Was eine Partei an eigenen Meshes und Materialien braucht.
 pub struct SideKit {
+    /// Farbe der Partei, in der die Bauteile gestrichen sind.
+    pub color: Rgb,
     /// Index wie `ShipClass::index()`.
     pub classes: Vec<SideClass>,
     pub glow: Handle<StandardMaterial>,
@@ -172,12 +174,23 @@ pub struct SideKit {
     pub beam_pd: Handle<StandardMaterial>,
 }
 
-/// Meshes und Materialien aller Parteien des gezeigten Gefechts; entstehen mit jedem
-/// neuen Gefecht.
+/// Meshes und Materialien aller Parteien des gezeigten Gefechts. Sie entstehen mit jedem
+/// Neuaufbau der Szene; stößt eine Partei erst im Gefecht dazu, kommt ihre Ausstattung
+/// hinzu.
 #[derive(Resource, Default)]
 pub struct SideAssets {
-    pub epoch: Option<u32>,
+    /// Zählt jeden Neuaufbau und jedes Abräumen der Szene. Wer Entities für die Szene
+    /// führt (die Vorräte der Effekte), erkennt daran, dass seine verschwunden sind.
+    pub generation: u32,
     pub sides: Vec<SideKit>,
+}
+
+impl SideAssets {
+    /// Die Szene wurde abgeräumt: Alle Ausstattungen entfallen.
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.sides.clear();
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
@@ -204,6 +217,22 @@ pub fn side_tint(color: Rgb) -> [f32; 3] {
     [linear.red / peak, linear.green / peak, linear.blue / peak]
 }
 
+/// Leuchtfarben einer Partei: Triebwerk, Geschoss, Lenkwaffe, leichter und schwerer Strahl,
+/// Punktverteidigung.
+fn side_glows(color: Rgb) -> [StandardMaterial; 6] {
+    let tint = side_tint(color);
+    let side = LinearRgba::rgb(tint[0], tint[1], tint[2]);
+    let white = LinearRgba::WHITE;
+    [
+        additive(scaled(mix(side, white, 0.3), 2.6)),
+        glowing(scaled(mix(side, white, 0.4), 9.0)),
+        glowing(scaled(mix(side, white, 0.55), 7.0)),
+        glowing(scaled(mix(side, white, 0.15), 11.0)),
+        glowing(scaled(mix(side, white, 0.45), 20.0)),
+        glowing(scaled(mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6), 6.0)),
+    ]
+}
+
 impl SideKit {
     pub fn build(
         color: Rgb,
@@ -212,8 +241,6 @@ impl SideKit {
         materials: &mut Assets<StandardMaterial>,
     ) -> Self {
         let tint = side_tint(color);
-        let side = LinearRgba::rgb(tint[0], tint[1], tint[2]);
-        let white = LinearRgba::WHITE;
         let classes = assets
             .classes
             .iter()
@@ -227,17 +254,48 @@ impl SideKit {
                 }),
             })
             .collect();
+        let [glow, tracer, missile, beam_light, beam_heavy, beam_pd] =
+            side_glows(color).map(|material| materials.add(material));
         Self {
+            color,
             classes,
-            glow: materials.add(additive(scaled(mix(side, white, 0.3), 2.6))),
-            tracer: materials.add(glowing(scaled(mix(side, white, 0.4), 9.0))),
-            missile: materials.add(glowing(scaled(mix(side, white, 0.55), 7.0))),
-            beam_light: materials.add(glowing(scaled(mix(side, white, 0.15), 11.0))),
-            beam_heavy: materials.add(glowing(scaled(mix(side, white, 0.45), 20.0))),
-            beam_pd: materials.add(glowing(scaled(
-                mix(side, LinearRgba::rgb(1.0, 0.85, 0.5), 0.6),
-                6.0,
-            ))),
+            glow,
+            tracer,
+            missile,
+            beam_light,
+            beam_heavy,
+            beam_pd,
+        }
+    }
+
+    /// Streicht die Ausstattung in einer anderen Farbe. Meshes und Materialien behalten
+    /// ihre Handles: Was schon in der Szene steht, wechselt die Farbe mit.
+    pub fn repaint(
+        &mut self,
+        color: Rgb,
+        assets: &BattleAssets,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) {
+        self.color = color;
+        let tint = side_tint(color);
+        for (own, class) in self.classes.iter().zip(&assets.classes) {
+            let _ = meshes.insert(&own.hull, class.hull.tinted(tint).to_mesh());
+            if let (Some((own_fore, own_aft)), Some((fore, aft))) = (&own.halves, &class.halves) {
+                let _ = meshes.insert(own_fore, fore.tinted(tint).to_mesh());
+                let _ = meshes.insert(own_aft, aft.tinted(tint).to_mesh());
+            }
+        }
+        let handles = [
+            &self.glow,
+            &self.tracer,
+            &self.missile,
+            &self.beam_light,
+            &self.beam_heavy,
+            &self.beam_pd,
+        ];
+        for (handle, material) in handles.into_iter().zip(side_glows(color)) {
+            let _ = materials.insert(handle, material);
         }
     }
 }
@@ -354,8 +412,12 @@ struct WreckPart {
 
 #[derive(Resource, Default)]
 pub struct SceneState {
+    /// Epoche des Feeds, für die die Szene steht.
     epoch: Option<u32>,
-    ships_seen: usize,
+    /// Je Schiff des Gefechts: Steht dafür gerade ein Entity in der Szene? Jedes Frame
+    /// bekommt jedes Schiff auf dem Feld, das noch keines hat, seines; so fehlt keines, ob
+    /// es von Anfang an da war, als Bordjäger startet oder mit einer Verstärkung eintrifft.
+    shown: Vec<bool>,
     wrecks_seen: usize,
 }
 
@@ -366,7 +428,7 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                rebuild_on_epoch,
+                prepare_scene,
                 sync_ships,
                 sync_wrecks,
                 animate_wrecks,
@@ -374,7 +436,8 @@ pub(super) fn plugin(app: &mut App) {
             )
                 .chain()
                 .in_set(BattleViewSet::Scene),
-        );
+        )
+        .add_systems(Update, clear_idle_scene.run_if(shown_without_battle));
 }
 
 fn setup_assets(
@@ -432,7 +495,8 @@ pub(super) fn show_view(
     ));
 }
 
-/// Schlachtansicht ausschalten: alles zurück, Szene abräumen.
+/// Schlachtansicht ausschalten: alles zurück, Szene abräumen. Wird sie danach wieder
+/// gezeigt, baut sich alles neu auf, auch für dasselbe Gefecht.
 pub(super) fn hide_view(
     mut commands: Commands,
     mut shown: ResMut<BattleViewShown>,
@@ -453,17 +517,45 @@ pub(super) fn hide_view(
     commands.despawn_all::<With<SceneProp>>();
     commands.despawn_all::<With<BattleVisual>>();
     *state = SceneState::default();
-    *sides = SideAssets::default();
+    sides.reset();
     selected.0 = None;
     options.follow = false;
 }
 
-/// Ein anderes Gefecht im Feed: alte Szene abräumen, Materialien der neuen Parteien
-/// anlegen, Auswahl und Kamera zurücksetzen.
-pub(super) fn rebuild_on_epoch(
+/// Die Ansicht wird gezeigt, aber der Feed hält kein Gefecht (mehr).
+fn shown_without_battle(shown: Res<BattleViewShown>, feed: Res<BattleFeed>) -> bool {
+    shown.0 && !feed.is_active()
+}
+
+/// Ohne Gefecht bleibt nichts von ihm stehen.
+fn clear_idle_scene(
+    mut commands: Commands,
+    mut state: ResMut<SceneState>,
+    mut sides: ResMut<SideAssets>,
+    mut selected: ResMut<SelectedShip>,
+) {
+    if state.epoch.is_none() {
+        return;
+    }
+    commands.despawn_all::<With<BattleVisual>>();
+    *state = SceneState::default();
+    sides.reset();
+    selected.0 = None;
+}
+
+/// Bringt die Szene auf den Stand des Feeds, bevor Schiffe, Wracks und Effekte übertragen
+/// werden:
+/// - Ein anderes Gefecht: alte Szene abräumen, Auswahl und Kamera zurücksetzen.
+/// - Lage der Schiffe: Kam das Gefecht erst in diesem Frame in den Feed, gelten die
+///   schon berechneten Lagen noch für das alte; sie werden neu berechnet.
+/// - Parteien: Jede Partei des Gefechts bekommt ihre Ausstattung, auch eine, die erst
+///   mittendrin dazustößt; ändert sich ihre Farbe, wird nachgestrichen.
+pub(super) fn prepare_scene(
     mut timings: ResMut<ViewTimings>,
     mut commands: Commands,
     feed: Res<BattleFeed>,
+    data: Res<sim::GameData>,
+    mut frame: ResMut<ViewFrame>,
     mut state: ResMut<SceneState>,
     mut sides: ResMut<SideAssets>,
     assets: Res<BattleAssets>,
@@ -474,28 +566,39 @@ pub(super) fn rebuild_on_epoch(
     mut requests: MessageWriter<CameraRequest>,
 ) {
     let _span = timings.span(Part::Scene);
-    if state.epoch == Some(feed.epoch) {
+    let Some(battle) = feed.battle() else {
         return;
+    };
+    if state.epoch != Some(feed.epoch) {
+        commands.despawn_all::<With<BattleVisual>>();
+        *state = SceneState {
+            epoch: Some(feed.epoch),
+            ..default()
+        };
+        sides.reset();
+        selected.0 = None;
+        options.follow = false;
+        options.summary = true;
+        requests.write(CameraRequest::Overview);
     }
-    commands.despawn_all::<With<BattleVisual>>();
-    *state = SceneState {
-        epoch: Some(feed.epoch),
-        ..default()
-    };
-    let count = feed
-        .battle()
-        .map_or(0, |battle| battle.combatants.len())
-        .max(feed.info.sides.len());
-    *sides = SideAssets {
-        epoch: Some(feed.epoch),
-        sides: (0..count)
-            .map(|side| SideKit::build(feed.side_color(side), &assets, &mut meshes, &mut materials))
-            .collect(),
-    };
-    selected.0 = None;
-    options.follow = false;
-    options.summary = true;
-    requests.write(CameraRequest::Overview);
+    if !frame.matches(&feed) {
+        frame.refresh(&feed, 1.0, data.balance.battle.dt);
+    }
+    let count = battle.combatants.len().max(feed.info.sides.len());
+    for side in 0..count {
+        let color = feed.side_color(side);
+        match sides.sides.get_mut(side) {
+            Some(kit) if kit.color != color => {
+                kit.repaint(color, &assets, &mut meshes, &mut materials);
+            }
+            Some(_) => {}
+            None => {
+                sides
+                    .sides
+                    .push(SideKit::build(color, &assets, &mut meshes, &mut materials));
+            }
+        }
+    }
 }
 
 /// Wie stark sich eine Klasse in die Kurve legt (rad Schräglage je rad/s Drehung) und wie
@@ -536,20 +639,23 @@ fn sync_ships(
     };
     let smoothing = 1.0 - (-7.0 * time.delta_secs()).exp();
     let tick_seconds = frame.tick_seconds.max(1e-3);
+    state.shown.resize(battle.ships.len(), false);
 
     for (entity, mut visual, mut transform, mut material) in &mut hulls {
         let index = visual.index as usize;
-        let (Some(ship), Some((position, heading))) =
-            (battle.ships.get(index), frame.poses.get(index))
-        else {
-            commands.entity(entity).despawn();
-            continue;
-        };
-        if !ship.status.in_play() {
+        let in_play = battle
+            .ships
+            .get(index)
+            .filter(|ship| ship.status.in_play())
+            .zip(frame.poses.get(index));
+        let Some((ship, (position, heading))) = in_play else {
             // Zerstört oder entkommen: Das Schiff verlässt die Szene; ein Wrack übernimmt.
             commands.entity(entity).despawn();
+            if let Some(shown) = state.shown.get_mut(index) {
+                *shown = false;
+            }
             continue;
-        }
+        };
         let (lean, limit) = banking(ship.class);
         let wanted = if ship.status.can_act() {
             (-feed.turn(index) / tick_seconds * lean).clamp(-limit, limit)
@@ -595,17 +701,19 @@ fn sync_ships(
         }
     }
 
-    // Neue Schiffe (anfangs alle, später gestartete Bordjäger) bekommen ihr Entity.
-    for index in state.ships_seen..battle.ships.len() {
-        let ship = &battle.ships[index];
+    // Jedes Schiff auf dem Feld, das noch kein Entity hat, bekommt seines: anfangs alle,
+    // später gestartete Bordjäger und die Schiffe einer Verstärkung. Fehlt dafür noch
+    // etwas (Lage oder Ausstattung der Partei), ist das Schiff im nächsten Frame wieder
+    // an der Reihe.
+    for (index, ship) in battle.ships.iter().enumerate() {
+        if state.shown[index] || !ship.status.in_play() {
+            continue;
+        }
         let (Some(side), Some((position, heading))) =
             (sides.sides.get(ship.side as usize), frame.poses.get(index))
         else {
             continue;
         };
-        if !ship.status.in_play() {
-            continue;
-        }
         let class = ship.class.index();
         let look = Look::of(ship.status);
         commands.spawn((
@@ -631,8 +739,8 @@ fn sync_ships(
                 Visibility::Inherited,
             )],
         ));
+        state.shown[index] = true;
     }
-    state.ships_seen = battle.ships.len();
 }
 
 /// Zahl der Trümmerstücke je Klasse.
@@ -653,18 +761,35 @@ fn sync_wrecks(
     assets: Res<BattleAssets>,
     sides: Res<SideAssets>,
     mut state: ResMut<SceneState>,
+    roots: Query<Entity, With<WreckRoot>>,
 ) {
     let _span = timings.span(Part::Scene);
     let Some(battle) = feed.battle() else {
         return;
     };
-    for index in state.wrecks_seen..battle.wrecks.len() {
-        let wreck = &battle.wrecks[index];
-        if let Some(side) = sides.sides.get(wreck.side as usize) {
-            spawn_wreck(&mut commands, &assets, side, feed.epoch, index, wreck);
+    if battle.wrecks.len() < state.wrecks_seen {
+        // Der Kern hängt Wracks nur an. Ist die Liste doch kürzer geworden, stimmen die
+        // Nummern der vorhandenen nicht mehr: von vorn.
+        for entity in &roots {
+            commands.entity(entity).despawn();
         }
+        state.wrecks_seen = 0;
     }
-    state.wrecks_seen = battle.wrecks.len();
+    while let Some(wreck) = battle.wrecks.get(state.wrecks_seen) {
+        // Die Ausstattung jeder Partei des Gefechts liegt vor (`prepare_scene`); ein Wrack
+        // ohne gültige Partei kann nie gezeigt werden und wird übergangen.
+        if let Some(side) = sides.sides.get(wreck.side as usize) {
+            spawn_wreck(
+                &mut commands,
+                &assets,
+                side,
+                feed.epoch,
+                state.wrecks_seen,
+                wreck,
+            );
+        }
+        state.wrecks_seen += 1;
+    }
 }
 
 /// Legt ein Wrack an: den dunklen Rumpf (bei Großkampfschiffen zwei auseinandertreibende

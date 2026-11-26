@@ -133,7 +133,9 @@ impl BattleFeed {
         self.battle.is_some()
     }
 
-    /// Zeigt ab jetzt ein anderes Gefecht.
+    /// Zeigt ab jetzt ein anderes Gefecht. Das geht jederzeit, auch während die Ansicht
+    /// ein anderes zeigt und mitten in einem Frame: Die Szene baut sich neu auf, Auswahl
+    /// und Kamera beginnen von vorn.
     pub fn begin(&mut self, battle: &Battle, info: FeedInfo) {
         self.epoch = self.epoch.wrapping_add(1);
         self.info = info;
@@ -146,10 +148,21 @@ impl BattleFeed {
 
     /// Übernimmt den Zustand des Gefechts. Aufzurufen nach jedem Takt und nach jedem
     /// Befehl, der es verändert. Ohne vorheriges [`BattleFeed::begin`] geschieht nichts.
+    ///
+    /// Parteien und Schiffe dürfen dabei hinzukommen (Verstärkung); die Ansicht legt für
+    /// sie an, was fehlt. Namen und Farben neuer Parteien gehören nach `info.sides`.
     pub fn refresh(&mut self, battle: &Battle) {
         let Some(held) = self.battle.as_mut() else {
             return;
         };
+        if battle.id != held.id || battle.tick < held.tick {
+            // Ein anderes Gefecht oder dasselbe von vorn, ohne dass es angesagt wurde: Die
+            // Ansicht würde sonst Altes und Neues mischen. Es gilt wie angesagt, mit den
+            // bisherigen Angaben zu den Parteien.
+            let info = std::mem::take(&mut self.info);
+            self.begin(battle, info);
+            return;
+        }
         if battle.tick != held.tick {
             // Ein Takt ist vergangen: Der bisherige Zustand wird zur Ausgangslage der
             // Interpolation, und was sich nur aus dem Vergleich zweier Takte ergibt
@@ -526,6 +539,38 @@ mod tests {
         assert_eq!(feed.epoch, epoch + 1);
         feed.clear();
         assert!(!feed.is_active());
+    }
+
+    #[test]
+    fn an_unannounced_battle_starts_a_new_epoch() {
+        use sim::battle::matchup::{self, Side};
+        let data = data();
+        let (mut battle, mut feed) = stepped(&data, MIXED, 50);
+        let epoch = feed.epoch;
+        // Dasselbe Gefecht von vorn, ohne `begin`.
+        let sides: Vec<Side> = MIXED
+            .iter()
+            .map(|fleet| Side::parse(&data, fleet).unwrap())
+            .collect();
+        let fresh = matchup::build(&data, 11, &sides);
+        feed.refresh(&fresh);
+        assert_eq!(feed.epoch, epoch + 1);
+        assert_eq!(feed.battle().unwrap().tick, 0);
+        assert_eq!(
+            feed.info.sides.len(),
+            2,
+            "die Angaben zu den Parteien bleiben"
+        );
+        assert_eq!(feed.pose(0, 0.0), Pose::of(&fresh.ships[0]));
+        // Ein Gefecht mit anderer Kennung ebenso.
+        battle.id = sim::ids::BattleId(7);
+        feed.refresh(&battle);
+        assert_eq!(feed.epoch, epoch + 2);
+        assert_eq!(feed.battle().unwrap().tick, 50);
+        // Danach gilt es als das gezeigte: Weitere Takte bleiben in seiner Epoche.
+        battle.step(&data);
+        feed.refresh(&battle);
+        assert_eq!(feed.epoch, epoch + 2);
     }
 
     #[test]

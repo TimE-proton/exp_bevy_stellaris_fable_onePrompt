@@ -1069,6 +1069,7 @@ mod tests {
     fn view_frame(feed: &BattleFeed, camera: &Transform) -> ViewFrame {
         let battle = feed.battle().unwrap();
         ViewFrame {
+            epoch: Some(feed.epoch),
             alpha: 1.0,
             time: battle.time,
             tick_seconds: 0.1,
