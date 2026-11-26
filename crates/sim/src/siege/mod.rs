@@ -15,10 +15,12 @@
 //! In der Partie liest allein [`orbit`] Flotten, Schiffe und Forschung und übersetzt sie
 //! in die einfachen Daten, mit denen alles Übrige rechnet.
 
+pub mod day;
 pub mod orbit;
 mod plugin;
 pub mod step;
 
+pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
 pub use plugin::SiegePlugin;
 pub use step::{
@@ -176,10 +178,12 @@ pub enum Blocked {
     ShieldHolds,
     Underground,
     NoArmy,
+    /// Die Belagerung ist entschieden und ruht, bis der Besitzwechsel vollzogen ist.
+    Handover,
 }
 
 impl Blocked {
-    pub const ALL: [Blocked; 7] = [
+    pub const ALL: [Blocked; 8] = [
         Blocked::NoControl,
         Blocked::Stations,
         Blocked::NoFirepower,
@@ -187,6 +191,7 @@ impl Blocked {
         Blocked::ShieldHolds,
         Blocked::Underground,
         Blocked::NoArmy,
+        Blocked::Handover,
     ];
 
     pub fn label(self) -> &'static str {
@@ -198,6 +203,7 @@ impl Blocked {
             Blocked::ShieldHolds => "Schild hält",
             Blocked::Underground => "Feuer erreicht den Untergrund nicht",
             Blocked::NoArmy => "keine Truppen am Boden",
+            Blocked::Handover => "Übergabe steht aus",
         }
     }
 }
@@ -859,6 +865,32 @@ impl Sieges {
         }
         None
     }
+}
+
+/// Schließt die Belagerung eines Planeten: die eine Stelle, an der ein Datensatz endet.
+/// Was von der Miliz der Zonen übrig ist, steht wieder als Miliz der Welt, ein fälliger
+/// Besitzwechsel verfällt, die Region gilt nicht mehr als belagert, und die Kennzahlen
+/// verbuchen Ausgang und Dauer. Gibt den Datensatz zurück; was aus einer Truppe am Boden
+/// wird, entscheidet der Aufrufer.
+pub fn close(
+    sieges: &mut Sieges,
+    finance: &mut Finance,
+    planet: PlanetId,
+    outcome: Outcome,
+    day: u64,
+) -> Option<Siege> {
+    let siege = sieges.active.remove(&planet)?;
+    if let Some(defense) = sieges.defenses.get_mut(planet.index()) {
+        defense.militia = siege.zone_militia();
+    }
+    sieges.pending.retain(|due| due.planet != planet);
+    if let Some(region) = finance.regions.get_mut(planet.index()) {
+        region.besieged = false;
+    }
+    sieges
+        .stats
+        .record(outcome, day.saturating_sub(siege.started_day));
+    Some(siege)
 }
 
 /// Zustand bei Spielbeginn: Jede Heimatwelt hat die stehende Verteidigung aus
