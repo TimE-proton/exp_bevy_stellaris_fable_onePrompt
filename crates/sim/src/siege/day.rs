@@ -4,10 +4,9 @@
 //! [`run_day`] ist der Tagesschritt. [`tidy`] hält in jedem Takt, was nicht bis zum
 //! nächsten Tag warten kann: Flotten vergehen mitten am Tag, Frieden schließt ein Befehl.
 
-use super::step::{DayEffects, form, resolve};
+use super::step::{DayEffects, form, resolve, stations_after_duel};
 use super::{
     Blocked, BlockedSet, Conquest, Orbit, Outcome, PlanetFacts, Siege, SiegeReport, Sieges, close,
-    invested,
 };
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
@@ -502,13 +501,16 @@ fn resolve_siege(
         }
         embarked.retain(|_, force| force.troops > 0.0 || force.supply > 0.0);
     }
-    // Solange Vorräte da sind und die Oberfläche hält, streckt der Markt vor Ort sie.
-    let foraged =
-        if invested(&squadron.view, defense) && defense.depot > 0.0 && !siege.surface_lost() {
-            forage(data, economy, system, defender, siege.defenders(defense))
-        } else {
-            0.0
-        };
+    // Eingeschlossen ist der Planet heute, wenn nach dem Duell des Tages keine Station
+    // mehr steht. Solange dann Vorräte da sind und die Oberfläche hält, streckt der Markt
+    // vor Ort sie.
+    let cut_off = squadron.view.control
+        && stations_after_duel(defense.stations as f64, squadron.view.firepower, balance) <= 0.0;
+    let foraged = if cut_off && defense.depot > 0.0 && !siege.surface_lost() {
+        forage(data, economy, system, defender, siege.defenders(defense))
+    } else {
+        0.0
+    };
     let facts = planet_facts(data, galaxy, economy, finance, planet, day, foraged);
     let firms_before = firm_value(data, galaxy, economy, logistics, planet);
     let effects: DayEffects = resolve(siege, defense, &facts, &squadron.view, balance);
@@ -778,6 +780,13 @@ mod tests {
         }
         // Eine Stufe hält etwa station_hp durch die Feuerkraft der Flotte in Tagen aus.
         assert!((10..=40).contains(&days), "{days} Tage");
+        // Am Tag, an dem sie fällt, ist der Planet eingeschlossen: Die Garnison zehrt
+        // erstmals vom Depot, und der Markt vor Ort streckt es schon.
+        let used = depot - scene.state.sieges.defense(scene.planet).depot;
+        assert!(
+            used > 0.0 && used < 1.0,
+            "erster Tag der Einschließung: {used}"
+        );
         // Das Duell kostet Rumpf, die schweren Schiffe am meisten, und Munition.
         let ships = scene.ships(0);
         assert_eq!(ships.len(), 6);

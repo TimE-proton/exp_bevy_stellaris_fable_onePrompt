@@ -34,7 +34,7 @@ pub use orders::{
 pub use plugin::SiegePlugin;
 pub use step::{
     DayEffects, Landing, Projection, build_zones, forecast, form, hull_shares, land,
-    militia_strength, resolve, trace,
+    militia_strength, resolve, stations_after_duel, trace,
 };
 
 use crate::data::{GameData, SiegeBalance};

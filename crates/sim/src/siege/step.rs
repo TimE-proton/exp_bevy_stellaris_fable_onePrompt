@@ -241,6 +241,13 @@ pub fn hull_shares(hull: f64, ships: &[(ShipClass, f64)], balance: &SiegeBalance
         .collect()
 }
 
+/// Stationsstufen, die nach dem Duell eines Tages mit `firepower` noch stehen. Der
+/// Tagesrechner rechnet so; wer vor ihm wissen muss, ob der Planet heute eingeschlossen
+/// wird, fragt hier.
+pub fn stations_after_duel(stations: f64, firepower: f64, balance: &SiegeBalance) -> f64 {
+    snap(stations - firepower.max(0.0) / balance.station_hp)
+}
+
 /// Eine Zone fällt: Ihre Miliz löst sich auf, ihre Anlage schweigt. `garrison` ist die
 /// Garnison am Morgen, für die die Vorräte bemessen sind.
 fn take_zone(
@@ -326,7 +333,7 @@ pub fn resolve(
     if control && defense.stations > 0.0 {
         let stations = defense.stations as f64;
         effects.hull += stations * balance.station_damage * defender_guns;
-        let left = snap(stations - firepower / balance.station_hp);
+        let left = stations_after_duel(stations, firepower, balance);
         report.stations_lost = stations - left;
         defense.stations = left as f32;
         if ammunition && firepower > 0.0 {
