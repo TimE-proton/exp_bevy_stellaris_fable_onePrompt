@@ -95,14 +95,18 @@
         // --- Staatshaushalt ---
         // Am Monatsersten bedient der Staat seine Ansprüche in fester Rangfolge:
         // Schuldendienst, Grundleistungen, Flotte (Sold und Wartung), Beschaffung (Werften,
-        // Nachschub, Instandsetzung), Forschung, Rücklage, Ausschüttung.
+        // Nachschub, Instandsetzung), Kontore, Forschung, Rücklage, Ausschüttung. Reicht das
+        // Geld nicht, wird von hinten gekürzt. Bis einschließlich der Kontore greifen die
+        // Ansprüche notfalls die Rücklage an, die Forschung nie.
         // Grundleistungen (laufende Verwaltung und Versorgung) binden je Monat diesen Anteil
         // der laufenden Einnahmen, gemittelt über zwölf Monate und gerechnet zum üblichen
         // Lohnsteuersatz (income_tax); sie gehen an die Haushalte. Wer die Steuer anhebt,
         // gewinnt den Zuwachs für alles andere; wer sie senkt, muss anderswo kürzen.
+        // Mit der Hälfte trägt der Haushalt Forschung und zwei bis drei Startflotten; das
+        // Vierfache der Startflotte trägt er ohne höhere Steuer nicht mehr.
         civil_share: 0.5,
         // Von dem, was nach allen Ansprüchen über der Rücklage liegt, geht je Monat dieser
-        // Anteil an die Haushalte.
+        // Anteil an die Haushalte; der Rest bleibt als Polster für schwache Monate.
         handout_share: 0.5,
         market_reserve_days: 10.0,
         firm_reserve_days: 10.0,
@@ -226,16 +230,19 @@
         // Flotte, mit der jede Gemeinschaft beginnt: (Entwurf, Anzahl).
         starting_fleet: [("speer", 1), ("waechter", 2), ("dolch", 3)],
         // Was eine Flotte laufend kostet, je Monat: der Sold der Besatzungen als Anteil am
-        // Bauwert der Schiffe (er geht an die Haushalte) und die Ersatzteile der Wartung
-        // als Anteil der Bauteile jedes Schiffs. Die Ersatzteile kauft der Staat Tag für
-        // Tag am Markt seiner Hauptwelt, wo immer die Flotte liegt. Dazu kommt der
+        // Bauwert der Schiffe und die Ersatzteile der Wartung als Anteil der Bauteile jedes
+        // Schiffs. Der Sold geht an die Besatzungen, nicht an die Haushalte der Welten: Sie
+        // geben ihn am Markt des Sitzes ihrer Gemeinschaft aus. Die Ersatzteile kauft der
+        // Staat Tag für Tag am selben Markt, wo immer die Flotte liegt. Dazu kommt der
         // Treibstoff, den sie auch auf Station verbraucht (fuel_per_day). Zusammen kostet
-        // eine Startflotte in den ersten zehn Jahren rund ein Zehntel der laufenden
-        // Staatseinnahmen; jede weitere Flotte kostet noch einmal so viel.
+        // eine Startflotte in den ersten zehn Jahren rund 9 % der laufenden
+        // Staatseinnahmen (gemessen über die Seeds 0..8); jede weitere Flotte kostet noch
+        // einmal so viel.
         upkeep_per_month: 0.03,
         maintenance_per_month: 0.04,
-        // Reicht die Staatskasse nicht, bleibt Sold aus. Der Rückstand (0..1) folgt dem
-        // ausgebliebenen Anteil je Monat um diesen Anteil der Lücke.
+        // Bewilligt der Staatshaushalt der Flotte weniger, als Sold und Wartung verlangen,
+        // bleibt Sold aus. Der Rückstand (0..1) folgt dem ausgebliebenen Anteil je Monat
+        // um diesen Anteil der Lücke.
         arrears_smoothing: 0.5,
         // Kapital im Zweig Rüstung je Bauplatz einer Werft (mindestens ein Platz).
         yard_capital_per_slot: 4.0,
@@ -486,13 +493,15 @@
         // Vorlage einer Gemeinschaft keinen eigenen nennt, und der höchste, der sich
         // einstellen lässt. Die Vorlagen in polities.ron liegen zwischen beiden: Wer den
         // höchsten Etat wählt, forscht anderthalbmal so viel wie eine übliche Gemeinschaft,
-        // nicht ein Vielfaches.
-        // Das Geld ist das Gehalt der Forschenden: Es fließt aus der Staatskasse an die
-        // Haushalte, aber nur aus dem, was über der Rücklage des Staates liegt. Kolonien,
-        // Kriegskasse, Schuldendienst und die Flotte (Sold, Nachschub, Instandsetzung,
-        // Werften) gehen vor: Sie werden am Monatsersten vor der Forschung bezahlt.
+        // nicht ein Vielfaches, und gibt dafür so viel mehr aus, wie zwei Drittel einer
+        // Startflotte kosten.
+        // Das Geld ist das Gehalt der Forschenden: Es geht aus der Staatskasse an den
+        // Staatsdienst, nicht an die Haushalte der Welten. Im Staatshaushalt folgt die
+        // Forschung auf Schuldendienst, Grundleistungen, Flotte, Beschaffung und Kontore;
+        // sie bekommt, was der Monat danach übrig lässt und was schon über der Rücklage
+        // lag, nie die Rücklage selbst.
         budget_share: 0.125,
-        max_budget_share: 0.25,
+        max_budget_share: 0.1875,
         // Forschungspunkte je ausgegebenem Credit, bei einer Milliarde Einwohnern.
         efficiency: 0.0416,
         // Wie stark die Bevölkerung zählt (0 = gar nicht, 1 = proportional).

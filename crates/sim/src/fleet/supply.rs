@@ -1,8 +1,10 @@
 //! Sold, Wartung, Nachschub und Instandsetzung: was eine Flotte den Staat laufend kostet.
 //!
 //! Sold und Wartung sind der Anspruch „Flotte“ des Staatshaushalts: Der Sold geht am
-//! Monatsersten an die Haushalte, die Ersatzteile der Wartung kauft der Staat Tag für Tag
-//! am Markt seiner Hauptwelt, wo immer die Flotte liegt. Munition, Treibstoff und
+//! Monatsersten an die Besatzungen (den Staatsdienst, [`Economy::staff`]), nicht an die
+//! Haushalte der Welten; die Ersatzteile der Wartung kauft der Staat Tag für Tag am Markt
+//! seines Sitzes, wo immer die Flotte liegt. Beides ist Verbrauch: Was die Flotte kostet,
+//! fehlt den übrigen Haushalten. Munition, Treibstoff und
 //! Rumpfsegmente für Nachschub und Instandsetzung gehören zum Anspruch „Beschaffung“: Der
 //! Staat kauft sie am Markt des Systems, in dem die Flotte liegt, und nur dort, wo ihre
 //! Gemeinschaft zu Hause ist. Fehlt die Ware, bleibt das Magazin leer und der Rumpf
@@ -430,8 +432,8 @@ pub fn maintain_fleets(
     }
 }
 
-/// Monatlich: Jede Gemeinschaft zahlt den Sold ihrer Besatzungen an die Haushalte ihrer
-/// Welten, aus dem, was der Haushalt der Flotte bewilligt hat. Reicht die Bewilligung nicht
+/// Monatlich: Jede Gemeinschaft zahlt den Sold ihrer Besatzungen an den Staatsdienst
+/// ([`Economy::pay_staff`]), aus dem, was der Haushalt der Flotte bewilligt hat. Reicht die Bewilligung nicht
 /// für Sold und Wartung, bleibt Sold aus: Der Anteil des Anspruchs, den der Haushalt nicht
 /// decken konnte, geht geglättet in den Soldrückstand ein.
 pub fn pay_upkeep(

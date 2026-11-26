@@ -16,9 +16,9 @@ use bevy_ecs::prelude::*;
 
 /// Forschung: einmal im Monat, nach Monatsabschluss, Zusammenhalt und den Flotten. Die
 /// Einnahmen des Monats stehen dann fest, eine eben abgespaltene Gemeinschaft forscht
-/// schon mit, und Sold und Einkäufe der Flotte sind bezahlt: Die Forschung bekommt, was
-/// danach über der Rücklage liegt. Danach legt die KI ihren Etat für den nächsten Monat
-/// fest.
+/// schon mit, und der Staatshaushalt hat der Forschung bewilligt, was die Ansprüche vor
+/// ihr übrig ließen (`economy::settle_budget`). Danach legt die KI ihren Etat für den
+/// nächsten Monat fest.
 pub struct TechPlugin;
 
 impl Plugin for TechPlugin {

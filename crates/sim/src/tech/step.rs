@@ -249,7 +249,7 @@ pub fn research_claim(
 ///    Wissen der anderen bestimmen, für alle aus dem Stand zu Monatsbeginn: Die
 ///    Reihenfolge der Gemeinschaften spielt keine Rolle.
 /// 2. Je Gemeinschaft: Ziel prüfen oder wählen, Gehälter zahlen (aus dem, was der Haushalt
-///    der Forschung bewilligt hat, an die Haushalte), Punkte gutschreiben, fertige
+///    der Forschung bewilligt hat, an den Staatsdienst), Punkte gutschreiben, fertige
 ///    Technologien abschließen.
 /// 3. Bilder und Einblick fortschreiben: Was die Gemeinschaften voneinander sehen, folgt
 ///    den Abschlüssen des Monats und der Verflechtung. Daraus der Nachlass, der ab jetzt

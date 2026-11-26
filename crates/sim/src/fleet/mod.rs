@@ -15,13 +15,12 @@
 //! ([`design_buildable`], [`GameData::best_design`]) und Einblick in die Technik des
 //! Gegners nach einem Gefecht.
 //!
-//! Die Staatskasse bedient ihre Ansprüche in fester Reihenfolge, so wie die Systeme eines
-//! Takts aufeinander folgen ([`crate::SimSet`]): am Monatsersten zuerst der Monatsabschluss
-//! der Finanzen (Einnahmen, Auskehr des halben Überschusses über der Rücklage an die
-//! Haushalte, Schuldendienst), dann der Sold der Flotte, dann täglich Nachschub,
-//! Instandsetzung und Werften, zuletzt die Forschung. Sold und Einkäufe der Flotte
-//! greifen notfalls die Rücklage an; die Forschung bekommt nur, was danach noch über der
-//! Rücklage liegt.
+//! Was die Flotte kostet, sind zwei Ansprüche des Staatshaushalts
+//! ([`crate::economy::Claim`]): „Flotte“ (Sold der Besatzungen und Ersatzteile der
+//! Wartung) und „Beschaffung“ (Werften, Nachschub, Instandsetzung, bezahlt, wenn gekauft
+//! wird). Beide gehen Forschung, Rücklage und Ausschüttung vor und greifen notfalls die
+//! Rücklage an. Reicht das Geld nicht, bleibt Sold aus ([`Fleets::arrears_of`]), und
+//! Werften, Nachschub und Instandsetzung warten.
 
 mod battles;
 mod movement;

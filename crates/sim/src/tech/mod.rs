@@ -1,10 +1,12 @@
 //! Technologie und Forschung.
 //!
 //! Jede Gemeinschaft gibt monatlich einen Teil ihrer laufenden Staatseinnahmen (Lohnsteuer,
-//! Zölle, Dividenden; `Economy::state_income`) für Forschung aus, soweit ihre Kasse über
-//! der Rücklage liegt. Das Geld ist das Gehalt der Forschenden und fließt an die
-//! Haushalte; aus ihm werden Forschungspunkte, mehr davon bei großer Bevölkerung. Welche
-//! Zweige eine Gemeinschaft vorzieht und wie viel sie ansetzt, bringt ihre Vorlage mit.
+//! Zölle, Dividenden; `Economy::state_income`) für Forschung aus, soweit ihr Haushalt es
+//! nach den vorrangigen Ansprüchen hergibt; die Rücklage rührt die Forschung nie an. Das
+//! Geld ist das Gehalt der Forschenden. Es geht an den Staatsdienst, nicht an die Haushalte
+//! der Welten (`Economy::staff`): Was die Forschung kostet, fehlt den übrigen. Aus ihm
+//! werden Forschungspunkte, mehr davon bei großer Bevölkerung. Welche Zweige eine
+//! Gemeinschaft vorzieht und wie viel sie ansetzt, bringt ihre Vorlage mit.
 //!
 //! Den genauen Stand kennt nur die Gemeinschaft selbst. Andere halten je Zweig eine Spanne
 //! für möglich ([`Research::estimate`]), die mit ihrem Einblick enger wird. Einblick

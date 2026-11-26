@@ -2412,7 +2412,10 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
         let planet = galaxy.planet_mut(colony);
         planet.population = planet.population.max(needed);
     }
-    // Das alte Reich ist den anderen voraus und mitten in einer Arbeit.
+    // Das alte Reich ist den anderen voraus und mitten in einer Arbeit. Sein Etat ist
+    // ein eigener, erkennbar anderer als der seiner Vorlage: der höchste zulässige.
+    let share = data.balance.research.max_budget_share;
+    assert_ne!(sim.research().polities[0].usual_share, share);
     let begun = tech(&data, "antrieb_3");
     {
         let mut research = sim.world_mut().resource_mut::<Research>();
@@ -2420,8 +2423,8 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
         research.grant(&data, parent, tech(&data, "wirtschaft_3"));
         research.grant(&data, parent, tech(&data, "antrieb_2"));
         research.polities[0].progress[begun as usize] = 4321.0;
-        research.polities[0].budget_share = 0.2;
-        research.polities[0].usual_share = 0.2;
+        research.polities[0].budget_share = share;
+        research.polities[0].usual_share = share;
         research.add_intel(parent, PolityId(1), 0.5);
     }
     let inherited = sim.research().known(parent).to_vec();
@@ -2463,8 +2466,8 @@ fn a_seceding_region_takes_the_knowledge_of_its_old_realm_along() {
     assert_eq!(new.effects, TechEffects::of(&data, &inherited));
     assert!(new.effects.yield_factor > 1.0);
     assert_eq!(new.progress[begun as usize], 4321.0);
-    assert_eq!(new.budget_share, 0.2);
-    assert_eq!(new.usual_share, 0.2);
+    assert_eq!(new.budget_share, share);
+    assert_eq!(new.usual_share, share);
     assert_eq!(new.focus, focus);
     assert!(new.auto);
     assert_eq!(new.completed, 0);

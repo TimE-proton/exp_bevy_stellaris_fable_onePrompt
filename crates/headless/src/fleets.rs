@@ -38,7 +38,8 @@ pub struct FleetsArgs {
     /// Anteile ihrer Vorlagen.
     #[arg(long)]
     research_share: Option<f64>,
-    /// Lohnsteuersatz aller Gemeinschaften, statt des üblichen.
+    /// Lohnsteuersatz, den alle Gemeinschaften vom ersten Tag an erheben, statt des
+    /// üblichen. Die Grundleistungen des Haushalts bemessen sich weiter am üblichen Satz.
     #[arg(long)]
     tax: Option<f64>,
     /// Faktor auf die laufenden Kosten der Flotte (Sold, Wartung, Verbrauch auf Station);
@@ -95,11 +96,10 @@ fn variant(data: &GameData, args: &FleetsArgs) -> Result<GameData, String> {
             template.research_share = Some(share);
         }
     }
-    if let Some(tax) = args.tax {
-        if !(0.0..=0.9).contains(&tax) {
-            return Err("--tax muss zwischen 0 und 0.9 liegen".into());
-        }
-        data.balance.economy.income_tax = tax;
+    if let Some(tax) = args.tax
+        && !(0.0..=0.6).contains(&tax)
+    {
+        return Err("--tax muss zwischen 0 und 0.6 liegen".into());
     }
     Ok(data)
 }
@@ -109,8 +109,8 @@ fn variant(data: &GameData, args: &FleetsArgs) -> Result<GameData, String> {
 struct Welfare {
     /// Summe der Bevölkerung (Mio.) über die Jahresenden.
     people: f64,
-    /// Geglättetes Tageseinkommen der Haushalte, über dieselben Jahresenden summiert.
-    income: f64,
+    /// Geld der Haushalte in Credits, über dieselben Jahresenden summiert.
+    cash: f64,
     /// Deckung aller Bedarfe, bevölkerungsgewichtet summiert.
     needs: f64,
 }
@@ -124,15 +124,15 @@ impl Welfare {
             }
             let local = economy.planet(planet.id);
             self.people += planet.population;
-            self.income += local.income;
+            self.cash += to_credits(local.households);
             self.needs += planet.population * local.needs_met.iter().sum::<f64>()
                 / local.needs_met.len().max(1) as f64;
         }
     }
 
-    /// Tageseinkommen je Mio. Einwohner.
-    fn income_per_million(&self) -> f64 {
-        self.income / self.people.max(1e-9)
+    /// Geld der Haushalte je Mio. Einwohner.
+    fn cash_per_million(&self) -> f64 {
+        self.cash / self.people.max(1e-9)
     }
 
     fn needs_met(&self) -> f64 {
@@ -161,9 +161,16 @@ impl Played {
 }
 
 /// Spielt eine Partie nach Drehbuch, prüft jedes Jahr die Invarianten und sammelt die
-/// Haushaltsmonate ein.
-fn play(data: &GameData, seed: u64, years: u64, script: &WarScript) -> Played {
+/// Haushaltsmonate ein. Mit `tax` setzt jede Gemeinschaft am ersten Tag diesen
+/// Lohnsteuersatz, per Befehl wie ein Spieler.
+fn play(data: &GameData, seed: u64, years: u64, script: &WarScript, tax: Option<f64>) -> Played {
     let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
+    if let Some(rate) = tax {
+        let ids: Vec<PolityId> = sim.polities().list.iter().map(|polity| polity.id).collect();
+        for id in ids {
+            sim.issue(id, sim::command::SimCommand::SetTaxRate { rate });
+        }
+    }
     let mut violation = None;
     let mut totals: Vec<BudgetTotals> = Vec::new();
     let mut welfare = Welfare::default();
@@ -208,7 +215,7 @@ fn overview(data: &GameData, args: &FleetsArgs, seeds: (u64, u64), script: &WarS
                     let Some(seed) = seeds.get(index) else {
                         break;
                     };
-                    let played = play(data, *seed, args.years, script);
+                    let played = play(data, *seed, args.years, script, args.tax);
                     let fleets = played.sim.world().resource::<Fleets>();
                     let ships: usize = played
                         .sim
@@ -244,15 +251,15 @@ fn overview(data: &GameData, args: &FleetsArgs, seeds: (u64, u64), script: &WarS
     for (index, totals, lives, ships, violation) in &results {
         print_table_row(&seeds[*index].to_string(), totals);
         println!(
-            "{:>6} Schiffe je Gemeinschaft {ships:.1}, Tageseinkommen der Haushalte je Mio. \
-             Einwohner {:.3}, Bedarf gedeckt {:.3}",
+            "{:>6} Schiffe je Gemeinschaft {ships:.1}, Geld der Haushalte je Mio. Einwohner \
+             {:.2}, Bedarf gedeckt {:.3}",
             "",
-            lives.income_per_million(),
+            lives.cash_per_million(),
             lives.needs_met()
         );
         mean.merge(totals);
         welfare.people += lives.people;
-        welfare.income += lives.income;
+        welfare.cash += lives.cash;
         welfare.needs += lives.needs;
         if let Some(message) = violation {
             eprintln!("INVARIANTE VERLETZT, Seed {}: {message}", seeds[*index]);
@@ -261,9 +268,9 @@ fn overview(data: &GameData, args: &FleetsArgs, seeds: (u64, u64), script: &WarS
     }
     print_table_row("Mittel", &mean);
     println!(
-        "{:>6} Tageseinkommen der Haushalte je Mio. Einwohner {:.3}, Bedarf gedeckt {:.3}",
+        "{:>6} Geld der Haushalte je Mio. Einwohner {:.2}, Bedarf gedeckt {:.3}",
         "",
-        welfare.income_per_million(),
+        welfare.cash_per_million(),
         welfare.needs_met()
     );
     if failed {
@@ -291,7 +298,7 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
     if let Some(seeds) = args.seeds {
         return overview(data, &args, seeds, &script);
     }
-    let played = play(data, args.seed, args.years, &script);
+    let played = play(data, args.seed, args.years, &script, args.tax);
     let (sim, violation) = (&played.sim, played.violation.clone());
     if let Some(only) = args.polity
         && only as usize >= sim.polities().list.len()
@@ -348,7 +355,8 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
         }
         let owned = fleets.of(polity.id).count();
         println!(
-            "\n{}{}: {} {}, {} Schiffe. Staatskasse {:.0}, Sold {:.0} je Monat, Soldrückstand {}.",
+            "\n{}{}: {} {}, {} Schiffe. Staatskasse {:.0}, Sold {:.0} je Monat, Soldrückstand {}. \
+             Kasse des Staatsdienstes {:.0}.",
             polity.name,
             if polity.alive { "" } else { " (erloschen)" },
             owned,
@@ -356,7 +364,8 @@ pub fn run(data: &GameData, args: FleetsArgs) -> ExitCode {
             fleets.ship_count(polity.id),
             to_credits(economy.treasury(polity.id)),
             to_credits(monthly_upkeep(data, fleets, polity.id)),
-            percent(fleets.arrears_of(polity.id))
+            percent(fleets.arrears_of(polity.id)),
+            to_credits(economy.staff_money(polity.id))
         );
         print_budget(sim, polity.id);
         if args.months {
