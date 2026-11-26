@@ -10,7 +10,7 @@ use crate::time_control::{SPEED_LABELS, SimSpeed};
 use bevy_egui::egui::{self, Align, Align2, Color32, Layout, RichText};
 use sim::chronicle::{Chronicle, ChronicleKind};
 use sim::clock::{SimClock, date_of_tick};
-use sim::command::SimCommand;
+use sim::command::{QueuedCommand, SimCommand};
 use sim::data::{GameData, Rgb};
 use sim::diplomacy::Diplomacy;
 use sim::economy::{Economy, to_credits};
@@ -39,6 +39,22 @@ pub struct SimRefs<'a> {
     pub research: &'a Research,
     pub diplomacy: &'a Diplomacy,
     pub history: &'a PriceHistory,
+    /// Befehle, die auf den nächsten Takt warten (die Zeit steht). Nur zum Lesen: Was
+    /// schon vorgemerkt ist, bietet die Oberfläche nicht an, als wäre nichts geschehen.
+    pub pending: &'a [QueuedCommand],
+}
+
+/// Der Teil des Bildschirms unter der Kopfleiste. Die Fenster der Partie bleiben in ihm,
+/// auch wenn das Spielfenster kleiner wird: Datum, Pause und Stufen bleiben erreichbar.
+pub fn window_area(ctx: &egui::Context, bar_bottom: f32) -> egui::Rect {
+    let screen = ctx.content_rect();
+    egui::Rect::from_min_max(egui::pos2(screen.left(), bar_bottom), screen.max)
+}
+
+/// Höchste Höhe für den Inhalt eines Fensters, das in `area` ganz Platz haben soll: Titel
+/// und Rahmen brauchen ihren Teil.
+pub fn window_room(area: egui::Rect) -> f32 {
+    (area.height() - 64.0).max(160.0)
 }
 
 /// Was der Spieler in der Oberfläche ausgelöst hat.
@@ -202,7 +218,8 @@ pub fn in_game(
     markers: &[BattleMarker],
     actions: &mut Vec<UiAction>,
 ) {
-    egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
+    let bar =
+        egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
     egui::Panel::bottom("chronik")
         .resizable(true)
         .default_size(118.0)
@@ -222,12 +239,13 @@ pub fn in_game(
     let ctx = root.ctx().clone();
     battle_markers(&ctx, root.available_rect_before_wrap(), markers, actions);
     let shown_planet = shown_planet(sim, selection);
-    economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
-    economy::flows_window(&ctx, sim, &mut state.flows_open, None);
-    fleets::fleets_window(&ctx, sim, state, selection, actions);
-    tech::tech_window(&ctx, sim, state, actions);
-    finance::exchange_window(&ctx, sim, state, actions);
-    finance::treasury_window(&ctx, sim, state, actions);
+    let area = window_area(&ctx, bar.response.rect.bottom());
+    economy::chains_window(&ctx, area, sim, &mut state.chains_open, shown_planet);
+    economy::flows_window(&ctx, area, sim, &mut state.flows_open, None);
+    fleets::fleets_window(&ctx, area, sim, state, selection, actions);
+    tech::tech_window(&ctx, area, sim, state, actions);
+    finance::exchange_window(&ctx, area, sim, state, actions);
+    finance::treasury_window(&ctx, area, sim, state, actions);
     if state.menu_open {
         pause_menu(root.ctx(), state, actions);
     }
@@ -905,6 +923,9 @@ pub fn notice(root: &mut egui::Ui, notice: &Notice) {
     // Unter der Kopfleiste, auch wenn sie in einem schmalen Fenster zwei Zeilen hat.
     let top = (root.available_rect_before_wrap().top() + 21.0).max(44.0);
     egui::Area::new("hinweis".into())
+        // Über allen Fenstern: Ein Klick in ein Fenster hebt es sonst über den Hinweis, und
+        // eine Ablehnung bliebe ungelesen.
+        .order(egui::Order::Foreground)
         .anchor(Align2::CENTER_TOP, [0.0, top])
         .interactable(false)
         .show(root.ctx(), |ui| {
@@ -957,6 +978,7 @@ mod tests {
                 logistics: &self.state.logistics,
                 fleets: &self.state.fleets,
                 battles: &self.state.battles,
+                pending: &[],
                 research: &self.state.research,
                 diplomacy: &self.state.diplomacy,
                 history,

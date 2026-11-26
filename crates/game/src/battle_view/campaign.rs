@@ -6,7 +6,8 @@
 //! Partie, wie jeder andere Befehl des Spielers.
 
 use super::feed::{
-    BattleFeed, BattleOrder, BattleResult, BattleViewRequest, FeedInfo, ResultSide, SideInfo,
+    BattleFeed, BattleOrder, BattleResult, BattleViewRequest, FeedInfo, ResultSide, SideFate,
+    SideInfo,
 };
 use super::{BattleFeedSet, ViewOptions};
 use crate::map::MapCamera;
@@ -19,7 +20,7 @@ use bevy::prelude::*;
 use sim::battle::Battle;
 use sim::clock::{Date, SimClock, TICKS_PER_DAY};
 use sim::command::{CommandQueue, CommandSource, SimCommand};
-use sim::fleet::{BattleOutcome, BattleReport, Battles, Fleets};
+use sim::fleet::{BattleOutcome, BattleReport, Battles, Fleets, SideReport};
 use sim::galaxy::Galaxy;
 use sim::ids::{BattleId, PolityId};
 use sim::polity::Polities;
@@ -132,6 +133,7 @@ fn feed_info(
         own_sides: own.collect(),
         can_restart: false,
         still: false,
+        retreat_waiting: Vec::new(),
         calendar: calendar(data, clock),
         result: None,
     }
@@ -168,6 +170,13 @@ fn whereabouts(galaxy: &Galaxy, fleets: &Fleets, report: &BattleReport, side: us
     }
 }
 
+/// Hält die Partei am Ende das Feld? Wer vorzeitig ausschied, hält es nicht mehr: Bei ihm
+/// sagt `held_field` nur, ob er beim Ausscheiden noch auf dem Feld stand. So zählt auch
+/// der Kern in seiner Chronik.
+fn holds_at_end(side: &SideReport) -> bool {
+    side.held_field && side.left_early.is_none()
+}
+
 /// Das Ergebnis in Worten, aus der Bilanz der Simulation.
 pub fn result_of(
     galaxy: &Galaxy,
@@ -179,7 +188,7 @@ pub fn result_of(
     let holders: Vec<&str> = report
         .sides
         .iter()
-        .filter(|side| side.held_field)
+        .filter(|side| holds_at_end(side))
         .map(|side| side.fleet_name.as_str())
         .collect();
     let headline = match report.outcome {
@@ -209,10 +218,12 @@ pub fn result_of(
         .iter()
         .enumerate()
         .map(|(index, side)| {
-            let note = if side.stalemate {
-                "im Patt gelöst"
+            let note = if side.left_early.is_some() && side.held_field {
+                "vorzeitig ausgeschieden, als kein Gegner mehr auf dem Feld stand"
             } else if side.left_early.is_some() {
-                "vorzeitig ausgeschieden"
+                "vorzeitig ausgeschieden, hat das Feld geräumt"
+            } else if side.stalemate {
+                "im Patt gelöst"
             } else if side.retreated {
                 "Rückzug"
             } else {
@@ -230,7 +241,7 @@ pub fn result_of(
                     0.0
                 },
                 // Ohne Entscheidung hält niemand das Feld als Sieger.
-                holds_field: side.held_field && !report.outcome.undecided(),
+                holds_field: holds_at_end(side) && !report.outcome.undecided(),
                 note: note.into(),
                 whereabouts: whereabouts(galaxy, fleets, report, index),
             }
@@ -331,8 +342,9 @@ fn open_requested(
 }
 
 /// Nach jedem Takt der Simulation: den Stand des Gefechts in den Feed legen. Ist es dort
-/// abgeschlossen, bleibt der letzte Stand stehen, und die Ansicht zeigt das Ergebnis aus
-/// der Bilanz der Simulation.
+/// abgeschlossen, zeigt die Ansicht das Ergebnis aus der Bilanz der Simulation, und die
+/// Partie hält an: Während der Spieler das Ergebnis liest, vergeht keine Zeit ungesehen.
+/// Lässt er sie weiterlaufen, führt die Kopfleiste das Datum weiter mit.
 fn follow(
     watched: Option<ResMut<WatchedBattle>>,
     data: Res<GameData>,
@@ -345,11 +357,16 @@ fn follow(
     epoch: Res<SessionEpoch>,
     mut feed: ResMut<BattleFeed>,
     mut options: ResMut<ViewOptions>,
+    mut speed: ResMut<SimSpeed>,
 ) {
     let Some(mut watched) = watched else {
         return;
     };
-    if watched.ended || watched.epoch != epoch.0 {
+    if watched.epoch != epoch.0 {
+        return;
+    }
+    if watched.ended {
+        feed.info.calendar = calendar(&data, &clock);
         return;
     }
     match battles.get(watched.id) {
@@ -374,14 +391,54 @@ fn follow(
                 Some(report) => {
                     feed.info.player_side = None;
                     feed.info.own_sides.clear();
+                    feed.info.retreat_waiting.clear();
                     feed.info.calendar = calendar(&data, &clock);
-                    feed.conclude(result_of(&galaxy, &fleets, &polities, report));
+                    // Den letzten Takt des Gefechts hat die Simulation gerechnet und es
+                    // im selben Takt abgeräumt; was in ihm geschah, steht nur in der
+                    // Bilanz. Der gezeigte Stand wird ihr angeglichen.
+                    let fates: Vec<SideFate> = report
+                        .sides
+                        .iter()
+                        .map(|side| SideFate {
+                            lost: side.lost,
+                            escaped: side.escaped,
+                        })
+                        .collect();
+                    feed.conclude(result_of(&galaxy, &fleets, &polities, report), &fates);
                     options.summary = true;
+                    speed.paused = true;
                 }
                 // Ohne Bilanz gibt es nichts mehr zu zeigen.
                 None => feed.clear(),
             }
         }
+    }
+}
+
+/// Merkt an den Parteien vor, für welche der Rückzug schon befohlen ist und nur auf den
+/// nächsten Takt wartet (die Zeit steht): Die Ansicht bietet ihn dann nicht noch einmal
+/// an, denn die Wiederholung lehnte die Simulation ab.
+fn mark_waiting(
+    watched: Option<Res<WatchedBattle>>,
+    battles: Res<Battles>,
+    queue: Res<CommandQueue>,
+    mut feed: ResMut<BattleFeed>,
+) {
+    let Some(battle) = watched.and_then(|watched| battles.get(watched.id)) else {
+        return;
+    };
+    let waiting: Vec<usize> = (0..battle.combatants.len())
+        .filter(|side| {
+            battle.combatants[*side].fleet.is_some_and(|fleet| {
+                queue
+                    .pending
+                    .iter()
+                    .any(|entry| entry.command == SimCommand::Retreat { fleet })
+            })
+        })
+        .collect();
+    if feed.info.retreat_waiting != waiting {
+        feed.info.retreat_waiting = waiting;
     }
 }
 
@@ -438,6 +495,11 @@ fn relay_orders(
             .is_some_and(|combatant| combatant.owner == player)
             && !battles.has_departed(battle.id, side);
         if let (true, Some(command)) = (own, command) {
+            // Was schon wartet, wird nicht doppelt gegeben: Den zweiten Rückzug lehnte die
+            // Simulation ab.
+            if queue.pending.iter().any(|entry| entry.command == command) {
+                continue;
+            }
             queue.push(player, CommandSource::Player, command);
             if speed.paused {
                 notice.info(COMMAND_WAITS);
@@ -522,7 +584,7 @@ pub(super) fn plugin(app: &mut App) {
             (
                 (locate_markers, open_requested).run_if(in_state(ViewState::Galaxy)),
                 announce,
-                (handle_view_requests, relay_orders, guard)
+                (handle_view_requests, relay_orders, mark_waiting, guard)
                     .chain()
                     .run_if(in_state(ViewState::Battle)),
             )

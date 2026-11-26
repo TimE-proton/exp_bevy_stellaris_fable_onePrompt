@@ -282,6 +282,7 @@ fn draw_ui(
                 research: &sim.research,
                 diplomacy: &sim.diplomacy,
                 history: &history,
+                pending: queue.as_deref().map_or(&[], |queue| &queue.pending),
             };
             panels::in_game(
                 &mut root,

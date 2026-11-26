@@ -139,8 +139,10 @@ Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 4) lass
 mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist.
 
 Befehle gelten mit dem nächsten Takt der Simulation. Steht die Zeit, sind sie vorgemerkt,
-und ein Hinweis oben im Fenster sagt es. Lehnt die Simulation einen Befehl ab, steht dort
-der Grund.
+und ein Hinweis oben im Fenster sagt es. Was vorgemerkt ist, zählt für die Knöpfe schon:
+Ein Befehl, den es nur einmal geben kann (Rückzug, Vereinigen, Streichen), wird nicht noch
+einmal angeboten, und eine Werft zeigt ihre vorgemerkten Bestellungen. Lehnt die
+Simulation einen Befehl ab, steht der Grund im Hinweis.
 
 ### Forschung
 
@@ -183,7 +185,10 @@ und die Summe der bis zu zwölf letzten Monate. Die Tafel nennt die laufenden Ei
 dann jeden Anspruch in seiner Rangfolge (Schuldendienst, Grundleistungen, Flotte,
 Beschaffung, Kontore, Forschung) mit dem Verlangten, dem Bezahlten und dem, was offen
 blieb (rot), den Rest der Einnahmen, und was in Rücklage und Ausschüttung ging. Offen
-bleibt ein Anspruch, wenn das Geld fehlte oder der Markt die Ware nicht hergab. Darunter
+bleibt ein Anspruch, wenn das Geld fehlte oder der Markt die Ware nicht hergab. Unter der
+Tafel steht ihr Zeitraum: Ein Haushaltsmonat reicht von einem Monatsabschluss zum nächsten
+und wird aus den Einnahmen des Monats davor bezahlt; die „Einnahmen des Vormonats“ oben
+gehören schon zum laufenden Haushaltsmonat. Darunter
 stehen der Soldrückstand der Flotte und unter „Rangfolge und Kürzungen“, wer die Rücklage
 angreifen darf und was eine Kürzung für Forschung, Werften und Besatzungen heißt.
 Steuersatz, Rücklage und Anleihen werden im selben Fenster festgesetzt.
@@ -239,9 +244,10 @@ mit der Zeit der Partie: Pause und Geschwindigkeit gelten für beide, und ein Ka
 sind zwei Sekunden Gefechtszeit (die Kopfleiste nennt Datum und Verhältnis). Die Tafel
 der eigenen Flotte ändert Formation und Doktrin und befiehlt den Rückzug; die Befehle
 gehen an die Simulation und gelten mit ihrem nächsten Takt. „Verlassen“ führt jederzeit
-zurück zur Karte, das Gefecht läuft weiter. Endet es bei offener Ansicht, zeigt „Ergebnis
-des Gefechts“ den Ausgang, die Verluste je Flotte, wer das Feld hält und wohin die
-anderen ausweichen; „Zur Karte“ schließt die Ansicht. Einen Neustart gibt es nur in der
+zurück zur Karte, das Gefecht läuft weiter. Endet es bei offener Ansicht, hält die Partie
+an, und „Ergebnis des Gefechts“ zeigt den Ausgang, die Verluste je Flotte, wer das Feld
+hält und wohin die anderen ausweichen; die Lagetafeln zeigen denselben Endstand. „Zur
+Karte“ schließt die Ansicht; die Leertaste lässt die Partie weiterlaufen. Einen Neustart gibt es nur in der
 Gefechtsübung.
 
 ### Gefechtsübung

@@ -301,11 +301,12 @@ fn tech_yield(sim: &SimRefs, planet: &Planet) -> f64 {
 /// Produktionsketten: Wer braucht was, und was kommt heraus.
 pub fn chains_window(
     ctx: &egui::Context,
+    area: egui::Rect,
     sim: &SimRefs,
     open: &mut bool,
     planet: Option<PlanetId>,
 ) {
-    egui::Window::new("Produktionsketten").open(open)
+    egui::Window::new("Produktionsketten").open(open).constrain_to(area)
         .default_pos([450.0, 70.0]).default_width(720.0).show(ctx, |ui| {
         ui.label(
             "Mengen je Kapitaleinheit und Tag. Der Deckungsbeitrag gilt für die gewählte Welt \
@@ -382,9 +383,16 @@ pub fn chains_window(
 }
 
 /// Warenflüsse: was die Frachter tatsächlich bewegt haben.
-pub fn flows_window(ctx: &egui::Context, sim: &SimRefs, open: &mut bool, focus: Option<SystemId>) {
+pub fn flows_window(
+    ctx: &egui::Context,
+    area: egui::Rect,
+    sim: &SimRefs,
+    open: &mut bool,
+    focus: Option<SystemId>,
+) {
     egui::Window::new("Warenflüsse")
         .open(open)
+        .constrain_to(area)
         .default_pos([450.0, 90.0])
         .default_width(520.0)
         .show(ctx, |ui| {

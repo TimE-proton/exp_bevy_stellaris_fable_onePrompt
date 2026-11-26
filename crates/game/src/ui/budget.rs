@@ -9,6 +9,8 @@ use sim::clock::Date;
 use sim::economy::{BudgetMonth, Claim, Money, to_credits};
 use sim::ids::PolityId;
 
+/// Kopf der ersten Spalte: der Tag, mit dem der gezeigte Haushaltsmonat begann.
+pub const PERIOD: &str = "Haushaltsmonat ab";
 pub const HEADING: &str = "Haushalt";
 pub const REVENUE: &str = "Einnahmen";
 pub const REMAINDER: &str = "Rest der Einnahmen";
@@ -122,6 +124,20 @@ pub fn explanation(sim: &SimRefs) -> String {
     )
 }
 
+/// Über welchen Zeitraum die Tafel berichtet: Ein Haushaltsmonat beginnt mit einem
+/// Monatsabschluss und endet mit dem nächsten (`BudgetMonth::day`).
+pub fn period_text(began: u64, closed: u64) -> String {
+    format!(
+        "Die Tafel zeigt den letzten abgeschlossenen Haushaltsmonat, vom {} bis zum Abschluss \
+         am {}. Bezahlt wurde er aus den Einnahmen des Monats davor (Zeile „Einnahmen“). Die \
+         „Einnahmen des Vormonats“ oben sind jünger: Aus ihnen wird der laufende \
+         Haushaltsmonat bezahlt, der am {} begann.",
+        Date::from_day(began),
+        Date::from_day(closed),
+        Date::from_day(closed)
+    )
+}
+
 /// Der Abschnitt „Haushalt“ des Fensters.
 pub fn budget_section(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
     ui.label(RichText::new(HEADING).color(ACCENT));
@@ -140,7 +156,7 @@ pub fn budget_section(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
         .striped(true)
         .num_columns(7)
         .show(ui, |ui| {
-            ui.label(head(format!("Abschluss am {}", Date::from_day(month.day))));
+            ui.label(head(format!("{PERIOD} {}", Date::from_day(month.day))));
             for title in ["verlangt", "bezahlt", "offen"] {
                 ui.label(head(title.into()));
             }
@@ -167,6 +183,9 @@ pub fn budget_section(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
                 ui.end_row();
             }
         });
+    // Welchen Zeitraum die Tafel meint und aus welchen Einnahmen er bezahlt wurde: Die
+    // Zeile „Einnahmen des Vormonats“ darüber gehört schon zum laufenden Haushaltsmonat.
+    ui.label(detail(period_text(month.day, budget.current.day)).color(MUTED));
     ui.label(
         detail(format!(
             "Beträge in Credits. Offen ist, was verlangt, aber nicht ausgegeben wurde: weil \
@@ -279,6 +298,16 @@ mod tests {
         cells.into_iter().map(|(_, text)| text).collect()
     }
 
+    /// Tag des Abschlusses, mit dem der laufende Haushaltsmonat des Spielers begann.
+    fn budget_day(game: &TestGame) -> u64 {
+        let me = game.resource::<SimConfig>().player.expect("Spieler");
+        game.resource::<Economy>()
+            .budget(me)
+            .expect("Haushalt")
+            .current
+            .day
+    }
+
     #[test]
     fn the_budget_panel_shows_the_figures_of_the_core() {
         let mut game = TestGame::start("--seed 3");
@@ -319,5 +348,14 @@ mod tests {
         assert_eq!(shown[1], grouped(to_credits(fleet.paid)));
         assert_eq!(shown[4], grouped(to_credits(year.line(Claim::Fleet).paid)));
         assert!(game.text(&format!("{ARREARS}: 0 %")).is_some());
+        // Die Tafel nennt den Zeitraum, über den sie berichtet: vom Beginn des gezeigten
+        // Haushaltsmonats bis zum Abschluss, mit dem der laufende begann.
+        let (began, closed) = (month.day, budget_day(&game));
+        assert!(began < closed && closed <= game.resource::<SimClock>().day());
+        assert!(
+            game.text(&format!("{PERIOD} {}", Date::from_day(began)))
+                .is_some()
+        );
+        assert!(game.text(&period_text(began, closed)).is_some());
     }
 }

@@ -29,6 +29,19 @@ const ARMOR: Color32 = Color32::from_rgb(190, 170, 140);
 /// Beschriftungen des Ergebnisses eines Gefechts der Partie.
 pub const RESULT_TITLE: &str = "Ergebnis des Gefechts";
 pub const BACK_TO_MAP: &str = "Zur Karte";
+pub const RETREAT_ORDER: &str = "Rückzug befehlen";
+/// Warum der Rückzug nicht noch einmal angeboten wird, solange er auf den Takt wartet.
+pub const RETREAT_WAITS: &str =
+    "Der Rückzug ist vorgemerkt; er gilt, sobald die Zeit weiterläuft (Leertaste).";
+/// Kopfleiste und Ergebnis sagen, ob die Partie nach dem Ende des Gefechts steht.
+pub const CAMPAIGN_HALTED: &str = "PARTIE ANGEHALTEN";
+pub const RESULT_HALTED: &str = "Die Partie ist angehalten, solange das Ergebnis gelesen wird. \
+    Leertaste oder eine Stufe in der Kopfleiste lässt sie weiterlaufen.";
+pub const RESULT_RUNNING: &str =
+    "Die Partie läuft weiter; die Kopfleiste zeigt ihr Datum. Die Leertaste hält sie an.";
+/// Breite des Ergebnisfensters und was sein Rahmen dazu braucht.
+const RESULT_WIDTH: f32 = 540.0;
+const RESULT_MARGIN: f32 = 8.0;
 
 /// Ab dieser Rumpflänge auf dem Bildschirm (Pixel) verschwindet die Markierung ganz;
 /// darunter blendet sie sich ein.
@@ -288,8 +301,16 @@ pub fn battle_hud(
     };
     let ctx = root.ctx().clone();
     let mut panel_bottoms = [top - EDGE_GAP; 2];
+    // Freier Streifen zwischen den Lagetafeln links und rechts, unter der Kopfleiste.
+    let mut between = screen;
+    between.min.y = bar.response.rect.bottom();
     for side in 0..battle.combatants.len() {
         let rect = side_panel(&ctx, refs, battle, side, top, actions);
+        match (side, rect) {
+            (0, Some(rect)) => between.min.x = rect.right() + EDGE_GAP,
+            (1, Some(rect)) => between.max.x = rect.left() - EDGE_GAP,
+            _ => {}
+        }
         if let (Some(bottom), Some(rect)) = (panel_bottoms.get_mut(side), rect) {
             *bottom = rect.bottom();
             layout.corner = layout.corner.max(Vec2::new(
@@ -311,7 +332,7 @@ pub fn battle_hud(
     }
     if battle.finished && refs.options.summary {
         match &refs.feed.info.result {
-            Some(result) => campaign_result(&ctx, result, actions),
+            Some(result) => campaign_result(&ctx, refs, result, between, actions),
             None => summary(&ctx, refs, battle, actions),
         }
     }
@@ -387,6 +408,9 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
                 "PAUSIERT"
             };
             ui.label(RichText::new(hint).color(ACCENT).strong());
+        } else if speed.paused && refs.feed.info.result.is_some() {
+            // Mit dem Ende des Gefechts hält die Partie an; hier steht, dass sie steht.
+            ui.label(RichText::new(CAMPAIGN_HALTED).color(ACCENT).strong());
         }
     };
     let right = |ui: &mut egui::Ui| {
@@ -462,7 +486,19 @@ fn side_panel(
     actions: &mut Vec<HudAction>,
 ) -> Option<egui::Rect> {
     let combatant = &battle.combatants[side];
-    let summary = summarize(battle, refs.data, side);
+    let mut summary = summarize(battle, refs.data, side);
+    // Nach dem Ende eines Gefechts der Partie gilt die Bilanz der Simulation: Verlorene
+    // und Entkommene stehen hier mit denselben Zahlen wie im Ergebnis.
+    if let Some(result) = refs
+        .feed
+        .info
+        .result
+        .as_ref()
+        .and_then(|result| result.sides.get(side))
+    {
+        summary.tally.lost = result.lost;
+        summary.tally.escaped = result.escaped;
+    }
     let color = color32(refs.feed.side_color(side));
     // Die ersten beiden Parteien stehen links und rechts, weitere dazwischen.
     let (anchor, offset) = match side {
@@ -563,14 +599,23 @@ fn side_panel(
                 });
             if refs.feed.info.commands(side) {
                 ui.separator();
-                orders(ui, battle, side, actions);
+                let waiting = refs.feed.info.retreat_waiting.contains(&side);
+                orders(ui, battle, side, waiting, actions);
             }
         })
         .map(|shown| shown.response.rect)
 }
 
 /// Befehle des Spielers an seine Partei.
-fn orders(ui: &mut egui::Ui, battle: &Battle, side: usize, actions: &mut Vec<HudAction>) {
+/// `retreat_waiting`: Der Rückzug ist befohlen und gilt mit dem nächsten Takt; ein zweiter
+/// Befehl würde abgelehnt.
+fn orders(
+    ui: &mut egui::Ui,
+    battle: &Battle,
+    side: usize,
+    retreat_waiting: bool,
+    actions: &mut Vec<HudAction>,
+) {
     let combatant = &battle.combatants[side];
     let locked = battle.finished || combatant.retreating;
     ui.add_enabled_ui(!locked, |ui| {
@@ -606,9 +651,11 @@ fn orders(ui: &mut egui::Ui, battle: &Battle, side: usize, actions: &mut Vec<Hud
                 }
             }
         });
+        let retreat = egui::Button::new(RichText::new(RETREAT_ORDER).color(WARNING));
         if ui
-            .button(RichText::new("Rückzug befehlen").color(WARNING))
+            .add_enabled(!retreat_waiting, retreat)
             .on_hover_text("Alle Schiffe verlassen das Feld. Nicht umkehrbar.")
+            .on_disabled_hover_text(RETREAT_WAITS)
             .clicked()
         {
             actions.push(HudAction::Order(BattleOrder::Retreat { side }));
@@ -981,22 +1028,43 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
 
 /// Ergebnis eines Gefechts der Partie: Ausgang, Verluste je Partei, wer das Feld hält und
 /// wohin die anderen ausweichen. Die Zahlen stammen aus der Bilanz der Simulation.
-fn campaign_result(ctx: &egui::Context, result: &BattleResult, actions: &mut Vec<HudAction>) {
+fn campaign_result(
+    ctx: &egui::Context,
+    refs: &HudRefs,
+    result: &BattleResult,
+    between: egui::Rect,
+    actions: &mut Vec<HudAction>,
+) {
     let mut open = true;
+    // Das Fenster steht zwischen den Lagetafeln, wo es zwischen sie passt, und bleibt
+    // dort, auch wenn es verschoben oder das Spielfenster kleiner wird.
+    let screen = ctx.content_rect();
+    let area = if between.width() >= RESULT_WIDTH + 2.0 * RESULT_MARGIN {
+        between
+    } else {
+        egui::Rect::from_min_max(egui::pos2(screen.left(), between.top()), screen.max)
+    };
     egui::Window::new(RESULT_TITLE)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .frame(panel_frame(ctx))
-        .default_pos([ctx.content_rect().center().x - 280.0, 130.0])
+        .default_pos([area.center().x - RESULT_WIDTH * 0.5 - RESULT_MARGIN, 130.0])
+        .constrain_to(area)
         .show(ctx, |ui| {
-            ui.set_min_width(540.0);
+            ui.set_width(RESULT_WIDTH);
             ui.label(RichText::new(&result.headline).strong().color(ACCENT));
             let days = match result.days {
                 1 => "Dauer ein Tag".to_string(),
                 days => format!("Dauer {days} Tage"),
             };
             ui.label(RichText::new(days).color(MUTED));
+            // Mit dem Ende hält die Partie an; der Spieler kann sie weiterlaufen lassen.
+            ui.label(detail(if refs.speed.paused {
+                RESULT_HALTED
+            } else {
+                RESULT_RUNNING
+            }));
             ui.add_space(4.0);
             for (index, side) in result.sides.iter().enumerate() {
                 ui.horizontal_wrapped(|ui| {

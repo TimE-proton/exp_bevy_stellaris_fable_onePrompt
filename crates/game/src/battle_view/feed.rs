@@ -7,8 +7,8 @@
 
 use bevy::prelude::*;
 use sim::battle::math::wrap_angle;
-use sim::battle::{Battle, BattleShip, Beam, Doctrine, Formation, Impact, V2};
-use sim::data::Rgb;
+use sim::battle::{Battle, BattleShip, Beam, Doctrine, Formation, Impact, ShipStatus, V2};
+use sim::data::{Rgb, ShipClass};
 
 /// Wie lange ein Schildtreffer nachleuchtet (Sekunden Gefechtszeit).
 pub const SHIELD_FLASH_SECONDS: f32 = 0.45;
@@ -87,6 +87,9 @@ pub struct FeedInfo {
     pub still: bool,
     /// Weitere Parteien, die der Spieler führt (in der Partie ist jede Flotte eine Partei).
     pub own_sides: Vec<usize>,
+    /// Parteien, deren Rückzug befohlen ist, aber erst mit dem nächsten Takt gilt (die Zeit
+    /// steht). Die Ansicht bietet ihn dort nicht noch einmal an.
+    pub retreat_waiting: Vec<usize>,
     /// Wie die Gefechtszeit zur Zeit des Besitzers steht, etwa das Datum der Partie und
     /// wie viel Gefechtszeit auf einen Kalendertag kommt. Leer in der Übung.
     pub calendar: String,
@@ -127,6 +130,14 @@ pub struct ResultSide {
     pub note: String,
     /// Wo die Flotte jetzt ist und wohin sie ausweicht.
     pub whereabouts: String,
+}
+
+/// Endstand einer Partei, wie ihr Besitzer ihn in seiner Bilanz führt: verlorene und
+/// entkommene Schiffe je Klasse (Stelle = `ShipClass::index`), Bordjäger eingeschlossen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SideFate {
+    pub lost: [u32; 6],
+    pub escaped: [u32; 6],
 }
 
 /// Nachleuchten eines Schildtreffers an einem Schiff.
@@ -239,11 +250,17 @@ impl BattleFeed {
         copy_state(held, battle);
     }
 
-    /// Das Gefecht ist bei seinem Besitzer zu Ende und dort schon abgeräumt. Der zuletzt
-    /// gezeigte Stand bleibt stehen und gilt als beendet; die Bilanz kommt vom Besitzer.
-    pub fn conclude(&mut self, result: BattleResult) {
+    /// Das Gefecht ist bei seinem Besitzer zu Ende und dort schon abgeräumt; die Bilanz
+    /// kommt vom Besitzer. Der zuletzt gezeigte Stand gilt als beendet. Ihm fehlt, was im
+    /// letzten Takt geschah: `fates` nennt je Partei den Endstand der Bilanz, und der
+    /// gezeigte Stand wird ihm angeglichen, damit Szene und Lagetafeln dasselbe sagen wie
+    /// das Ergebnis.
+    pub fn conclude(&mut self, result: BattleResult, fates: &[SideFate]) {
         if let Some(held) = self.battle.as_mut() {
             held.finished = true;
+            for (side, fate) in fates.iter().enumerate().take(held.combatants.len()) {
+                settle(held, side, fate);
+            }
             self.info.result = Some(result);
         }
     }
@@ -315,6 +332,52 @@ impl BattleFeed {
             .sides
             .get(side)
             .map_or((0.7, 0.7, 0.7), |info| info.color)
+    }
+}
+
+/// Gleicht den gezeigten Stand einer Partei ihrem Endstand an. Die Bilanz zählt je
+/// Klasse, nicht je Schiff: Als entkommen gilt zuerst, wer schon auf dem Rückzug war, als
+/// verloren zuerst, wer ohne Energie trieb. Gerechnet wird hier nichts.
+fn settle(held: &mut Battle, side: usize, fate: &SideFate) {
+    let fighters = ShipClass::Fighter.index();
+    let mut escaped = fate.escaped;
+    let mut lost = fate.lost;
+    for class in 0..lost.len() {
+        lost[class] = lost[class].saturating_sub(held.combatants[side].lost[class]);
+    }
+    held.combatants[side].lost = fate.lost;
+    held.combatants[side].escaped = fate.escaped;
+    let own = |ship: &BattleShip| ship.side as usize == side;
+    for ship in held.ships.iter().filter(|ship| own(ship)) {
+        if ship.status == ShipStatus::Escaped {
+            let class = ship.class.index();
+            escaped[class] = escaped[class].saturating_sub(1);
+            escaped[fighters] = escaped[fighters].saturating_sub(ship.hangar);
+        }
+    }
+    let mut mark = |open: &mut [u32; 6], from: ShipStatus, to: ShipStatus| {
+        for ship in held.ships.iter_mut().filter(|ship| own(ship)) {
+            let class = ship.class.index();
+            if ship.status == from && open[class] > 0 {
+                ship.status = to;
+                open[class] -= 1;
+                open[fighters] = open[fighters].saturating_sub(ship.hangar);
+            }
+        }
+    };
+    for from in [
+        ShipStatus::Routing,
+        ShipStatus::Active,
+        ShipStatus::Disabled,
+    ] {
+        mark(&mut escaped, from, ShipStatus::Escaped);
+    }
+    for from in [
+        ShipStatus::Disabled,
+        ShipStatus::Routing,
+        ShipStatus::Active,
+    ] {
+        mark(&mut lost, from, ShipStatus::Destroyed);
     }
 }
 

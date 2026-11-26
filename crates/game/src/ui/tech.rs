@@ -177,6 +177,7 @@ fn blend(first: Color32, second: Color32, share: f32) -> Color32 {
 
 pub fn tech_window(
     ctx: &egui::Context,
+    area: egui::Rect,
     sim: &SimRefs,
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
@@ -187,6 +188,7 @@ pub fn tech_window(
         .open(&mut open)
         .resizable(false)
         .default_pos([300.0, 56.0])
+        .constrain_to(area)
         // Platz für den ganzen Baum unter der Kopfleiste; das Fenster selbst ist so groß
         // wie sein Inhalt.
         .default_size([TREE_WIDTH + 24.0, (screen.height() - 70.0).max(200.0)])

@@ -1,6 +1,6 @@
 //! Werften, Bauaufträge, Entwürfe und die Kosten der Flotte.
 
-use super::{CANCEL, ORDER, WARN, dry_run, gated_button, sentence};
+use super::{CANCEL, ORDER, WAITING, WARN, dry_run, gated_button, is_waiting, sentence, waiting};
 use crate::ui::UiState;
 use crate::ui::budget::claim_label;
 use crate::ui::format::{decimal, grouped, percent};
@@ -188,22 +188,32 @@ fn order_row(ui: &mut egui::Ui, sim: &SimRefs, order: &BuildOrder, actions: &mut
     ui.label(if waits { status.color(WARN) } else { status });
     ui.label(RichText::new(credits(order.spent)).monospace())
         .on_hover_text("Bisher gezahlt: Bauteile und Werftaufschlag, in Credits.");
+    let command = SimCommand::CancelBuild { order: order.id };
+    // Ein Auftrag lässt sich nur einmal streichen.
+    let free = !is_waiting(sim, &command);
     let button = ui
-        .small_button(CANCEL)
-        .on_hover_text("Streicht den Auftrag. Was verbaut ist, wird nicht erstattet.");
+        .add_enabled(free, egui::Button::new(CANCEL).small())
+        .on_hover_text("Streicht den Auftrag. Was verbaut ist, wird nicht erstattet.")
+        .on_disabled_hover_text(WAITING);
     button.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::Button,
-            true,
+            free,
             format!("{CANCEL}: Nr. {}", order.id),
         )
     });
     if button.clicked() {
-        actions.push(UiAction::Command(SimCommand::CancelBuild {
-            order: order.id,
-        }));
+        actions.push(UiAction::Command(command));
     }
     ui.end_row();
+}
+
+/// Was an einer Werft steht, solange Bestellungen auf den nächsten Takt warten.
+pub fn waiting_orders(count: usize) -> String {
+    match count {
+        1 => "1 Bestellung vorgemerkt".to_string(),
+        more => format!("{more} Bestellungen vorgemerkt"),
+    }
 }
 
 /// Jede Werft mit Bauplätzen und Aufträgen. Ein Klick auf den Namen wählt sie für neue
@@ -248,6 +258,18 @@ fn yards(
                 "System {place} · {slots_text} · {} von höchstens {limit} Aufträgen",
                 orders.len()
             ));
+            // Bei stehender Zeit ändert eine Bestellung die Liste noch nicht: Hier steht,
+            // dass sie angekommen ist.
+            let waits = waiting(sim)
+                .filter(|command| match command {
+                    SimCommand::BuildShip { planet: at, .. }
+                    | SimCommand::BuildClass { planet: at, .. } => at == planet,
+                    _ => false,
+                })
+                .count();
+            if waits > 0 {
+                ui.label(RichText::new(waiting_orders(waits)).color(WARN));
+            }
             if sim.fleets.is_blockaded(world.system) {
                 ui.label(RichText::new("blockiert: Es kommt keine Ware an").color(WARN));
             }

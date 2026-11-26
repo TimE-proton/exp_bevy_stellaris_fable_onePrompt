@@ -237,12 +237,13 @@ pub fn ownership_tab(
 /// Die Börse: alle Emittenten, ihr Kurs und ihre Halter, mit den Werkzeugen des Staates.
 pub fn exchange_window(
     ctx: &egui::Context,
+    area: egui::Rect,
     sim: &SimRefs,
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
 ) {
     let mut open = state.exchange_open;
-    egui::Window::new("Börse").open(&mut open).default_pos([450.0, 60.0]).default_width(760.0).show(ctx, |ui| {
+    egui::Window::new("Börse").open(&mut open).constrain_to(area).default_pos([450.0, 60.0]).default_width(760.0).show(ctx, |ui| {
         let capitals = capitals(sim);
         let player = sim.config.player;
         ui.horizontal(|ui| {
@@ -388,14 +389,17 @@ pub fn exchange_window(
 /// Staatsfinanzen: Kasse, Schulden, Steuern, Anleihen, und wer bei wem beteiligt ist.
 pub fn treasury_window(
     ctx: &egui::Context,
+    area: egui::Rect,
     sim: &SimRefs,
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
 ) {
     let mut open = state.treasury_open;
     // Das Fenster rollt, wo der Haushalt mit allem anderen nicht mehr auf den Schirm passt.
-    let room = (ctx.content_rect().height() - 140.0).max(240.0);
-    egui::Window::new("Staatsfinanzen").open(&mut open).default_pos([430.0, 56.0]).default_width(600.0).default_height(room).vscroll(true).show(ctx, |ui| {
+    // Die Höhe gilt in jedem Frame: Wird das Spielfenster kleiner, bleibt das Fenster unter
+    // der Kopfleiste.
+    let room = super::panels::window_room(area);
+    egui::Window::new("Staatsfinanzen").open(&mut open).default_pos([430.0, 56.0]).default_width(600.0).default_height((room - 60.0).max(160.0)).max_height(room).constrain_to(area).vscroll(true).show(ctx, |ui| {
         let Some(player) = sim.config.player else {
             ui.label("Beobachter führen keinen Staat.");
             return;

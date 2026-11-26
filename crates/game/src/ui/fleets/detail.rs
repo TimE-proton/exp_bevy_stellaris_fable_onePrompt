@@ -1,7 +1,10 @@
 //! Die gewählte Flotte: stehende Befehle, Vereinigen und Abteilen, und jedes Schiff mit
 //! dem Zustand, den der Kern führt.
 
-use super::{FleetState, MERGE, SHOW_ON_MAP, SPLIT, WARN, dry_run, gated_button, location, pick};
+use super::{
+    FleetState, MERGE, SHOW_ON_MAP, SPLIT, WARN, dry_run, dry_run_once, gated_button, location,
+    pick,
+};
 use crate::map::Selection;
 use crate::ui::UiState;
 use crate::ui::format::percent;
@@ -75,7 +78,11 @@ fn reorganize(
             .filter(|other| other.id != fleet.id && other.system == fleet.system)
             .collect();
         for other in &here {
-            let check = dry_run(sim, |fleets| {
+            let command = SimCommand::MergeFleets {
+                from: fleet.id,
+                into: other.id,
+            };
+            let check = dry_run_once(sim, &command, |fleets| {
                 merge_fleets(sim.data, fleets, player, fleet.id, other.id)
             });
             let label = format!("{MERGE} {}", other.name);
@@ -87,10 +94,7 @@ fn reorganize(
                 "Die Schiffe dieser Flotte gehen an die andere; diese Flotte besteht danach \
                  nicht mehr.",
             ) {
-                actions.push(UiAction::Command(SimCommand::MergeFleets {
-                    from: fleet.id,
-                    into: other.id,
-                }));
+                actions.push(UiAction::Command(command));
             }
             if let Err(reason) = &check {
                 ui.label(small(reason).color(WARN));

@@ -5,15 +5,17 @@ mod detail;
 mod yards;
 
 use super::format::{decimal, percent};
-use super::panels::{MUTED, SimRefs, UiAction, color32, detail as small, watch_button};
+use super::panels::{
+    MUTED, SimRefs, UiAction, color32, detail as small, watch_button, window_room,
+};
 use super::{FleetsTab, UiState};
 use crate::battle_view::campaign::can_watch;
 use crate::map::Selection;
 use bevy_egui::egui::{self, Color32, RichText};
 use sim::clock::Date;
-use sim::command::SimCommand;
+use sim::command::{CommandSource, SimCommand};
 use sim::data::{GameData, ShipClass};
-use sim::fleet::{Battles, Fleet, Fleets};
+use sim::fleet::{Battles, Fleet, Fleets, cancel_order, merge_fleets, order_ship, split_fleet};
 use sim::ids::{FleetId, PolityId, SystemId};
 
 /// Beschriftungen des Fensters. Das README nennt sie; ein Test hält beide beieinander.
@@ -45,15 +47,95 @@ pub(super) fn sentence(reason: String) -> String {
     text
 }
 
+/// Warum ein Knopf gesperrt ist, dessen Befehl schon auf den nächsten Takt wartet.
+pub const WAITING: &str =
+    "Der Befehl ist vorgemerkt; er gilt, sobald die Zeit weiterläuft (Leertaste).";
+
+/// Befehle des Spielers, die auf den nächsten Takt warten (die Zeit steht).
+pub(super) fn waiting<'a>(sim: &'a SimRefs) -> impl Iterator<Item = &'a SimCommand> {
+    let player = sim.config.player;
+    sim.pending
+        .iter()
+        .filter(move |entry| entry.source == CommandSource::Player && Some(entry.polity) == player)
+        .map(|entry| &entry.command)
+}
+
+/// Wartet genau dieser Befehl schon? Ihn noch einmal zu geben, lehnte der Kern ab.
+pub(super) fn is_waiting(sim: &SimRefs, command: &SimCommand) -> bool {
+    waiting(sim).any(|entry| entry == command)
+}
+
+/// Führt die wartenden Befehle des Spielers an Flotten und Werften auf der Kopie aus, in
+/// ihrer Reihenfolge und mit den Funktionen des Kerns: So prüft der Probelauf gegen den
+/// Stand, den der Kern beim nächsten Takt vorfindet. Was er ablehnte, ändert auch hier
+/// nichts.
+fn apply_waiting(sim: &SimRefs, scratch: &mut Fleets) {
+    let Some(player) = sim.config.player else {
+        return;
+    };
+    let known = sim.research.known(player);
+    let day = sim.clock.day();
+    let order = |scratch: &mut Fleets, planet, design| {
+        let _ = order_ship(
+            sim.data,
+            sim.galaxy,
+            sim.economy,
+            sim.polities,
+            scratch,
+            player,
+            planet,
+            design,
+            known,
+            day,
+        );
+    };
+    for command in waiting(sim) {
+        match command {
+            SimCommand::BuildShip { planet, design } => order(scratch, *planet, *design),
+            SimCommand::BuildClass { planet, class } => {
+                if let Some(design) = sim.data.best_design(*class, known) {
+                    order(scratch, *planet, design);
+                }
+            }
+            SimCommand::CancelBuild { order } => {
+                let _ = cancel_order(scratch, player, *order);
+            }
+            SimCommand::MergeFleets { from, into } => {
+                let _ = merge_fleets(sim.data, scratch, player, *from, *into);
+            }
+            SimCommand::SplitFleet { fleet, ships } => {
+                let _ = split_fleet(sim.data, sim.polities, scratch, player, *fleet, ships);
+            }
+            // Alles andere ändert nicht, was die Prüfungen dieses Fensters lesen.
+            _ => {}
+        }
+    }
+}
+
 /// Fragt den Kern, ob er einen Befehl an die Flotten annähme: Der Befehl läuft auf einer
 /// Kopie der Flotten, die danach verworfen wird. So sperrt die Oberfläche einen Knopf aus
-/// genau dem Grund, mit dem der Kern ablehnen würde, ohne seine Regeln nachzubauen.
+/// genau dem Grund, mit dem der Kern ablehnen würde, ohne seine Regeln nachzubauen. Was
+/// der Spieler bei stehender Zeit schon vorgemerkt hat, gilt auf der Kopie als geschehen.
 pub(super) fn dry_run<T>(
     sim: &SimRefs,
     order: impl FnOnce(&mut Fleets) -> Result<T, String>,
 ) -> Result<(), String> {
     let mut scratch = sim.fleets.clone();
+    apply_waiting(sim, &mut scratch);
     order(&mut scratch).map(|_| ()).map_err(sentence)
+}
+
+/// Wie [`dry_run`], für einen Befehl, den es nur einmal geben kann: Wartet er schon, ist
+/// das der Grund der Sperre.
+pub(super) fn dry_run_once<T>(
+    sim: &SimRefs,
+    command: &SimCommand,
+    order: impl FnOnce(&mut Fleets) -> Result<T, String>,
+) -> Result<(), String> {
+    if is_waiting(sim, command) {
+        return Err(WAITING.into());
+    }
+    dry_run(sim, order)
 }
 
 /// Ein Knopf, der gesperrt ist, wenn der Kern den Befehl ablehnen würde; der Grund steht
@@ -216,7 +298,9 @@ fn movement_button(
     match state {
         FleetState::Fighting | FleetState::Retreating => {
             // Im Gefecht gibt es keinen Marsch: Der Weg hinaus ist der Rückzug.
-            let ordered = state == FleetState::Retreating;
+            let command = SimCommand::Retreat { fleet: fleet.id };
+            let waits = is_waiting(sim, &command);
+            let ordered = state == FleetState::Retreating || waits;
             let button = egui::Button::new(RichText::new(RETREAT).color(BATTLE));
             let response = ui
                 .add_enabled(!ordered, button)
@@ -224,11 +308,13 @@ fn movement_button(
                     "Die Schiffe verlassen das Feld; was entkommt, weicht in ein Nachbarsystem \
                      aus und sammelt sich. Nicht umkehrbar.",
                 )
-                .on_disabled_hover_text(
-                    "Der Rückzug ist befohlen; die Schiffe verlassen das Feld.",
-                );
+                .on_disabled_hover_text(if waits {
+                    WAITING
+                } else {
+                    "Der Rückzug ist befohlen; die Schiffe verlassen das Feld."
+                });
             if response.clicked() {
-                actions.push(UiAction::Command(SimCommand::Retreat { fleet: fleet.id }));
+                actions.push(UiAction::Command(command));
             }
         }
         FleetState::Regrouping { until } => {
@@ -451,6 +537,7 @@ fn fleets_tab(
 
 pub fn fleets_window(
     ctx: &egui::Context,
+    area: egui::Rect,
     sim: &SimRefs,
     state: &mut UiState,
     selection: &Selection,
@@ -458,12 +545,16 @@ pub fn fleets_window(
 ) {
     let mut open = state.fleets_open;
     // Das Fenster rollt, wo Liste, Schiffe und Werften nicht mehr auf den Schirm passen.
-    let room = (ctx.content_rect().height() - 140.0).max(240.0);
+    // Die Höhe gilt in jedem Frame, nicht nur beim ersten Öffnen: Wird das Spielfenster
+    // kleiner, schrumpft das Fenster mit und bleibt unter der Kopfleiste.
+    let room = window_room(area);
     egui::Window::new(TITLE)
         .open(&mut open)
         .default_pos([300.0, 56.0])
         .default_width(820.0)
-        .default_height(room)
+        .default_height((room - 60.0).max(160.0))
+        .max_height(room)
+        .constrain_to(area)
         .vscroll(true)
         .show(ctx, |ui| {
             let Some(player) = sim.config.player else {
@@ -678,9 +769,13 @@ mod tests {
         );
         assert!(fleet(&game, mine).in_battle && fleet(&game, mine).route.is_empty());
 
-        // Der Rückzug geht als Befehl an den Kern.
+        // Der Rückzug geht als Befehl an den Kern. Solange die Zeit steht, wartet er, und
+        // der Knopf bietet ihn nicht noch einmal an.
         let entries = game.resource::<CommandLog>().entries.len();
         game.click_on("Rückzug");
+        game.frames(2);
+        assert_eq!(game.resource::<CommandLog>().entries.len(), entries);
+        assert_eq!(game.button("Rückzug"), None, "der Rückzug ist vorgemerkt");
         run(&mut game, 2);
         let log = game.resource::<CommandLog>();
         assert_eq!(log.entries.len(), entries + 1);
@@ -756,14 +851,105 @@ mod tests {
                     "das Fenster {rect:?} ragt bei {size} im Reiter „{tab}“ über den Rand"
                 );
             }
-            // Ein Klick in die Titelleiste gilt dem Fenster, nicht der Karte dahinter.
+            // Das Fenster ist bei 1600x900 geöffnet worden und schrumpft mit: Es bleibt
+            // unter der Kopfleiste, deren Knöpfe erreichbar bleiben.
             let rect = game.window_rect(TITLE).expect("Fenster");
+            let bar = game.button(TITLE).expect("Knopf der Kopfleiste");
+            assert!(
+                rect.top() > bar.y,
+                "das Fenster {rect:?} liegt bei {size} über der Kopfleiste (Knopf bei {bar})"
+            );
+            // Ein Klick in die Titelleiste gilt dem Fenster, nicht der Karte dahinter.
             game.click(Vec2::new(rect.center().x, rect.top() + 12.0));
             assert_eq!(game.resource::<Selection>().system, home, "{size}");
         }
         game.click_on(TITLE);
         game.frames(10);
         assert!(game.window_rect(TITLE).is_none());
+        // Dasselbe gilt für das Fenster des Staats: groß geöffnet, dann verkleinert.
+        game.click_on("Staat");
+        game.frames(4);
+        game.resize(Vec2::new(1280.0, 720.0));
+        game.frames(4);
+        let rect = game.window_rect("Staatsfinanzen").expect("Fenster");
+        let bar = game.button("Staat").expect("Knopf der Kopfleiste");
+        assert!(
+            rect.top() > bar.y && rect.bottom() <= 720.0,
+            "das Fenster {rect:?} passt nicht unter die Kopfleiste (Knopf bei {bar})"
+        );
+    }
+
+    #[test]
+    fn commands_waiting_for_the_next_tick_are_not_offered_again() {
+        let (mut game, me) = campaign_with_window();
+        assert!(
+            game.resource::<SimSpeed>().paused,
+            "die Partie beginnt angehalten"
+        );
+        game.click_on(TAB_YARDS);
+        game.frames(2);
+        let data = game.resource::<GameData>().clone();
+        let capital = game.resource::<Polities>().get(me).capital.unwrap();
+        let world = game.resource::<Galaxy>().planet(capital).name.clone();
+        let corvette = data.design_index("dolch").expect("Entwurf");
+        let name = data.designs[corvette as usize].name.clone();
+        let limit = data.balance.military.yard_queue as usize;
+        // So oft bestellt, wie die Werft Aufträge annimmt: Jede Bestellung wartet, und die
+        // Werft zeigt, wie viele es sind.
+        for count in 1..=limit {
+            game.click_on(&format!("{ORDER}: {name}"));
+            assert!(
+                game.text(&yards::waiting_orders(count)).is_some(),
+                "{count} vorgemerkte Bestellungen stehen nicht an der Werft"
+            );
+        }
+        assert_eq!(game.resource::<Fleets>().orders_at(capital).count(), 0);
+        // Die nächste lehnte der Kern ab: Kein Knopf bietet sie mehr an, weder für den
+        // Entwurf noch für eine Klasse, und der Grund des Kerns steht da.
+        assert_eq!(game.button(&format!("{ORDER}: {name}")), None);
+        assert_eq!(
+            game.button(&format!("{ORDER}: Klasse {}", ShipClass::Corvette.label())),
+            None
+        );
+        assert!(
+            game.text(&format!(
+                "Die Werft von {world} nimmt nicht mehr als {limit} Aufträge an."
+            ))
+            .is_some()
+        );
+        run(&mut game, 3);
+        assert_eq!(game.resource::<Fleets>().orders_at(capital).count(), limit);
+        let rejected = |game: &TestGame| {
+            game.resource::<CommandLog>()
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.outcome, CommandOutcome::Rejected(_)))
+                .count()
+        };
+        assert_eq!(
+            rejected(&game),
+            0,
+            "kein angebotener Befehl wurde abgelehnt"
+        );
+        assert_eq!(game.text(&yards::waiting_orders(limit)), None);
+
+        // Streichen gibt es je Auftrag einmal; danach ist wieder ein Platz frei, schon
+        // bevor die Zeit weiterläuft.
+        let first = game
+            .resource::<Fleets>()
+            .orders_at(capital)
+            .next()
+            .unwrap()
+            .id;
+        game.click_on(&format!("{CANCEL}: Nr. {first}"));
+        assert_eq!(game.button(&format!("{CANCEL}: Nr. {first}")), None);
+        assert!(game.button(&format!("{ORDER}: {name}")).is_some());
+        run(&mut game, 3);
+        assert_eq!(
+            game.resource::<Fleets>().orders_at(capital).count(),
+            limit - 1
+        );
+        assert_eq!(rejected(&game), 0);
     }
 
     #[test]

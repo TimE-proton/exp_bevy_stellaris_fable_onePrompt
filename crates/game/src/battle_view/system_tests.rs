@@ -393,14 +393,19 @@ fn a_battle_that_is_only_shown_does_not_jump_back_and_forth() {
 
 mod campaign {
     use super::*;
-    use crate::battle_view::campaign::{WATCH, WatchBattle, WatchedBattle, result_of};
-    use crate::battle_view::hud::{BACK_TO_MAP, RESULT_TITLE};
+    use crate::battle_view::campaign::{
+        BattleMarkers, WATCH, WatchBattle, WatchedBattle, result_of,
+    };
+    use crate::battle_view::feed::BattleOrder;
+    use crate::battle_view::hud::{
+        BACK_TO_MAP, CAMPAIGN_HALTED, RESULT_HALTED, RESULT_TITLE, RETREAT_ORDER, Tally,
+    };
     use crate::map::FocusSystem;
     use crate::session::{Notice, SessionRequest};
     use sim::battle::Doctrine;
     use sim::clock::SimClock;
     use sim::command::{CommandLog, CommandOutcome, CommandQueue, CommandSource, SimCommand};
-    use sim::fleet::{Battles, Fleets};
+    use sim::fleet::{BattleOutcome, BattleReport, Battles, Fleets, SideReport};
     use sim::galaxy::Galaxy;
     use sim::ids::{BattleId, FleetId, SystemId};
     use sim::polity::Polities;
@@ -434,6 +439,31 @@ mod campaign {
             game.frames(1);
         }
         panic!("nach {limit} Frames noch nicht: {what}");
+    }
+
+    /// Lässt die Partie laufen, bis die Simulation das gezeigte Gefecht abgeschlossen hat.
+    /// Anders als [`run_until`] hält diese Schleife die Zeit nicht selbst an.
+    fn watch_to_the_end(game: &mut TestGame) {
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 4,
+        };
+        for _ in 0..20_000 {
+            if game.resource::<WatchedBattle>().ended {
+                game.frames(3);
+                return;
+            }
+            game.frames(1);
+        }
+        panic!("das Gefecht kommt nicht zum Ende");
+    }
+
+    fn rejected(game: &TestGame) -> usize {
+        game.resource::<CommandLog>()
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.outcome, CommandOutcome::Rejected(_)))
+            .count()
     }
 
     fn home_of(game: &TestGame, polity: PolityId) -> SystemId {
@@ -629,15 +659,26 @@ mod campaign {
         assert_eq!(sent.outcome, CommandOutcome::Applied);
         assert!(game.resource::<Battles>().get(id).unwrap().combatants[own].retreating);
         assert_view_shows_the_simulation(&mut game, id, "nach dem Rückzugsbefehl");
-        run_until(&mut game, 6000, "Ende des Gefechts", |game| {
-            game.resource::<Battles>().get(id).is_none()
-        });
-        game.frames(3);
+        watch_to_the_end(&mut game);
 
         // --- Das Ende bei offener Ansicht: das Ergebnis aus der Bilanz der Simulation ---
         assert_eq!(view(&game), ViewState::Battle, "die Ansicht bleibt offen");
         assert!(game.resource::<WatchedBattle>().ended);
         assert!(shown_battle(&game).finished);
+        // Die Partie hält mit dem Ende an: Hinter dem Ergebnis vergeht keine Zeit
+        // ungesehen, und die Kopfleiste nennt das Datum der Partie.
+        assert!(
+            game.resource::<SimSpeed>().paused,
+            "die Partie läuft hinter dem Ergebnis weiter"
+        );
+        let stopped = game.resource::<SimClock>().tick;
+        game.frames(30);
+        assert_eq!(game.resource::<SimClock>().tick, stopped);
+        assert!(game.text(CAMPAIGN_HALTED).is_some());
+        assert!(game.text(RESULT_HALTED).is_some());
+        let calendar = game.resource::<BattleFeed>().info.calendar.clone();
+        let date = game.resource::<SimClock>().date().to_string();
+        assert!(calendar.starts_with(&date), "{calendar} statt {date}");
         let report = game
             .resource::<Battles>()
             .report(id)
@@ -657,13 +698,23 @@ mod campaign {
             .expect("Ergebnis");
         assert_eq!(shown.days, report.days());
         assert_eq!(shown.sides.len(), report.sides.len());
-        for (side, entry) in shown.sides.iter().zip(&report.sides) {
+        for (index, (side, entry)) in shown.sides.iter().zip(&report.sides).enumerate() {
             assert_eq!(side.name, entry.fleet_name);
             assert_eq!(
                 (side.initial, side.lost, side.escaped),
                 (entry.initial, entry.lost, entry.escaped)
             );
+            // Lagetafeln und Szene zeigen denselben Endstand wie das Ergebnis, auch was
+            // erst im letzten Takt geschah.
+            let tally = Tally::of(shown_battle(&game), index);
+            assert_eq!(
+                (tally.lost, tally.escaped),
+                (entry.lost, entry.escaped),
+                "die Lagetafel von {} widerspricht dem Ergebnis",
+                entry.fleet_name
+            );
         }
+        assert_scene_matches_feed(&mut game, "nach dem Ende");
         // Der Gegner hält das Feld, die eigene Flotte weicht aus: Das Fenster nennt beides.
         assert!(game.window_rect(RESULT_TITLE).is_some());
         assert!(game.text(&shown.headline).is_some(), "{}", shown.headline);
@@ -692,6 +743,14 @@ mod campaign {
         );
         assert!(game.text(&mine_shown.whereabouts).is_some());
         assert_eq!(shown, expected);
+
+        // Lässt der Spieler die Partie hinter dem Ergebnis weiterlaufen, führt die
+        // Kopfleiste ihr Datum mit.
+        run(&mut game, 3, 40);
+        let calendar = game.resource::<BattleFeed>().info.calendar.clone();
+        let later = game.resource::<SimClock>().date().to_string();
+        assert_ne!(later, date);
+        assert!(calendar.starts_with(&later), "{calendar} statt {later}");
 
         // --- Zurück zur Karte ---
         game.click_on(BACK_TO_MAP);
@@ -785,5 +844,296 @@ mod campaign {
         fleets.list[visitor.index()].system = battle.system;
         assert!(can_watch(galaxy, &fleets, Some(third), battle));
         let _ = mine;
+    }
+
+    #[test]
+    fn a_waiting_retreat_is_not_offered_twice_and_the_result_fits_a_small_window() {
+        let (mut game, _, mine, id) = war();
+        game.resize(Vec2::new(1280.0, 720.0));
+        game.frames(4);
+        game.send(WatchBattle(id));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        assert!(game.resource::<SimSpeed>().paused);
+        let own = game
+            .resource::<BattleFeed>()
+            .info
+            .player_side
+            .expect("eigene Partei");
+
+        // Die Zeit steht: Der Rückzug wartet auf den nächsten Takt und wird so lange nicht
+        // noch einmal angeboten.
+        let entries = game.resource::<CommandLog>().entries.len();
+        let refused = rejected(&game);
+        game.click_on(RETREAT_ORDER);
+        game.frames(2);
+        assert_eq!(game.button(RETREAT_ORDER), None);
+        assert_eq!(game.resource::<BattleFeed>().info.retreat_waiting, [own]);
+        // Auch ein zweiter Befehl, der trotzdem käme, geht nicht doppelt an die Simulation.
+        game.send(BattleOrder::Retreat { side: own });
+        game.frames(2);
+        let waiting = |game: &TestGame| {
+            game.resource::<CommandQueue>()
+                .pending
+                .iter()
+                .filter(|entry| entry.command == SimCommand::Retreat { fleet: mine })
+                .count()
+        };
+        assert_eq!(waiting(&game), 1);
+
+        watch_to_the_end(&mut game);
+        let log = game.resource::<CommandLog>();
+        let retreats = log.entries[entries..]
+            .iter()
+            .filter(|entry| entry.command == SimCommand::Retreat { fleet: mine })
+            .count();
+        assert_eq!(retreats, 1);
+        assert_eq!(rejected(&game), refused, "kein Befehl wurde abgelehnt");
+
+        // Das Ergebnis steht zwischen den Lagetafeln und verdeckt keine, auch wenn es
+        // weiter rechts stand (in einem größeren Fenster) oder dorthin gezogen wird.
+        let result = game.window_rect(RESULT_TITLE).expect("Ergebnis");
+        game.drag(
+            MouseButton::Left,
+            Vec2::new(result.center().x, result.top() + 12.0),
+            Vec2::new(300.0, 0.0),
+        );
+        game.frames(2);
+        let moved = game.window_rect(RESULT_TITLE).expect("Ergebnis");
+        assert!(
+            moved.left() > result.left(),
+            "das Fenster lässt sich ziehen"
+        );
+        let result = moved;
+        assert!(
+            result.left() >= 0.0 && result.right() <= 1280.0 && result.bottom() <= 720.0,
+            "{result:?}"
+        );
+        for side in 0..2 {
+            let panel = game
+                .window_rect(&format!("partei_{side}"))
+                .expect("Lagetafel");
+            assert!(
+                !result.intersects(panel),
+                "das Ergebnis {result:?} liegt über der Lagetafel {panel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_battle_opens_only_where_the_player_is_present_and_takes_no_orders() {
+        let mut game = TestGame::start("--seed 3");
+        game.frames(4);
+        let me = game.resource::<SimConfig>().player.expect("Spieler");
+        let mine = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let home = home_of(&game, me);
+        // Zwei andere Gemeinschaften, deren Heimatsysteme einander am nächsten liegen.
+        let (attacker, defender) = {
+            let galaxy = game.resource::<Galaxy>();
+            let others: Vec<PolityId> = game
+                .resource::<Polities>()
+                .alive()
+                .map(|polity| polity.id)
+                .filter(|polity| *polity != me)
+                .collect();
+            let mut pairs = Vec::new();
+            for a in &others {
+                for b in &others {
+                    if a != b {
+                        let path = galaxy
+                            .shortest_path(home_of(&game, *a), home_of(&game, *b), |_| true)
+                            .expect("Weg");
+                        pairs.push((galaxy.path_length(&path), *a, *b));
+                    }
+                }
+            }
+            let nearest = pairs
+                .into_iter()
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .expect("zwei andere Gemeinschaften");
+            (nearest.1, nearest.2)
+        };
+        let front = home_of(&game, defender);
+        let place = game.resource::<Galaxy>().system(front).name.clone();
+        let push = |game: &mut TestGame, polity, command| {
+            game.world_mut().resource_mut::<CommandQueue>().push(
+                polity,
+                CommandSource::Player,
+                command,
+            );
+        };
+        // Die Flotte des Spielers liegt als Unbeteiligte im System, in dem es geschieht.
+        push(
+            &mut game,
+            me,
+            SimCommand::MoveFleet {
+                fleet: mine,
+                to: front,
+            },
+        );
+        run_until(
+            &mut game,
+            8000,
+            "die eigene Flotte liegt im System",
+            |game| {
+                let fleet = game.resource::<Fleets>().get(mine).unwrap();
+                fleet.system == front && fleet.route.is_empty()
+            },
+        );
+        let theirs = game
+            .resource::<Fleets>()
+            .of(attacker)
+            .next()
+            .expect("Flotte")
+            .id;
+        push(
+            &mut game,
+            attacker,
+            SimCommand::DeclareWar { target: defender },
+        );
+        push(
+            &mut game,
+            attacker,
+            SimCommand::MoveFleet {
+                fleet: theirs,
+                to: front,
+            },
+        );
+        run_until(&mut game, 8000, "fremdes Gefecht", |game| {
+            game.resource::<Battles>().in_system(front).is_some()
+        });
+        let id = game.resource::<Battles>().in_system(front).unwrap().id;
+        let battle = game.resource::<Battles>().get(id).unwrap();
+        assert!(battle.combatants.iter().all(|c| c.owner != me));
+        assert!(!game.resource::<Fleets>().get(mine).unwrap().in_battle);
+
+        // --- Vor Ort: Marke auf der Karte, die Ansicht öffnet, Befehle gibt es nicht ---
+        game.send(FocusSystem(front));
+        game.frames(4);
+        let marked = |game: &TestGame| {
+            game.resource::<BattleMarkers>()
+                .0
+                .iter()
+                .any(|marker| marker.id == id)
+        };
+        assert!(marked(&game));
+        game.click_on(&format!("{WATCH}: {place}"));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        let info = game.resource::<BattleFeed>().info.clone();
+        assert_eq!(info.player_side, None, "der Spieler sieht nur zu");
+        assert!(info.own_sides.is_empty());
+        assert_eq!(game.button(RETREAT_ORDER), None);
+        for doctrine in Doctrine::ALL {
+            assert_eq!(game.button(doctrine.label()), None);
+        }
+        // Befehle an fremde Parteien, die trotzdem kämen, erreichen die Simulation nicht.
+        let entries = game.resource::<CommandLog>().entries.len();
+        let before = game.resource::<Battles>().get(id).unwrap().combatants[0].clone();
+        let other = Doctrine::ALL
+            .into_iter()
+            .find(|doctrine| *doctrine != before.doctrine)
+            .unwrap();
+        game.send(BattleOrder::Retreat { side: 0 });
+        game.send(BattleOrder::SetOrders {
+            side: 1,
+            formation: before.formation,
+            doctrine: other,
+        });
+        game.frames(2);
+        assert!(game.resource::<CommandQueue>().pending.is_empty());
+        run(&mut game, 1, 6);
+        assert_eq!(game.resource::<CommandLog>().entries.len(), entries);
+        assert_view_shows_the_simulation(&mut game, id, "als Zuschauer");
+        game.click_on("Verlassen");
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Galaxy);
+
+        // --- Nicht mehr vor Ort: keine Marke, kein Knopf, und die Bitte wird abgelehnt ---
+        push(
+            &mut game,
+            me,
+            SimCommand::MoveFleet {
+                fleet: mine,
+                to: home,
+            },
+        );
+        run_until(&mut game, 400, "die eigene Flotte ist abgezogen", |game| {
+            !game
+                .resource::<Fleets>()
+                .docked_in(front)
+                .any(|fleet| fleet.owner == me)
+        });
+        assert!(
+            game.resource::<Battles>().get(id).is_some(),
+            "das fremde Gefecht läuft noch"
+        );
+        game.frames(3);
+        assert!(!marked(&game));
+        assert_eq!(game.button(&format!("{WATCH}: {place}")), None);
+        assert_eq!(game.button(&format!("{WATCH}: Chronik")), None);
+        game.send(WatchBattle(id));
+        game.frames(3);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(!game.world().contains_resource::<WatchedBattle>());
+        let notice = game.resource::<Notice>().text.clone();
+        assert!(notice.contains("nicht zu sehen"), "{notice}");
+    }
+
+    #[test]
+    fn a_side_that_left_early_does_not_hold_the_field_in_the_result() {
+        let mut game = TestGame::start("--seed 3");
+        game.frames(4);
+        let fleets = game.resource::<Fleets>();
+        let system = fleets.list[0].system;
+        // Drei Parteien: Die erste schied aus, als sie keinen Gegner mehr hatte; die
+        // zweite hält am Ende das Feld, die dritte hat es geräumt.
+        let side = |index: usize, held_field: bool, left_early: Option<u64>| {
+            let fleet = &fleets.list[index];
+            SideReport {
+                owner: fleet.owner,
+                fleet: Some(fleet.id),
+                fleet_name: format!("F{index}"),
+                initial: [0, 2, 0, 0, 0, 0],
+                lost: [0; 6],
+                escaped: [0; 6],
+                initial_value: 100.0,
+                lost_value: 0.0,
+                held_field,
+                retreated: false,
+                stalemate: false,
+                left_early,
+            }
+        };
+        let report = BattleReport {
+            id: BattleId(0),
+            system,
+            started: 0,
+            ended: 100,
+            outcome: BattleOutcome::Decided,
+            sides: vec![
+                side(0, true, Some(50)),
+                side(1, true, None),
+                side(2, false, None),
+            ],
+        };
+        let place = game.resource::<Galaxy>().system(system).name.clone();
+        let result = result_of(
+            game.resource::<Galaxy>(),
+            fleets,
+            game.resource::<Polities>(),
+            &report,
+        );
+        assert_eq!(
+            result.headline,
+            format!("Gefecht bei {place} entschieden: F1 hält das Feld.")
+        );
+        let holds: Vec<bool> = result.sides.iter().map(|side| side.holds_field).collect();
+        assert_eq!(holds, [false, true, false]);
+        assert!(
+            result.sides[0].note.contains("vorzeitig ausgeschieden"),
+            "{}",
+            result.sides[0].note
+        );
     }
 }
