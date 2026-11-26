@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn a_press_beside_a_panel_has_one_owner_even_without_a_run_up() {
         use crate::pointer::UiCover;
-        use crate::ui::UiState;
+        use crate::time_control::SimSpeed;
 
         let mut game = campaign();
         let home = selected(&game);
@@ -906,28 +906,31 @@ mod tests {
         game.frames(2);
         assert_eq!(selected(&game), home);
 
-        // Knapp unter einem Knopf der Kopfleiste: Die Oberfläche lässt einen Klick, der einen
-        // Knopf um wenige Pixel verfehlt, noch für ihn gelten. Dann gilt er nur ihm.
-        let button = game.button("Flotten").expect("Knopf „Flotten“");
+        // Knapp unter einem Knopf der Kopfleiste, über der freien Karte: Die Oberfläche lässt
+        // einen Klick, der einen Knopf um wenige Pixel verfehlt, noch für ihn gelten. Dann
+        // gilt er nur ihm.
+        let button = game.button("5×").expect("Knopf „5ד");
         let below = (0..60)
             .map(|y| Vec2::new(button.x, button.y + y as f32 + 0.5))
             .find(|at| !game.resource::<UiCover>().covers(*at))
             .expect("Karte unter der Kopfleiste");
         let near_button = below + Vec2::new(0.0, 1.0);
-        assert!(!game.resource::<UiState>().fleets_open);
+        assert!(game.resource::<SimSpeed>().paused);
         game.move_pointer(FREE_MAP);
         game.frames(3);
         game.click_at_once(near_button);
-        assert!(
-            game.resource::<UiState>().fleets_open,
+        assert_eq!(
+            *game.resource::<SimSpeed>(),
+            SimSpeed {
+                paused: false,
+                level: 3
+            },
             "der Knopf hat den Klick knapp daneben nicht angenommen"
         );
         assert_eq!(selected(&game), home, "derselbe Klick traf auch die Karte");
 
         // Weit genug von jedem Knopf gehört die Stelle der Karte: Ein schneller Klick ins
         // Leere hebt die Auswahl auf.
-        game.click_on("Flotten");
-        assert!(!game.resource::<UiState>().fleets_open);
         let empty = (0..40)
             .flat_map(|row| (0..60).map(move |column| (column, row)))
             .map(|(column, row)| Vec2::new(480.0 + column as f32 * 13.0, 70.0 + row as f32 * 16.0))

@@ -98,8 +98,12 @@ impl UiCover {
         };
         let pos = egui::pos2(point.x, point.y);
         let reach = ctx.global_style().interaction.interact_radius;
+        // Was in einer Fläche liegt, die keine Eingabe annimmt, übergeht egui bei der
+        // Zuordnung; gemeldet wird es trotzdem.
+        let passive = passive_areas(ctx);
         ctx.interactive_rects_last_pass()
             .iter()
+            .filter(|rect| !passive.iter().any(|area| area.contains_rect(**rect)))
             .any(|rect| rect.distance_sq_to_pos(pos) <= reach * reach)
     }
 
@@ -107,6 +111,23 @@ impl UiCover {
     pub fn owns(&self, point: Vec2) -> bool {
         self.covers(point) || self.reacts_near(point)
     }
+}
+
+/// Rechtecke der sichtbaren Flächen, durch die Klicks hindurchgehen (der Hinweis am oberen
+/// Rand).
+fn passive_areas(ctx: &egui::Context) -> Vec<egui::Rect> {
+    let visible: Vec<egui::LayerId> = ctx.memory(|memory| {
+        memory
+            .layer_ids()
+            .filter(|layer| memory.areas().is_visible(layer))
+            .collect()
+    });
+    visible
+        .into_iter()
+        .filter_map(|layer| egui::AreaState::load(ctx, layer.id))
+        .filter(|area| !area.interactable)
+        .map(|area| area.rect())
+        .collect()
 }
 
 /// Wo der Zeiger in einem Frame steht, von der Oberfläche aus gesehen.
@@ -129,6 +150,7 @@ impl PointerSpot {
         grabbed: false,
     };
     /// Über der Oberfläche.
+    #[cfg(test)]
     pub const UI: Self = Self {
         over_ui: true,
         press_for_ui: true,
@@ -344,9 +366,20 @@ mod tests {
 
     /// Ein Durchlauf der Oberfläche, wie ihn die Engine fährt: Das Wurzel-Ui, das egui
     /// selbst mitbringt, bleibt ungenutzt; gezeichnet wird in eine eigene Wurzel.
-    fn pass(ctx: &egui::Context, cover: &mut UiCover, mut draw: impl FnMut(&mut egui::Ui)) {
+    fn pass(ctx: &egui::Context, cover: &mut UiCover, draw: impl FnMut(&mut egui::Ui)) {
+        pass_with(ctx, cover, Vec::new(), draw);
+    }
+
+    /// Wie [`pass`], mit den Eingaben dieses Durchlaufs.
+    fn pass_with(
+        ctx: &egui::Context,
+        cover: &mut UiCover,
+        events: Vec<egui::Event>,
+        mut draw: impl FnMut(&mut egui::Ui),
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            events,
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |_| {
@@ -427,6 +460,10 @@ mod tests {
     fn windows_cover_and_passive_areas_do_not() {
         let ctx = egui::Context::default();
         let mut cover = UiCover::default();
+        // Der Hinweis nimmt keine Eingabe an: Klicks gehen durch ihn hindurch, auch durch
+        // seinen Text (der sich sonst markieren ließe) und durch einen Knopf darin.
+        let pressed = std::cell::Cell::new(false);
+        let button = std::cell::Cell::new(egui::Rect::NOTHING);
         let draw = |root: &mut egui::Ui| {
             egui::Window::new("tafel")
                 .title_bar(false)
@@ -437,24 +474,47 @@ mod tests {
                     ui.set_height(200.0);
                     ui.label("Tafel");
                 });
-            // Der Hinweis nimmt keine Eingabe an: Klicks gehen durch ihn hindurch.
             egui::Area::new("hinweis".into())
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 44.0])
                 .interactable(false)
                 .show(root.ctx(), |ui| {
                     ui.label("Gespeichert: saves/schnell.ron");
+                    let response = ui.button("Knopf im Hinweis");
+                    pressed.set(pressed.get() || response.clicked());
+                    button.set(response.rect);
                 });
         };
         for _ in 0..3 {
             pass(&ctx, &mut cover, draw);
         }
+        let button = button.get();
         assert!(cover.covers(Vec2::new(1500.0, 800.0)), "auf der Tafel");
         assert!(!cover.covers(Vec2::new(1100.0, 800.0)), "neben der Tafel");
         assert!(!cover.owns(Vec2::new(1100.0, 800.0)), "neben der Tafel");
         assert!(!cover.covers(Vec2::new(800.0, 52.0)), "auf dem Hinweis");
         assert!(!cover.owns(Vec2::new(800.0, 52.0)), "auf dem Hinweis");
+        let on_button = Vec2::new(button.center().x, button.center().y);
+        assert!(!cover.owns(on_button), "auf dem Knopf im Hinweis");
         // Ohne Leisten ist der Hintergrund ganz frei.
         assert!(!cover.covers(Vec2::new(800.0, 8.0)));
+
+        // Die Oberfläche sieht es genauso: Ein Klick auf den Knopf im Hinweis drückt ihn
+        // nicht. Der Klick gehört also der Welt und nur ihr.
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: button.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(button.center())],
+            vec![press(true)],
+            vec![press(false)],
+            Vec::new(),
+        ] {
+            pass_with(&ctx, &mut cover, events, draw);
+        }
+        assert!(!pressed.get(), "der Hinweis hat einen Klick angenommen");
     }
 
     #[test]
@@ -526,7 +586,10 @@ mod tests {
         // Stück über die Tafel hinaus.
         let edge = first_free_x(&cover, 0.0, 400.0);
         let beside = Vec2::new(edge + 1.5, 400.0);
-        assert!(!cover.covers(beside), "neben der Tafel liegt keine Oberfläche");
+        assert!(
+            !cover.covers(beside),
+            "neben der Tafel liegt keine Oberfläche"
+        );
         assert!(cover.owns(beside), "der Griff gehört der Oberfläche");
         // Ebenso an der rechten Tafel und über der Chronik.
         let right = (0..1600)
@@ -554,41 +617,56 @@ mod tests {
     fn a_press_just_beside_a_button_belongs_to_the_button() {
         let ctx = egui::Context::default();
         let mut cover = UiCover::default();
-        let (mut button, mut locked, mut text) = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
+        // Ein Knopf, ein gesperrter Knopf, bloßer Text und Text, der sich markieren lässt
+        // (so zeichnet die Oberfläche Text, wenn nichts anderes verlangt ist).
+        let mut rects = [egui::Rect::NOTHING; 4];
         for _ in 0..2 {
             pass(&ctx, &mut cover, |root| {
-                egui::Panel::top("kopf").show(root, |ui| {
-                    ui.horizontal(|ui| {
-                        button = ui.button("Menü").rect;
-                        ui.add_space(200.0);
-                        locked = ui.add_enabled(false, egui::Button::new("gesperrt")).rect;
-                        ui.add_space(200.0);
-                        text = ui.label("nur Text").rect;
+                // Ohne Rand: Die Bedienelemente reichen bis dicht an die Unterkante.
+                egui::Panel::top("kopf")
+                    .frame(egui::Frame::NONE)
+                    .show(root, |ui| {
+                        ui.horizontal(|ui| {
+                            rects[0] = ui.button("Menü").rect;
+                            ui.add_space(200.0);
+                            rects[1] = ui.add_enabled(false, egui::Button::new("gesperrt")).rect;
+                            ui.add_space(200.0);
+                            rects[2] = ui.add(egui::Label::new("nur Text").selectable(false)).rect;
+                            ui.add_space(200.0);
+                            rects[3] = ui.label("markierbarer Text").rect;
+                        });
                     });
-                });
             });
         }
+        let [button, locked, text, selectable] = rects;
         let reach = ctx.global_style().interaction.interact_radius;
         assert!(reach >= 3.0, "Fangradius {reach}");
-        let bar_bottom = (0..900)
-            .map(|step| step as f32 + 0.5)
-            .find(|y| !cover.covers(Vec2::new(button.center().x, *y)))
-            .expect("freie Fläche unter der Leiste");
-        // Unter dem Knopf, außerhalb der Leiste, aber innerhalb des Fangradius: egui
-        // schlägt den Druck dem Knopf zu, also gehört er der Oberfläche.
-        let near = Vec2::new(button.center().x, button.bottom() + reach - 0.5);
-        assert!(near.y > bar_bottom, "die Stelle liegt unter der Leiste");
-        assert!(!cover.covers(near));
-        assert!(cover.owns(near));
+        // Erste Stelle unter der Leiste, senkrecht unter der Mitte eines Bedienelements: Dort
+        // liegt keine Oberfläche mehr, das Element aber noch in Reichweite.
+        let below = |rect: egui::Rect| {
+            let spot = (0..900)
+                .map(|step| Vec2::new(rect.center().x, step as f32 + 0.5))
+                .find(|spot| !cover.covers(*spot))
+                .expect("freie Fläche unter der Leiste");
+            let distance = rect.distance_to_pos(egui::pos2(spot.x, spot.y));
+            assert!(
+                distance > 0.0 && distance < reach,
+                "{rect:?} liegt {distance} von {spot} entfernt"
+            );
+            spot
+        };
+        // egui schlägt den Druck dem Knopf zu, also gehört er der Oberfläche.
+        assert!(cover.owns(below(button)));
         // Knapp außerhalb des Fangradius gehört er der Welt.
         let far = Vec2::new(button.center().x, button.bottom() + reach + 0.5);
+        assert!(!cover.covers(far));
         assert!(!cover.owns(far));
         // Ein gesperrter Knopf und bloßer Text fangen nichts.
-        for rect in [locked, text] {
-            let below = Vec2::new(rect.center().x, rect.bottom() + reach - 0.5);
-            assert!(below.y > bar_bottom);
-            assert!(!cover.owns(below), "unter {rect:?}");
-        }
+        assert!(!cover.owns(below(locked)), "unter dem gesperrten Knopf");
+        assert!(!cover.owns(below(text)), "unter bloßem Text");
+        // Text, der sich markieren lässt, nimmt den Druck an (dort beginnt das Markieren):
+        // Auch dieser Druck hat genau einen Besitzer, die Oberfläche.
+        assert!(cover.owns(below(selectable)), "unter markierbarem Text");
     }
 
     fn frame(owner: &mut PointerOwner, buttons: &mut ButtonInput<MouseButton>, spot: PointerSpot) {
