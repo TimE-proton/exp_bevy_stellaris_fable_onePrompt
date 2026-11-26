@@ -13,16 +13,18 @@ use sim::GameData;
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::{CommandOutcome, SimCommand};
 use sim::diplomacy::Diplomacy;
+use sim::economy::Economy;
 use sim::finance::{Finance, Stage, ownership_of_region};
 use sim::fleet::{Battles, Fleet, Fleets, Stance};
 use sim::harness::{Headless, check_invariants};
 use sim::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use sim::logistics::Logistics;
 use sim::siege::{
-    Blocked, Fire, Phase, PlanetDefense, Posture, Siege, SiegeOrders, Sieges, occupation_force,
-    will,
+    Blocked, Course, Fire, Limit, Outcome, Phase, PlanetDefense, Posture, Siege, SiegeOrders,
+    SiegeView, Sieges, firm_value, forecast, occupation_force, orbit, planet_facts, will,
 };
 use sim::state::{SaveGame, SimConfig, money_drift};
+use sim::tech::Research;
 use std::sync::OnceLock;
 
 /// Seed aller Partien hier; derselbe, an dem das Headless-Werkzeug die Prüfsummen zeigt.
@@ -279,6 +281,52 @@ impl Campaign {
             .map_or(0.0, |force| force.troops)
     }
 
+    /// Die laufende Belagerung als Lesemodell, aus der Welt gebaut: der Datensatz, die
+    /// Verteidigung, der Planet am nächsten Tag und der Orbit, wie ihn auch der
+    /// Tagesschritt sieht. Darauf rechnet die Prognose.
+    fn view(&self) -> SiegeView {
+        let world = self.sim.world();
+        let state = sieges(&self.sim);
+        let siege = self.siege().expect("eine laufende Belagerung");
+        let squadron = orbit::squadron(
+            fleets(&self.sim),
+            world.resource::<Research>(),
+            data(),
+            world.resource::<Diplomacy>(),
+            state,
+            self.planet,
+            self.system,
+            siege.attacker,
+            siege.defender,
+        );
+        let economy = world.resource::<Economy>();
+        SiegeView {
+            planet: self.planet,
+            siege: siege.clone(),
+            defense: self.defense().clone(),
+            facts: planet_facts(
+                data(),
+                self.sim.galaxy(),
+                economy,
+                finance(&self.sim),
+                self.planet,
+                self.sim.clock().day() + 1,
+                1.0,
+            ),
+            orbit: squadron.view,
+            toughness: squadron.toughness,
+            fuel: squadron.fuel,
+            supply_aboard: squadron.supply_aboard,
+            firm_value: firm_value(
+                data(),
+                self.sim.galaxy(),
+                economy,
+                world.resource::<Logistics>(),
+                self.planet,
+            ),
+        }
+    }
+
     /// Ein Tag weiter; Invarianten und Geldsumme halten an jedem Tag.
     fn day(&mut self) {
         self.sim.run_days(1);
@@ -361,6 +409,11 @@ fn a_colony_is_starved_out_and_changes_its_owner_without_a_shot() {
     let population = campaign.sim.galaxy().planet(planet).population;
     let needed = occupation_force(population, balance);
     assert!(needed < TROOPS, "die Besatzungstruppe ist an Bord");
+    // Die Prognose rechnet auf den Zahlen der Welt: Aushungern gelingt ohne Verluste.
+    let predicted = forecast(&campaign.view(), Course::Starve, balance);
+    assert!(predicted.falls, "Prognose: {predicted:?}");
+    assert_eq!(predicted.outcome, Some(Outcome::Starved));
+    assert_eq!((predicted.own_losses, predicted.hull_loss), (0.0, 0.0));
 
     // Kein Feuer, keine Landung: Der Planet fällt in der Frist, ohne Verluste am Boden.
     let mut days = 1;
@@ -390,6 +443,14 @@ fn a_colony_is_starved_out_and_changes_its_owner_without_a_shot() {
     assert!(
         days > 30,
         "auch ohne Vorräte hält die Miliz Wochen: {days} Tage"
+    );
+    // Die Prognose vom ersten Tag trifft den Verlauf bis auf das, was sie festhält: Der
+    // Zusammenhalt der Welt bewegt sich in den Wochen der Einschließung.
+    let forecast_days = 1 + predicted.days as i64;
+    println!("gefallen nach {days} Tagen, vorausgesagt waren {forecast_days}");
+    assert!(
+        (forecast_days - days as i64).abs() <= 10,
+        "{days} Tage, vorausgesagt {forecast_days}"
     );
 
     // Die Belagerung ist verbucht und geschlossen.
@@ -568,6 +629,12 @@ fn a_fleet_with_empty_tanks_loses_the_orbit() {
         "die Flotte hält {endurance} Tage, die Hauptwelt {:.0}",
         stores + dissolving
     );
+    // Die Prognose sieht es kommen: Aushungern scheitert am Treibstoff.
+    let predicted = forecast(&campaign.view(), Course::Starve, balance);
+    println!("Prognose: {predicted:?}");
+    assert!(!predicted.falls);
+    assert_eq!(predicted.limited_by, Some(Limit::Fuel));
+    assert!((predicted.days as i64 + 1 - endurance as i64).abs() <= 2);
     let mut days = 1;
     while campaign.siege().is_some() {
         campaign.day();

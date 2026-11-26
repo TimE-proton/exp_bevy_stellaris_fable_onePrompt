@@ -175,6 +175,105 @@ fn settle(fleets: &Fleets, data: &GameData, sieges: &mut Sieges) -> Vec<(PolityI
     lost
 }
 
+/// Flotten, die `planet` heute für `attacker` belagern, in Nummernfolge.
+fn besiegers(
+    fleets: &Fleets,
+    assign: &BTreeMap<FleetId, PlanetId>,
+    planet: PlanetId,
+    system: SystemId,
+    attacker: PolityId,
+) -> Vec<FleetId> {
+    assign
+        .iter()
+        .filter(|(_, target)| **target == planet)
+        .filter(|(fleet, _)| {
+            fleets
+                .get(**fleet)
+                .is_some_and(|fleet| besieges(fleet, system, attacker))
+        })
+        .map(|(fleet, _)| *fleet)
+        .collect()
+}
+
+/// Macht eine dem Belagerer feindliche Flotte ihm den Orbit streitig? Wer sich nach einem
+/// Rückzug sammelt, hält keinen Orbit; so rechnet auch die Blockade.
+fn contested(fleets: &Fleets, diplomacy: &Diplomacy, system: SystemId, attacker: PolityId) -> bool {
+    fleets
+        .docked_in(system)
+        .any(|fleet| diplomacy.at_war(fleet.owner, attacker) && !fleet.is_regrouping())
+}
+
+/// Orbitalhoheit über `planet`: Eine zugeordnete Flotte des Belagerers belagert, und keine
+/// ihm feindliche Flotte steht im System. Nur lesend, auch für Lesemodell und KI.
+pub fn control(
+    fleets: &Fleets,
+    diplomacy: &Diplomacy,
+    assign: &BTreeMap<FleetId, PlanetId>,
+    planet: PlanetId,
+    system: SystemId,
+    attacker: PolityId,
+) -> bool {
+    !contested(fleets, diplomacy, system, attacker)
+        && !besiegers(fleets, assign, planet, system, attacker).is_empty()
+}
+
+/// Die Lage im Orbit von `planet` aus den Flotten und dem Forschungsstand: Feuerkraft und
+/// Magazine der belagernden Schiffe, Truppen an Bord, Technik beider Seiten. Nur lesend:
+/// Tagesschritt, Lesemodell, KI und Oberfläche bekommen dieselben Zahlen.
+pub fn squadron(
+    fleets: &Fleets,
+    research: &Research,
+    data: &GameData,
+    diplomacy: &Diplomacy,
+    sieges: &Sieges,
+    planet: PlanetId,
+    system: SystemId,
+    attacker: PolityId,
+    defender: PolityId,
+) -> Squadron {
+    let balance = &data.balance.siege;
+    let besieging = besiegers(fleets, &sieges.assign, planet, system, attacker);
+    let effects = research.effects(attacker);
+    let mut squadron = Squadron {
+        view: OrbitView {
+            control: !besieging.is_empty() && !contested(fleets, diplomacy, system, attacker),
+            att: tech_view(research, attacker, balance),
+            def: tech_view(research, defender, balance),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut rounds, mut magazines) = (0.0, 0.0);
+    for id in &besieging {
+        let fleet = &fleets.list[id.index()];
+        for ship in &fleet.ships {
+            squadron.view.firepower += firepower(data, ship);
+            squadron.toughness +=
+                balance.gun_weight[class_of(data, ship).index()] * toughness(data, &effects, ship);
+        }
+        // Füllung der Magazine, wie die Flotte sie selbst nennt, gewichtet mit dem
+        // Fassungsvermögen.
+        let capacity = magazines_of(data, fleet);
+        rounds += fleet.supply(data).0 as f64 * capacity;
+        magazines += capacity;
+        squadron.ships += fleet.ships.len();
+        squadron.fuel = squadron.fuel.max(fleet.min_fuel() as f64);
+        squadron.berths += berths_of(data, fleet);
+        if let Some(force) = sieges.embarked.get(id) {
+            squadron.view.embarked += force.troops;
+            squadron.supply_aboard += force.supply;
+        }
+    }
+    // Schiffe ohne Magazin brauchen keine Munition: Dann fehlt auch keine.
+    squadron.view.ammo = if magazines > 0.0 {
+        rounds / magazines
+    } else {
+        1.0
+    };
+    squadron.fleets = besieging;
+    squadron
+}
+
 impl<'a> Orbit<'a> {
     pub fn new(fleets: &'a mut Fleets, research: &'a Research) -> Self {
         Self { fleets, research }
@@ -220,28 +319,10 @@ impl<'a> Orbit<'a> {
         system: SystemId,
         attacker: PolityId,
     ) -> Vec<FleetId> {
-        assign
-            .iter()
-            .filter(|(_, target)| **target == planet)
-            .filter(|(fleet, _)| {
-                self.fleets
-                    .get(**fleet)
-                    .is_some_and(|fleet| besieges(fleet, system, attacker))
-            })
-            .map(|(fleet, _)| *fleet)
-            .collect()
+        besiegers(self.fleets, assign, planet, system, attacker)
     }
 
-    /// Macht eine dem Belagerer feindliche Flotte ihm den Orbit streitig? Wer sich nach
-    /// einem Rückzug sammelt, hält keinen Orbit; so rechnet auch die Blockade.
-    pub fn contested(&self, diplomacy: &Diplomacy, system: SystemId, attacker: PolityId) -> bool {
-        self.fleets
-            .docked_in(system)
-            .any(|fleet| diplomacy.at_war(fleet.owner, attacker) && !fleet.is_regrouping())
-    }
-
-    /// Orbitalhoheit über `planet`: Eine zugeordnete Flotte des Belagerers belagert, und
-    /// keine ihm feindliche Flotte steht im System.
+    /// Orbitalhoheit über `planet` (siehe [`control`]).
     pub fn control(
         &self,
         diplomacy: &Diplomacy,
@@ -250,18 +331,10 @@ impl<'a> Orbit<'a> {
         system: SystemId,
         attacker: PolityId,
     ) -> bool {
-        !self.contested(diplomacy, system, attacker)
-            && assign.iter().any(|(fleet, target)| {
-                *target == planet
-                    && self
-                        .fleets
-                        .get(*fleet)
-                        .is_some_and(|fleet| besieges(fleet, system, attacker))
-            })
+        control(self.fleets, diplomacy, assign, planet, system, attacker)
     }
 
-    /// Die Lage im Orbit von `planet` aus den Flotten und dem Forschungsstand: Feuerkraft
-    /// und Magazine der belagernden Schiffe, Truppen an Bord, Technik beider Seiten.
+    /// Die Lage im Orbit von `planet` (siehe [`squadron`]).
     pub fn squadron(
         &self,
         data: &GameData,
@@ -272,47 +345,17 @@ impl<'a> Orbit<'a> {
         attacker: PolityId,
         defender: PolityId,
     ) -> Squadron {
-        let balance = &data.balance.siege;
-        let fleets = self.besiegers(&sieges.assign, planet, system, attacker);
-        let effects = self.research.effects(attacker);
-        let mut squadron = Squadron {
-            view: OrbitView {
-                control: !fleets.is_empty() && !self.contested(diplomacy, system, attacker),
-                att: tech_view(self.research, attacker, balance),
-                def: tech_view(self.research, defender, balance),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let (mut rounds, mut magazines) = (0.0, 0.0);
-        for id in &fleets {
-            let fleet = &self.fleets.list[id.index()];
-            for ship in &fleet.ships {
-                squadron.view.firepower += firepower(data, ship);
-                squadron.toughness += balance.gun_weight[class_of(data, ship).index()]
-                    * toughness(data, &effects, ship);
-            }
-            // Füllung der Magazine, wie die Flotte sie selbst nennt, gewichtet mit dem
-            // Fassungsvermögen.
-            let capacity = magazines_of(data, fleet);
-            rounds += fleet.supply(data).0 as f64 * capacity;
-            magazines += capacity;
-            squadron.ships += fleet.ships.len();
-            squadron.fuel = squadron.fuel.max(fleet.min_fuel() as f64);
-            squadron.berths += berths_of(data, fleet);
-            if let Some(force) = sieges.embarked.get(id) {
-                squadron.view.embarked += force.troops;
-                squadron.supply_aboard += force.supply;
-            }
-        }
-        // Schiffe ohne Magazin brauchen keine Munition: Dann fehlt auch keine.
-        squadron.view.ammo = if magazines > 0.0 {
-            rounds / magazines
-        } else {
-            1.0
-        };
-        squadron.fleets = fleets;
-        squadron
+        squadron(
+            self.fleets,
+            self.research,
+            data,
+            diplomacy,
+            sieges,
+            planet,
+            system,
+            attacker,
+            defender,
+        )
     }
 
     /// Wendet die Wirkung eines Tages auf die Schiffe der belagernden Flotten an: Rumpf
