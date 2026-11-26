@@ -403,8 +403,10 @@ impl<'a> Orbit<'a> {
         toll
     }
 
-    /// Führt Zuordnungen und eingeschiffte Truppen den Flotten nach (siehe [`settle`]).
-    /// Gibt die verlorenen Verbände je Gemeinschaft zurück.
+    /// Führt Zuordnungen und eingeschiffte Truppen den Flotten nach: Eine Flotte, die
+    /// nicht mehr besteht, belagert nichts und trägt nichts, und was an Bord keinen Platz
+    /// mehr hat, ist mit seinen Schiffen verloren. Gibt die verlorenen Verbände je
+    /// Gemeinschaft zurück.
     pub fn settle(&self, data: &GameData, sieges: &mut Sieges) -> Vec<(PolityId, f64)> {
         settle(self.fleets, data, sieges)
     }
