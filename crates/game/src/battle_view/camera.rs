@@ -5,10 +5,12 @@
 use super::feed::BattleFeed;
 use super::{BattleViewSet, Part, ViewFrame, ViewTimings, to_world};
 use crate::pointer::{PointerOwner, WorldMouse, track_pointer};
+use bevy::camera::CameraUpdateSystems;
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
 use bevy::window::PrimaryWindow;
 use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input};
 use sim::battle::Battle;
@@ -38,6 +40,12 @@ pub const LAYOUT_GAP: f32 = 10.0;
 const SIDE_VIEW_MIN: f32 = 150.0;
 /// Markierungen kleiner Schiffe lassen sich in diesem Umkreis (Pixel) anklicken.
 const PICK_PIXELS: f32 = 11.0;
+/// Höhe der Zwischenbilder, aus denen der Leuchtschein um helle Stellen entsteht, solange
+/// das Fenster es zulässt (der Vorgabewert der Engine).
+const GLOW_HEIGHT: u32 = 512;
+/// Kantenlänge, die jede Grafikkarte für eine Textur zulässt, wenn keine befragt werden
+/// kann (ohne Renderer, in den Systemtests).
+const SAFE_TEXTURE_SIZE: u32 = 2048;
 /// Grenzen der Fluggeschwindigkeit, als Vielfaches der Grundgeschwindigkeit.
 const FLY_SPEED_MIN: f32 = 0.04;
 const FLY_SPEED_MAX: f32 = 12.0;
@@ -541,6 +549,8 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(Startup, spawn_camera)
         // Vor der Freiflugsteuerung der Engine, die danach im selben Frame läuft.
         .add_systems(PreUpdate, hold_mouse_look.after(track_pointer))
+        // Sobald die Engine die Bildgröße dieses Frames kennt und bevor sie zeichnet.
+        .add_systems(PostUpdate, fit_glow.after(CameraUpdateSystems))
         .add_systems(
             Update,
             (
@@ -579,6 +589,7 @@ fn spawn_camera(mut commands: Commands) {
         Tonemapping::TonyMcMapface,
         Bloom {
             intensity: 0.22,
+            max_mip_dimension: GLOW_HEIGHT,
             ..Bloom::NATURAL
         },
         AmbientLight {
@@ -590,6 +601,45 @@ fn spawn_camera(mut commands: Commands) {
         flight,
         resting_view(),
     ));
+}
+
+/// Höhe der Zwischenbilder des Leuchtscheins für ein Bild dieser Größe (in Pixeln der
+/// Grafikkarte), wenn eine Textur höchstens `limit` Pixel breit und hoch sein darf.
+///
+/// Die Engine legt das größte Zwischenbild so hoch an wie verlangt und so breit, wie es
+/// dem Seitenverhältnis des Bilds entspricht, gleich wie klein das Fenster ist. Bei einem
+/// sehr flachen Fenster (mit den üblichen Werten ab etwa 32:1) wäre es breiter, als die
+/// Grafikkarte erlaubt, und das Programm endete mit einem Fehler der Grafikkarte. Die Höhe
+/// schrumpft deshalb gerade so weit, dass die Breite passt.
+pub fn glow_height(image: UVec2, limit: u32) -> u32 {
+    let wanted = GLOW_HEIGHT.min(limit);
+    if image.y == 0 || image.x <= image.y {
+        return wanted.max(1);
+    }
+    // Breite = Höhe · Bildbreite / Bildhöhe, und die darf `limit` nicht überschreiten. Ein
+    // Pixel Abstand fängt das Runden der Engine auf.
+    let widest = limit.saturating_sub(1) as u64;
+    let fitting = (widest * image.y as u64 / image.x as u64) as u32;
+    wanted.min(fitting).max(1)
+}
+
+/// Hält den Leuchtschein der Schlachtkamera in dem Rahmen, den die Grafikkarte zulässt,
+/// wie auch immer das Fenster gezogen wird.
+fn fit_glow(
+    device: Option<Res<RenderDevice>>,
+    mut camera: Single<(&Camera, &mut Bloom), With<BattleCamera>>,
+) {
+    let (camera, glow) = &mut *camera;
+    let Some(image) = camera.physical_viewport_size() else {
+        return;
+    };
+    let limit = device.map_or(SAFE_TEXTURE_SIZE, |device| {
+        device.limits().max_texture_dimension_2d
+    });
+    let height = glow_height(image, limit);
+    if glow.max_mip_dimension != height {
+        glow.max_mip_dimension = height;
+    }
 }
 
 /// Tasten, auf denen das Drehen auf der Stelle der Engine geparkt ist.
@@ -1981,6 +2031,101 @@ mod tests {
         // Dort ändert das Mausrad es wie gewohnt.
         game.scroll(OPEN_SCENE, -2.0);
         assert!(game.resource::<ViewFrame>().fly_speed < 0.9);
+    }
+
+    /// Größe des größten Zwischenbilds, wie die Engine sie aus der Bildgröße und der
+    /// verlangten Höhe berechnet (`prepare_bloom_textures`).
+    fn glow_texture(image: UVec2, height: u32) -> UVec2 {
+        let ratio = if image.y != 0 {
+            height as f32 / image.y as f32
+        } else {
+            0.0
+        };
+        (image.as_vec2() * ratio).round().as_uvec2().max(UVec2::ONE)
+    }
+
+    #[test]
+    fn the_glow_fits_the_graphics_card_at_every_window_size() {
+        // Gewöhnliche Fenster behalten den vollen Leuchtschein.
+        for image in [
+            UVec2::new(1600, 900),
+            UVec2::new(1024, 600),
+            UVec2::new(3840, 2160),
+            UVec2::new(900, 1600),
+            UVec2::new(3440, 1440),
+        ] {
+            assert_eq!(glow_height(image, 16_384), GLOW_HEIGHT, "{image}");
+            assert_eq!(glow_height(image, 8192), GLOW_HEIGHT, "{image}");
+        }
+        // Die Fenster, bei denen das Programm endete: Mit der vollen Höhe verlangte die
+        // Engine 20480 und 34133 Pixel Breite, erlaubt sind 16384.
+        for image in [UVec2::new(1600, 40), UVec2::new(2000, 30)] {
+            assert!(glow_texture(image, GLOW_HEIGHT).x > 16_384, "{image}");
+            let height = glow_height(image, 16_384);
+            assert!(height < GLOW_HEIGHT && height > 200, "{image}: {height}");
+        }
+        // Jede Fenstergröße, auf jeder Grafikkarte: Das Zwischenbild bleibt im Rahmen, und
+        // die Höhe ist nie null (die Engine zieht daraus den Logarithmus).
+        let sizes = [
+            1, 2, 3, 7, 10, 30, 40, 59, 60, 100, 360, 900, 1600, 2000, 4096, 16_384,
+        ];
+        for limit in [2048, 4096, 8192, 16_384, 32_768] {
+            for width in sizes {
+                for height in sizes.into_iter().chain([0]) {
+                    let image = UVec2::new(width, height);
+                    if image.max_element() > limit {
+                        // Ein solches Fenster kann die Grafikkarte gar nicht füllen.
+                        continue;
+                    }
+                    let glow = glow_height(image, limit);
+                    assert!((1..=GLOW_HEIGHT).contains(&glow), "{image}, {limit}");
+                    let texture = glow_texture(image, glow);
+                    assert!(
+                        texture.max_element() <= limit,
+                        "Fenster {image}: Zwischenbild {texture} bei erlaubten {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_drawn_into_a_thin_strip_keeps_the_glow_within_bounds() {
+        let mut game = practice();
+        let glow = |game: &mut crate::testing::TestGame| {
+            let world = game.world_mut();
+            let (camera, glow) = world
+                .query_filtered::<(&Camera, &Bloom), With<BattleCamera>>()
+                .single(world)
+                .unwrap();
+            (
+                camera.physical_viewport_size().expect("Bildgröße"),
+                glow.max_mip_dimension,
+            )
+        };
+        assert_eq!(glow(&mut game), (UVec2::new(1600, 900), GLOW_HEIGHT));
+        // Das Fenster wird zu einem flachen Streifen gezogen, während das Gefecht gezeigt
+        // wird. Schon im selben Frame, bevor die Engine zeichnet, passt der Leuchtschein.
+        for size in [
+            Vec2::new(1600.0, 40.0),
+            Vec2::new(2000.0, 30.0),
+            Vec2::new(1600.0, 1.0),
+        ] {
+            game.resize(size);
+            game.frames(1);
+            let (image, height) = glow(&mut game);
+            assert_eq!(image, size.as_uvec2());
+            let texture = glow_texture(image, height);
+            assert!(
+                texture.max_element() <= SAFE_TEXTURE_SIZE,
+                "Fenster {size}: Zwischenbild {texture}"
+            );
+            game.frames(3);
+        }
+        // Zurück in der üblichen Größe ist der volle Leuchtschein wieder da.
+        game.resize(Vec2::new(1600.0, 900.0));
+        game.frames(2);
+        assert_eq!(glow(&mut game), (UVec2::new(1600, 900), GLOW_HEIGHT));
     }
 
     #[test]
