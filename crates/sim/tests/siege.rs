@@ -154,8 +154,16 @@ struct Campaign {
 }
 
 impl Campaign {
-    /// Krieg, Truppen an Bord, Blockadeauftrag und Marsch in das System des Planeten.
-    fn march(mut sim: Headless, attacker: PolityId, planet: PlanetId) -> Self {
+    /// Krieg, `troops` Verbände an Bord, Blockadeauftrag und Marsch in das System des
+    /// Planeten. Die Truppen nehmen Nachschub für `supply_days` Tage mit, soweit der
+    /// Heimatmarkt ihn hat.
+    fn march(
+        mut sim: Headless,
+        attacker: PolityId,
+        planet: PlanetId,
+        troops: f64,
+        supply_days: u16,
+    ) -> Self {
         let defender = owner(&sim, planet).unwrap();
         let system = sim.galaxy().planet(planet).system;
         let fleet = fleet_of(&sim, attacker);
@@ -171,8 +179,8 @@ impl Campaign {
             SimCommand::EmbarkTroops {
                 fleet,
                 planet: home,
-                strength: TROOPS,
-                supply_days: 0,
+                strength: troops,
+                supply_days,
             },
         );
         applied(
@@ -199,12 +207,18 @@ impl Campaign {
         }
     }
 
-    /// Gegen die nächstgelegene fremde Kolonie, nach den ersten Jahren der Partie.
+    /// Gegen die nächstgelegene fremde Kolonie, nach den ersten Jahren der Partie. Ohne
+    /// Nachschub: Die Truppen bleiben an Bord.
     fn against_a_colony() -> Self {
+        Self::against_a_colony_with(TROOPS, 0)
+    }
+
+    /// Dasselbe mit `troops` Verbänden und Nachschub für eine Landung.
+    fn against_a_colony_with(troops: f64, supply_days: u16) -> Self {
         let mut sim = observer();
         sim.run_days(YEARS * DAYS_PER_YEAR);
         let (attacker, planet) = nearest_colony(&sim);
-        Self::march(sim, attacker, planet)
+        Self::march(sim, attacker, planet, troops, supply_days)
     }
 
     /// Gegen die nächstgelegene fremde Hauptwelt, vom ersten Tag an. Ihre Flotte verlegt
@@ -248,7 +262,7 @@ impl Campaign {
             },
         );
         sail(&mut sim, guard, aside);
-        Self::march(sim, attacker, capital)
+        Self::march(sim, attacker, capital, TROOPS, 0)
     }
 
     fn begin(&mut self) {
@@ -258,6 +272,31 @@ impl Campaign {
             SimCommand::BeginSiege {
                 fleet: self.fleet,
                 planet: self.planet,
+            },
+        );
+    }
+
+    /// Stehende Befehle des Belagerers.
+    fn order(&mut self, orders: SiegeOrders) {
+        applied(
+            &mut self.sim,
+            self.attacker,
+            SimCommand::SetSiegeOrders {
+                planet: self.planet,
+                orders,
+            },
+        );
+    }
+
+    /// Setzt eine Welle der eingeschifften Truppen an Land.
+    fn land(&mut self, strength: f64) {
+        applied(
+            &mut self.sim,
+            self.attacker,
+            SimCommand::LandTroops {
+                fleet: self.fleet,
+                planet: self.planet,
+                strength,
             },
         );
     }
@@ -279,6 +318,14 @@ impl Campaign {
             .embarked
             .get(&self.fleet)
             .map_or(0.0, |force| force.troops)
+    }
+
+    /// Nachschub an Bord in Verbandstagen.
+    fn supply_aboard(&self) -> f64 {
+        sieges(&self.sim)
+            .embarked
+            .get(&self.fleet)
+            .map_or(0.0, |force| force.supply)
     }
 
     /// Die laufende Belagerung als Lesemodell, aus der Welt gebaut: der Datensatz, die
@@ -1029,11 +1076,47 @@ fn siege_orders_are_validated_and_rejected_with_reasons() {
     applied(&mut sim, defender, garrison(Posture::Forward, false));
     assert_eq!(defense(&sim, planet).posture, Posture::Forward);
 
-    // Der Belagerer hebt auf: sofort, und die Truppen bleiben an Bord.
+    // Landen: nur von der eigenen Flotte, nur was an Bord ist; übergeben kann nur der
+    // Besitzer.
+    let land = |strength: f64| SimCommand::LandTroops {
+        fleet,
+        planet,
+        strength,
+    };
+    let reason = rejection(&mut sim, defender, land(1.0));
+    assert!(reason.contains("Flotte gehört einer anderen"), "{reason}");
+    let reason = rejection(&mut sim, attacker, land(TROOPS + 1.0));
+    assert_eq!(
+        reason,
+        format!("an Bord von {fleet_name} sind nur {TROOPS:.1} Verbände")
+    );
+    let reason = rejection(&mut sim, attacker, SimCommand::Capitulate { planet });
+    assert_eq!(
+        reason,
+        format!("{name} gehört nicht der eigenen Gemeinschaft")
+    );
+    let reason = rejection(&mut sim, defender, SimCommand::Capitulate { planet: home });
+    let home_name = sim.galaxy().planet(home).name.clone();
+    assert!(
+        reason.contains(&home_name),
+        "die Hauptwelt des Belagerers gehört ihm nicht: {reason}"
+    );
+    let reason = rejection(&mut sim, attacker, SimCommand::Capitulate { planet: home });
+    assert_eq!(reason, format!("{home_name} wird nicht belagert"));
+    // Eine Welle landet auf der eingeschlossenen Kolonie; ohne Geschütze kommt sie ganz an.
+    applied(&mut sim, attacker, land(2.0));
+    let siege = sieges(&sim).siege(planet).unwrap();
+    assert_eq!((siege.army, siege.army_peak), (2.0, 2.0));
+    assert_eq!(siege.landed_day, Some(sim.clock().day()));
+    assert_eq!(sieges(&sim).embarked[&fleet].troops, TROOPS - 2.0);
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+
+    // Der Belagerer hebt auf: sofort. Die Truppe am Boden schifft sich wieder ein.
     applied(&mut sim, attacker, SimCommand::LiftSiege { planet });
     assert!(sieges(&sim).siege(planet).is_none());
     assert!(sieges(&sim).assign.is_empty());
     assert_eq!(sieges(&sim).stats.lifted, 1);
+    assert_eq!(sieges(&sim).stats.lost_attackers, 0.0);
     assert_eq!(sieges(&sim).embarked[&fleet].troops, TROOPS);
     assert_eq!(check_invariants(sim.world()), Ok(()));
     sim.run_days(2);
@@ -1048,6 +1131,265 @@ fn siege_orders_are_validated_and_rejected_with_reasons() {
     assert_eq!(sieges(&sim).stats.begun, 2);
     assert_eq!(owner(&sim, planet), Some(defender));
     assert_eq!(money_drift(sim.world()), Some(0));
+}
+
+// --- Sturm --------------------------------------------------------------------------
+
+#[test]
+fn a_landing_storms_a_colony_as_the_forecast_says() {
+    let balance = &data().balance.siege;
+    // Alle zehn regulären Verbände der Heimatwelt, mit Nachschub für drei Wochen.
+    let troops = balance.home_start.regulars;
+    let mut campaign = Campaign::against_a_colony_with(troops, 21);
+    let (attacker, defender, planet) = (campaign.attacker, campaign.defender, campaign.planet);
+    let supply = campaign.supply_aboard();
+    assert!(
+        supply > 0.0,
+        "der Heimatmarkt hatte Nachschub für die Truppe"
+    );
+    campaign.begin();
+    campaign.day();
+    let siege = campaign.siege().expect("die Belagerung hat begonnen");
+    let (start, garrison, stake) = (siege.started_day, siege.garrison_start, siege.stake());
+    let zones = siege.zones.len();
+    assert!(garrison > 2.0, "die Miliz der Kolonie steht: {garrison}");
+    // Die Prognose für den Sturm, auf den Zahlen der Welt gerechnet. Die Kolonie hat
+    // keine Vorräte: Ihre Miliz löst sich auf, während gekämpft wird. Zehn Verbände sind
+    // ihr so überlegen, dass das Zentrum im Kampf fällt, bevor der Hunger entscheidet.
+    assert!(
+        troops > 1.5 * garrison,
+        "{troops} gegen {garrison} Verbände"
+    );
+    let predicted = forecast(&campaign.view(), Course::Storm, balance);
+    println!("Prognose: {predicted:?}");
+    assert_eq!(predicted.outcome, Some(Outcome::Stormed));
+
+    // Sturm mit Stützfeuer, alle Truppen landen. Die Kolonie hat keine Geschütze.
+    campaign.order(SiegeOrders {
+        fire: Fire::Support,
+        assault: true,
+        focus: 0,
+        sack: false,
+    });
+    campaign.land(troops);
+    let siege = campaign.siege().unwrap();
+    assert_eq!((siege.army, campaign.aboard()), (troops, 0.0));
+    assert_eq!(siege.phase(campaign.defense()), Phase::Ground);
+    // Der Nachschub ist noch an Bord; der nächste Tagesschritt bringt ihn zur Truppe.
+    assert_eq!((siege.army_supply, campaign.supply_aboard()), (0.0, supply));
+
+    let mut days = 1;
+    let (mut fought, mut fallen, mut damage) = (0, 0, 0.0);
+    loop {
+        if let Some(siege) = campaign.siege() {
+            let report = &siege.report;
+            if report.zone.is_some() {
+                fought += 1;
+                assert!(report.attacker_lost > 0.0 && report.defender_lost > 0.0);
+                assert!(report.ammo > 0.0, "Stützfeuer kostet Munition");
+                assert!(report.ground_damage > 0.0);
+            }
+            fallen += report.fell.is_some() as usize;
+            damage += report.ground_damage;
+            assert_eq!(report.fire_damage, 0.0, "Stützfeuer trifft die Welt nicht");
+            assert!(report.blocked.is_empty(), "{:?}", report.blocked);
+            if days <= 3 || days % 5 == 0 || report.fell.is_some() {
+                println!("{}", campaign.report());
+            }
+        }
+        if owner(&campaign.sim, planet) != Some(defender) {
+            break;
+        }
+        campaign.day();
+        days += 1;
+        assert!(days < 120, "der Sturm endet nie");
+    }
+    println!(
+        "gestürmt nach {days} Tagen, vorausgesagt waren {}",
+        predicted.days + 1
+    );
+    assert_eq!(owner(&campaign.sim, planet), Some(attacker));
+    let state = sieges(&campaign.sim);
+    let stats = &state.stats;
+    assert_eq!((stats.stormed, stats.conquests()), (1, 1));
+    assert_eq!(stats.days, campaign.sim.clock().day() - start);
+    // Um jede Zone wurde gekämpft, das Zentrum fiel zuletzt.
+    assert!(
+        fought >= 5 && fallen >= 1,
+        "{fought} Kampftage, {fallen} Zonen"
+    );
+    assert!(zones >= 2);
+    // Der Verlauf trifft die Prognose: Dauer und Verluste. Sie hält Zusammenhalt und
+    // Versorgung fest, die sich in den Wochen des Sturms bewegen.
+    assert!(
+        (predicted.days as i64 + 1 - days as i64).abs() <= 3,
+        "{days} Tage, vorausgesagt {}",
+        predicted.days + 1
+    );
+    assert!(
+        (stats.lost_attackers - predicted.own_losses).abs() <= 0.15 * predicted.own_losses,
+        "Verluste {:.2}, vorausgesagt {:.2}",
+        stats.lost_attackers,
+        predicted.own_losses
+    );
+    // Verluste auf beiden Seiten, die des Angreifers tragbar.
+    assert!(stats.lost_attackers > 0.2 && stats.lost_attackers < 0.5 * troops);
+    assert!(stats.lost_defenders > 0.5 * stats.lost_attackers);
+    // Wer überlebt hat, ist die Garnison der Welt; ihr Nachschub liegt im Depot.
+    let defense = campaign.defense();
+    assert!((defense.regulars - (troops - stats.lost_attackers)).abs() < 1e-6);
+    assert_eq!(defense.militia, 0.0);
+    assert_eq!(defense.occupied_from, Some(defender));
+    // Der Bodenkrieg hat Spuren hinterlassen, die der neue Besitzer verantwortet: die
+    // Schäden aller Kampftage, auch des letzten. Sie lasten auf dem Zusammenhalt der
+    // eroberten Welt.
+    let scar = defense.scar;
+    assert!(
+        damage > 0.0 && scar > damage && scar < 2.0 * damage,
+        "{scar} zu {damage}"
+    );
+    assert_eq!(defense.scar_by, Some(attacker));
+    let region = finance(&campaign.sim).region(planet);
+    assert_eq!(region.war_damage, scar);
+    let cohesion = balance.conquest_base + balance.stake_pts * stake - balance.scar_pts * scar;
+    assert!(
+        (region.cohesion - cohesion).abs() < 1e-9,
+        "Zusammenhalt {} statt {cohesion}",
+        region.cohesion
+    );
+    assert_eq!(region.stage, Stage::Restless);
+    // Die Schiffe haben Munition verschossen, aber keinen Treffer erhalten.
+    let ships = &fleet(&campaign.sim, campaign.fleet).ships;
+    assert!(ships.iter().all(|ship| ship.hull == 1.0));
+    assert!(ships.iter().any(|ship| ship.ammo < 1.0));
+    let told = campaign
+        .sim
+        .world()
+        .resource::<sim::chronicle::Chronicle>()
+        .entries
+        .iter()
+        .any(|entry| entry.text.contains("gestürmt") && entry.text.contains("besetzt"));
+    assert!(told, "die Chronik nennt die Eroberung");
+}
+
+// --- Übergabe -----------------------------------------------------------------------
+
+#[test]
+fn a_colony_is_handed_over_and_the_rest_of_the_troops_return_home() {
+    let balance = &data().balance.siege;
+    let mut campaign = Campaign::against_a_colony();
+    let (attacker, defender, planet) = (campaign.attacker, campaign.defender, campaign.planet);
+    let (home, home_system) = home_of(&campaign.sim, attacker);
+    let name = campaign.sim.galaxy().planet(planet).name.clone();
+    // Ohne Belagerung gibt es nichts zu übergeben.
+    let reason = rejection(
+        &mut campaign.sim,
+        defender,
+        SimCommand::Capitulate { planet },
+    );
+    assert_eq!(reason, format!("{name} wird nicht belagert"));
+    campaign.begin();
+    for _ in 0..5 {
+        campaign.day();
+    }
+    // Der Belagerer will plündern; nach einer Übergabe unterbleibt das.
+    campaign.order(SiegeOrders {
+        sack: true,
+        ..Default::default()
+    });
+    let siege = campaign.siege().expect("die Belagerung läuft");
+    let stake = siege.stake();
+    let militia = campaign.defense().militia;
+    assert!(militia > 1.0, "die Miliz steht noch: {militia}");
+    let population = campaign.sim.galaxy().planet(planet).population;
+    let needed = occupation_force(population, balance);
+    assert!(needed < TROOPS);
+
+    applied(
+        &mut campaign.sim,
+        defender,
+        SimCommand::Capitulate { planet },
+    );
+    // Die Besatzungstruppe ist an Land, der Besitzwechsel steht bis zum Tagesabschluss aus.
+    assert_eq!(sieges(&campaign.sim).pending.len(), 1);
+    assert!((campaign.siege().unwrap().army - needed).abs() < 1e-9);
+    assert!((campaign.aboard() - (TROOPS - needed)).abs() < 1e-9);
+    assert_eq!(owner(&campaign.sim, planet), Some(defender));
+    assert_eq!(check_invariants(campaign.sim.world()), Ok(()));
+    let reason = rejection(
+        &mut campaign.sim,
+        defender,
+        SimCommand::Capitulate { planet },
+    );
+    assert_eq!(reason, format!("die Übergabe von {name} steht aus"));
+    campaign.day();
+
+    assert_eq!(owner(&campaign.sim, planet), Some(attacker));
+    let state = sieges(&campaign.sim);
+    assert!(state.active.is_empty() && state.pending.is_empty());
+    assert_eq!((state.stats.capitulated, state.stats.conquests()), (1, 1));
+    assert_eq!(
+        (state.stats.lost_attackers, state.stats.lost_defenders),
+        (0.0, 0.0)
+    );
+    // Mildere Besatzung als nach einer Eroberung mit Gewalt; keine Schäden.
+    let defense = campaign.defense();
+    let occupation = (1.0 - stake).max(balance.occupation_min) * balance.capitulation_mercy;
+    assert!((defense.occupation - occupation).abs() < 1e-9);
+    assert!(defense.occupation < 1.0);
+    assert_eq!(defense.occupied_from, Some(defender));
+    assert_eq!(defense.scar, 0.0);
+    assert!((defense.regulars - needed).abs() < 1e-9);
+    let told = campaign
+        .sim
+        .world()
+        .resource::<sim::chronicle::Chronicle>()
+        .entries
+        .iter()
+        .any(|entry| entry.text.contains("übergeben") && entry.text.contains(&name));
+    assert!(told, "die Chronik nennt die Übergabe");
+
+    // Der Rest der Truppen fährt heim und geht dort wieder an Land.
+    let fleet = campaign.fleet;
+    let at_home = defense_of_home(&campaign.sim, home);
+    let reason = rejection(
+        &mut campaign.sim,
+        attacker,
+        SimCommand::LandTroops {
+            fleet,
+            planet: home,
+            strength: 1.0,
+        },
+    );
+    assert!(reason.contains("liegt nicht im System"), "{reason}");
+    applied(
+        &mut campaign.sim,
+        attacker,
+        SimCommand::MoveFleet {
+            fleet,
+            to: home_system,
+        },
+    );
+    sail(&mut campaign.sim, fleet, home_system);
+    let aboard = campaign.aboard();
+    assert!((aboard - (TROOPS - needed)).abs() < 1e-9);
+    applied(
+        &mut campaign.sim,
+        attacker,
+        SimCommand::LandTroops {
+            fleet,
+            planet: home,
+            strength: aboard,
+        },
+    );
+    assert!((defense_of_home(&campaign.sim, home) - (at_home + aboard)).abs() < 1e-9);
+    assert!(!sieges(&campaign.sim).embarked.contains_key(&fleet));
+    campaign.day();
+}
+
+/// Reguläre Verbände auf einer Welt.
+fn defense_of_home(sim: &Headless, home: PlanetId) -> f64 {
+    defense(sim, home).regulars
 }
 
 // --- Wiederholbarkeit ---------------------------------------------------------------

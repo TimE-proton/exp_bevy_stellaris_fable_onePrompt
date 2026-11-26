@@ -112,7 +112,7 @@ pub fn planet_facts(
 }
 
 /// Nimmt `strength` Verbände von Bord der genannten Flotten, in Nummernfolge.
-fn take_troops(sieges: &mut Sieges, fleets: &[FleetId], strength: f64) {
+pub(super) fn take_troops(sieges: &mut Sieges, fleets: &[FleetId], strength: f64) {
     let mut open = strength;
     for fleet in fleets {
         if open <= 0.0 {

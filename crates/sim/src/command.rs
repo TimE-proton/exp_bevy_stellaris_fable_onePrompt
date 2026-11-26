@@ -167,6 +167,20 @@ pub enum SimCommand {
         strength: f64,
         supply_days: u16,
     },
+    /// Eingeschiffte Verbände einer eigenen Flotte an Land setzen. Auf einer eigenen Welt
+    /// verstärken sie die Garnison, und ihr Nachschub füllt das Depot. Auf einer fremden
+    /// Welt landen sie als Welle der eigenen Belagerung; der Planet muss eingeschlossen
+    /// sein, und aktive Geschütze fangen einen Teil der Welle ab.
+    LandTroops {
+        fleet: FleetId,
+        planet: PlanetId,
+        strength: f64,
+    },
+    /// Eine belagerte eigene Welt übergeben. Der Belagerer braucht eine Besatzungstruppe
+    /// am Boden oder im Orbit; geplündert wird nach einer Übergabe nicht.
+    Capitulate {
+        planet: PlanetId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +627,33 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             *planet,
             *strength,
             *supply_days,
+        ),
+        SimCommand::LandTroops {
+            fleet,
+            planet,
+            strength,
+        } => siege::land_troops(
+            &ctx.data,
+            &ctx.galaxy,
+            &ctx.polities,
+            &ctx.diplomacy,
+            &mut ctx.finance,
+            &mut ctx.sieges,
+            &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
+            polity,
+            *fleet,
+            *planet,
+            *strength,
+            tick,
+        ),
+        SimCommand::Capitulate { planet } => siege::capitulate(
+            &ctx.data,
+            &ctx.galaxy,
+            &ctx.diplomacy,
+            &mut ctx.sieges,
+            &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
+            polity,
+            *planet,
         ),
     }
 }

@@ -3,12 +3,14 @@
 //! Aufgerufen aus `command::execute`. Befehle wirken zwischen den Tagesgrenzen; der
 //! Tagesschritt rechnet mit dem, was sie hinterlassen.
 
-use super::day::lift;
-use super::{Orbit, Posture, SiegeOrders, Sieges, ZoneKind};
+use super::day::{lift, take_troops, weary};
+use super::step::land;
+use super::{Conquest, Orbit, Outcome, Posture, SiegeOrders, Sieges, ZoneKind, occupation_force};
 use crate::chronicle::Chronicle;
+use crate::clock::TICKS_PER_DAY;
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, purchase, to_credits};
+use crate::economy::{Economy, Money, purchase, to_credits};
 use crate::finance::Finance;
 use crate::galaxy::{Galaxy, Planet};
 use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
@@ -194,18 +196,31 @@ pub fn set_garrison_orders(
     Ok(())
 }
 
+/// RÜSTUNGSETAT: Was eine Gemeinschaft heute für Rüstung ausgeben darf, in Tausendstel
+/// Credits. Die eine Stelle, an der die Grenze gilt: Jeder Einkauf der Belagerung, der
+/// nach der Vorgabe aus dem Rüstungsetat bezahlt wird, fragt hier. Noch gibt es keinen
+/// Monatsetat; verfügbar ist die ganze Staatskasse. Sobald der Staatshaushalt den
+/// Ansprüchen an die Kasse ihre Anteile zuweist, steht hier der Rest des Monatsetats
+/// (`Sieges::budget`), und der Aufrufer bucht ab, was er ausgegeben hat.
+pub fn armament_allowance(economy: &Economy, _sieges: &Sieges, polity: PolityId) -> Money {
+    economy.treasury(polity).max(0)
+}
+
 /// Kauft Nachschub für `wanted` Verbandstage am Markt des Systems: je Verbandstag einen
-/// Satz der Tagesration. Gekauft werden nur ganze Sätze, soweit Ware und Staatskasse
-/// reichen; der bezahlbare Wunsch zählt als Nachfrage. Gibt die Verbandstage zurück.
+/// Satz der Tagesration. Gekauft werden nur ganze Sätze, soweit Ware und Rüstungsetat
+/// reichen; der bezahlbare Wunsch zählt als Nachfrage. Bezahlt die Staatskasse beim
+/// Kontor. Gibt die Verbandstage zurück.
 fn buy_supply(
     data: &GameData,
     economy: &mut Economy,
+    sieges: &Sieges,
     system: SystemId,
     polity: PolityId,
     wanted: f64,
 ) -> f64 {
     let bundle = &data.balance.siege.day_bundle_ids;
     let spread = data.balance.economy.spread;
+    let allowance = armament_allowance(economy, sieges, polity);
     let (Some(market), Some(treasury)) = (
         economy.markets.get_mut(system.index()),
         economy.treasuries.get_mut(polity.index()),
@@ -220,7 +235,7 @@ fn buy_supply(
         .map(|(good, amount)| amount * market.ask(*good, spread))
         .sum();
     let affordable = if cost > 0.0 {
-        wanted.min(to_credits((*treasury).max(0)) / cost)
+        wanted.min(to_credits(allowance) / cost)
     } else {
         wanted
     };
@@ -318,6 +333,7 @@ pub fn embark_troops(
     let supply = buy_supply(
         data,
         economy,
+        sieges,
         target.system,
         polity,
         strength * supply_days as f64,
@@ -327,6 +343,221 @@ pub fn embark_troops(
     let force = sieges.embarked.entry(fleet).or_default();
     force.troops += strength;
     force.supply += supply;
+    Ok(())
+}
+
+/// Setzt eingeschiffte Verbände einer eigenen Flotte an Land.
+///
+/// Auf einer eigenen Welt verstärken sie die Garnison, und ihr Anteil am Nachschub an
+/// Bord füllt das Depot; das geht nicht, solange ein Belagerer den Orbit hält oder die
+/// Oberfläche. Auf einer fremden Welt landen sie als Welle der eigenen Belagerung: Die
+/// Flotte muss sie belagern, und der Planet muss eingeschlossen sein. Aktive Geschütze
+/// fangen einen Teil der Welle ab. Die Landung zählt zu dem Tag, dessen Tagesschritt
+/// zuletzt gerechnet wurde: Der nächste sieht die Schiffe im niedrigen Orbit.
+pub fn land_troops(
+    data: &GameData,
+    galaxy: &Galaxy,
+    polities: &Polities,
+    diplomacy: &Diplomacy,
+    finance: &mut Finance,
+    sieges: &mut Sieges,
+    orbit: &Orbit,
+    polity: PolityId,
+    fleet: FleetId,
+    planet: PlanetId,
+    strength: f64,
+    tick: u64,
+) -> Result<(), String> {
+    let balance = &data.balance.siege;
+    let target = known(galaxy, planet)?;
+    let squadron = orbit.own(polity, fleet)?;
+    if !squadron.docked || squadron.system != target.system {
+        return Err(format!(
+            "{} liegt nicht im System von {}",
+            squadron.name, target.name
+        ));
+    }
+    if !(strength.is_finite() && strength > 0.0) {
+        return Err("die Truppenstärke muss positiv sein".into());
+    }
+    let aboard = sieges
+        .embarked
+        .get(&fleet)
+        .map_or(0.0, |force| force.troops);
+    if strength > aboard + 1e-9 {
+        return Err(format!(
+            "an Bord von {} sind nur {:.1} Verbände",
+            squadron.name,
+            aboard.max(0.0)
+        ));
+    }
+    let strength = strength.min(aboard);
+    if sieges.pending.iter().any(|due| due.planet == planet) {
+        return Err(format!("die Übergabe von {} steht aus", target.name));
+    }
+    let besieger = sieges.siege(planet).map(|siege| siege.attacker);
+    let held = besieger.is_some_and(|attacker| {
+        orbit.control(diplomacy, &sieges.assign, planet, target.system, attacker)
+    });
+
+    if target.owner == Some(polity) {
+        // Verstärkung für die eigene Garnison.
+        if let (Some(attacker), true) = (besieger, held) {
+            return Err(format!(
+                "{} hält den Orbit über {}",
+                polities.get(attacker).name,
+                target.name
+            ));
+        }
+        let Sieges {
+            active,
+            defenses,
+            embarked,
+            ..
+        } = sieges;
+        let defense = &mut defenses[planet.index()];
+        let siege = active.get_mut(&planet);
+        if siege.as_ref().is_some_and(|siege| siege.surface_lost()) {
+            return Err(format!(
+                "die Oberfläche von {} hält der Belagerer",
+                target.name
+            ));
+        }
+        let Some(force) = embarked.get_mut(&fleet) else {
+            return Err(format!("an Bord von {} sind keine Truppen", squadron.name));
+        };
+        // Das Depot zählt in Tagen für die ganze Garnison: Wächst sie, reichen dieselben
+        // Vorräte kürzer; was die Truppe mitbringt, kommt hinzu, bis zum größten Depot.
+        let garrison = defense.militia + defense.regulars;
+        let stores = defense.depot * garrison;
+        let carried = force.supply * strength / force.troops;
+        let room = balance.depot_days_cap as f64 * (garrison + strength) - stores;
+        let unloaded = carried.min(room.max(0.0));
+        defense.depot = (stores + unloaded) / (garrison + strength);
+        defense.regulars += strength;
+        force.troops -= strength;
+        force.supply -= unloaded;
+        if let Some(siege) = siege {
+            // Der Maßstab der Garnison wächst mit ihr. In der Tiefe gestaffelt geht die
+            // Verstärkung in den Untergrund, soweit die Bunker noch Platz haben.
+            let room = (balance.deep_per_bunker * defense.bunkers as f64 - siege.deep).max(0.0);
+            let below = if defense.posture == Posture::Deep && !siege.zone_taken(ZoneKind::Center) {
+                strength.min(room)
+            } else {
+                0.0
+            };
+            siege.deep += below;
+            siege.garrison_start += strength;
+            siege.surface_start += strength - below;
+        }
+        embarked.retain(|_, force| force.troops > 0.0 || force.supply > 0.0);
+        return Ok(());
+    }
+
+    // Landung auf einer belagerten Welt.
+    if besieger != Some(polity) {
+        return Err(format!(
+            "{} wird nicht von der eigenen Gemeinschaft belagert",
+            target.name
+        ));
+    }
+    if !orbit
+        .besiegers(&sieges.assign, planet, target.system, polity)
+        .contains(&fleet)
+    {
+        return Err(format!("{} belagert {} nicht", squadron.name, target.name));
+    }
+    if !held {
+        return Err(format!("keine Orbitalhoheit über {}", target.name));
+    }
+    let Sieges {
+        active,
+        defenses,
+        embarked,
+        stats,
+        ..
+    } = sieges;
+    let defense = &defenses[planet.index()];
+    if defense.stations > 0.0 {
+        return Err(format!("Stationen halten den Orbit über {}", target.name));
+    }
+    let (Some(siege), Some(force)) = (active.get_mut(&planet), embarked.get_mut(&fleet)) else {
+        return Err(format!("an Bord von {} sind keine Truppen", squadron.name));
+    };
+    // Tag des letzten gerechneten Tagesschritts: Befehle des ersten Takts eines Tages
+    // gehen ihm voraus und gehören deshalb noch zum Vortag.
+    let day = tick.saturating_sub(1) / TICKS_PER_DAY;
+    let landing = land(siege, defense, strength, day, balance);
+    force.troops -= strength;
+    embarked.retain(|_, force| force.troops > 0.0 || force.supply > 0.0);
+    if landing.lost > 0.0 {
+        stats.lost_attackers += landing.lost;
+        weary(finance, polity, balance.wear_loss * landing.lost);
+    }
+    Ok(())
+}
+
+/// Der Besitzer übergibt eine belagerte eigene Welt. Dazu muss eine Besatzungstruppe des
+/// Belagerers zur Stelle sein: am Boden, oder an Bord seiner Flotten im Orbit; was am
+/// Boden fehlt, geht ohne Verluste an Land. Der Besitzwechsel folgt am nächsten
+/// Tagesabschluss, ohne Plünderung und mit milderer Besatzung.
+pub fn capitulate(
+    data: &GameData,
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    sieges: &mut Sieges,
+    orbit: &Orbit,
+    polity: PolityId,
+    planet: PlanetId,
+) -> Result<(), String> {
+    let target = known(galaxy, planet)?;
+    if target.owner != Some(polity) {
+        return Err(format!(
+            "{} gehört nicht der eigenen Gemeinschaft",
+            target.name
+        ));
+    }
+    let Some((attacker, army)) = sieges
+        .siege(planet)
+        .map(|siege| (siege.attacker, siege.army))
+    else {
+        return Err(format!("{} wird nicht belagert", target.name));
+    };
+    if sieges.pending.iter().any(|due| due.planet == planet) {
+        return Err(format!("die Übergabe von {} steht aus", target.name));
+    }
+    let squadron = orbit.squadron(
+        data,
+        diplomacy,
+        sieges,
+        planet,
+        target.system,
+        attacker,
+        polity,
+    );
+    // Wer übergibt, wehrt sich nicht: Truppen an Bord zählen, sobald der Belagerer den
+    // Orbit hält, auch wenn noch Stationen stehen.
+    let aboard = if squadron.view.control {
+        squadron.view.embarked.max(0.0)
+    } else {
+        0.0
+    };
+    let needed = occupation_force(target.population, &data.balance.siege);
+    if army + aboard <= 0.0 || army + aboard < needed {
+        return Err("niemand da, der die Übergabe annimmt".into());
+    }
+    let landed = (needed - army).clamp(0.0, aboard);
+    if let Some(siege) = sieges.active.get_mut(&planet) {
+        siege.army += landed;
+        siege.army_peak = siege.army_peak.max(siege.army);
+    }
+    take_troops(sieges, &squadron.fleets, landed);
+    sieges.pending.push(Conquest {
+        planet,
+        to: attacker,
+        outcome: Outcome::Capitulated,
+        sack: false,
+    });
     Ok(())
 }
 
@@ -356,9 +587,8 @@ pub fn peace_veto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::economy::Money;
+    use crate::siege::Embarked;
     use crate::siege::orbit::testing::{FOE, ME, Scene};
-    use crate::siege::{Embarked, Outcome, land};
 
     fn embark(scene: &mut Scene, fleet: u32, troops: f64, supply: f64) {
         scene
@@ -586,6 +816,354 @@ mod tests {
             assert!(market.demand_today[good.index()] >= 180.0 * amount - 1e-9);
         }
         assert!((market.stock[scarce.index()] - 0.25).abs() < 1e-9);
+    }
+
+    fn land_at(
+        scene: &mut Scene,
+        polity: PolityId,
+        fleet: u32,
+        planet: PlanetId,
+        strength: f64,
+        tick: u64,
+    ) -> Result<(), String> {
+        let state = &mut scene.state;
+        let orbit = Orbit::new(&mut state.fleets, &state.research);
+        land_troops(
+            &scene.data,
+            &state.galaxy,
+            &state.polities,
+            &state.diplomacy,
+            &mut state.finance,
+            &mut state.sieges,
+            &orbit,
+            polity,
+            FleetId(fleet),
+            planet,
+            strength,
+            tick,
+        )
+    }
+
+    /// Landet mitten am laufenden Tag.
+    fn land_now(
+        scene: &mut Scene,
+        polity: PolityId,
+        fleet: u32,
+        strength: f64,
+    ) -> Result<(), String> {
+        let tick = scene.day * TICKS_PER_DAY + 7;
+        land_at(scene, polity, fleet, scene.planet, strength, tick)
+    }
+
+    fn surrender(scene: &mut Scene, polity: PolityId) -> Result<(), String> {
+        let state = &mut scene.state;
+        let orbit = Orbit::new(&mut state.fleets, &state.research);
+        capitulate(
+            &scene.data,
+            &state.galaxy,
+            &state.diplomacy,
+            &mut state.sieges,
+            &orbit,
+            polity,
+            scene.planet,
+        )
+    }
+
+    #[test]
+    fn a_wave_lands_only_from_a_besieging_fleet_over_an_invested_planet() {
+        let mut scene = Scene::colony();
+        let name = scene.state.galaxy.planet(scene.planet).name.clone();
+        embark(&mut scene, 0, 10.0, 300.0);
+        // Ohne Belagerung keine Landung; der Datensatz entsteht am nächsten Morgen.
+        let reason = land_now(&mut scene, ME, 0, 4.0).unwrap_err();
+        assert_eq!(
+            reason,
+            format!("{name} wird nicht von der eigenen Gemeinschaft belagert")
+        );
+        scene.day();
+        // Nur was an Bord ist, nur in positiver Stärke, nur der Belagerer.
+        let reason = land_now(&mut scene, ME, 0, 10.5).unwrap_err();
+        assert!(reason.contains("sind nur 10.0 Verbände"), "{reason}");
+        let reason = land_now(&mut scene, ME, 0, 0.0).unwrap_err();
+        assert!(reason.contains("positiv"), "{reason}");
+        let reason = land_now(&mut scene, FOE, 0, 1.0).unwrap_err();
+        assert!(reason.contains("Flotte gehört einer anderen"), "{reason}");
+        // Stationen halten den Orbit: nicht eingeschlossen, keine Landung.
+        scene.state.sieges.defense_mut(scene.planet).stations = 0.5;
+        let reason = land_now(&mut scene, ME, 0, 4.0).unwrap_err();
+        assert_eq!(reason, format!("Stationen halten den Orbit über {name}"));
+        scene.state.sieges.defense_mut(scene.planet).stations = 0.0;
+        // Eine Flotte des Verteidigers im System: keine Orbitalhoheit.
+        let away = scene.fleet_system(1);
+        scene.place(1, scene.system);
+        let reason = land_now(&mut scene, ME, 0, 4.0).unwrap_err();
+        assert_eq!(reason, format!("keine Orbitalhoheit über {name}"));
+        scene.place(1, away);
+        // Eine Flotte, die den Planeten nicht belagert, landet nichts.
+        scene.state.sieges.assign.clear();
+        let reason = land_now(&mut scene, ME, 0, 4.0).unwrap_err();
+        assert!(
+            reason.ends_with(&format!("belagert {name} nicht")),
+            "{reason}"
+        );
+        scene.state.sieges.assign.insert(FleetId(0), scene.planet);
+
+        // Die Welle landet. Die Kolonie hat keine Geschütze: Alle kommen an. Der Nachschub
+        // bleibt an Bord, bis der Tagesschritt ihn mit Orbitalhoheit zur Truppe bringt.
+        land_now(&mut scene, ME, 0, 4.0).unwrap();
+        let siege = scene.siege();
+        assert_eq!((siege.army, siege.army_peak), (4.0, 4.0));
+        assert_eq!(siege.landed_day, Some(scene.day));
+        assert_eq!(siege.army_supply, 0.0);
+        let aboard = &scene.state.sieges.embarked[&FleetId(0)];
+        assert_eq!((aboard.troops, aboard.supply), (6.0, 300.0));
+        assert_eq!(scene.state.sieges.stats.lost_attackers, 0.0);
+        scene.day();
+        assert_eq!(
+            scene.siege().army_supply,
+            300.0 - 4.0 * scene.data.balance.siege.army_idle_supply
+        );
+        assert_eq!(scene.state.sieges.embarked[&FleetId(0)].supply, 0.0);
+        // Ein Befehl im ersten Takt eines Tages geht dessen Tagesschritt voraus: Die
+        // Landung zählt noch zum Vortag, wie jede zwischen zwei Tagesschritten.
+        let tick = scene.day * TICKS_PER_DAY;
+        let planet = scene.planet;
+        land_at(&mut scene, ME, 0, planet, 6.0, tick).unwrap();
+        assert_eq!(scene.siege().landed_day, Some(scene.day - 1));
+        assert_eq!(scene.siege().army, 10.0);
+        // Alle sind von Bord; ohne Nachschub trägt die Flotte nichts mehr.
+        assert!(!scene.state.sieges.embarked.contains_key(&FleetId(0)));
+        assert_eq!(
+            scene
+                .state
+                .sieges
+                .find_anomaly(scene.state.galaxy.planets.len()),
+            None
+        );
+    }
+
+    #[test]
+    fn active_guns_intercept_a_share_of_the_wave() {
+        let mut scene = Scene::new();
+        let balance = scene.data.balance.siege.clone();
+        embark(&mut scene, 0, 10.0, 0.0);
+        scene.day();
+        let guns = scene.state.sieges.defense(scene.planet).guns as f64;
+        assert!(guns > 0.0, "die Hauptwelt hat Geschütze");
+        let weariness = scene.state.finance.polity(ME).war_weariness;
+        land_now(&mut scene, ME, 0, 10.0).unwrap();
+        let lost = 10.0 * (balance.landing_loss * guns).min(balance.landing_loss_cap);
+        assert!(lost > 0.0);
+        let siege = scene.siege();
+        assert!((siege.army - (10.0 - lost)).abs() < 1e-9);
+        // Die Abgefangenen sind verloren und drücken auf die Stimmung daheim.
+        assert!((scene.state.sieges.stats.lost_attackers - lost).abs() < 1e-9);
+        let gained = scene.state.finance.polity(ME).war_weariness - weariness;
+        assert!((gained - balance.wear_loss * lost).abs() < 1e-9);
+        assert!(!scene.state.sieges.embarked.contains_key(&FleetId(0)));
+        // Am Tag danach stehen die Schiffe im niedrigen Orbit: Die Geschütze treffen sie.
+        scene.day();
+        assert!(scene.siege().report.hull > 0.0);
+        assert!(scene.ships(0)[0].hull < 1.0);
+
+        // Schweigen die Geschütze, kommt die ganze Welle an.
+        let mut scene = Scene::new();
+        embark(&mut scene, 0, 10.0, 0.0);
+        scene.day();
+        scene.state.sieges.defense_mut(scene.planet).hold_fire = true;
+        land_now(&mut scene, ME, 0, 10.0).unwrap();
+        assert_eq!(scene.siege().army, 10.0);
+        assert_eq!(scene.state.sieges.stats.lost_attackers, 0.0);
+    }
+
+    #[test]
+    fn troops_landed_on_an_own_world_join_the_garrison_and_fill_its_stores() {
+        let mut scene = Scene::new();
+        let balance = scene.data.balance.siege.clone();
+        let (planet, system) = (scene.planet, scene.system);
+        let name = scene.state.galaxy.planet(planet).name.clone();
+        // Die Flotte des Verteidigers bringt Verstärkung und Nachschub.
+        embark(&mut scene, 1, 6.0, 900.0);
+        let reason = land_now(&mut scene, FOE, 1, 2.0).unwrap_err();
+        assert!(reason.contains("liegt nicht im System"), "{reason}");
+        scene.day();
+        let siege = scene.siege().clone();
+        let before = scene.state.sieges.defense(planet).clone();
+        scene.place(1, system);
+        // Sammelt sie sich noch, hält der Belagerer den Orbit: keine Landung.
+        scene.regroup(1, 99);
+        let reason = land_now(&mut scene, FOE, 1, 2.0).unwrap_err();
+        let besieger = scene.state.polities.get(ME).name.clone();
+        assert_eq!(reason, format!("{besieger} hält den Orbit über {name}"));
+        scene.ready(1);
+        // Einsatzbereit macht sie ihm den Orbit streitig, und die Truppen gehen an Land:
+        // Sie zählen zur Garnison und zu ihrem Maßstab, ihr Anteil am Nachschub zum Depot.
+        land_now(&mut scene, FOE, 1, 2.0).unwrap();
+        let defense = scene.state.sieges.defense(planet);
+        assert_eq!(defense.regulars, before.regulars + 2.0);
+        let garrison = before.militia + before.regulars;
+        let depot = (before.depot * garrison + 300.0) / (garrison + 2.0);
+        assert!((defense.depot - depot).abs() < 1e-9, "{}", defense.depot);
+        let aboard = &scene.state.sieges.embarked[&FleetId(1)];
+        assert_eq!((aboard.troops, aboard.supply), (4.0, 600.0));
+        let now = scene.siege();
+        assert_eq!(now.garrison_start, siege.garrison_start + 2.0);
+        assert_eq!(now.surface_start, siege.surface_start + 2.0);
+        assert_eq!(now.deep, 0.0);
+        // In der Tiefe gestaffelt geht die Verstärkung in die Bunker, soweit Platz ist.
+        let defense = scene.state.sieges.defense_mut(planet);
+        defense.bunkers = 1;
+        defense.posture = Posture::Deep;
+        let room = balance.deep_per_bunker;
+        scene.state.sieges.active.get_mut(&planet).unwrap().deep = room - 1.5;
+        land_now(&mut scene, FOE, 1, 4.0).unwrap();
+        let now = scene.siege();
+        assert_eq!(now.deep, room);
+        assert_eq!(now.surface_start, siege.surface_start + 2.0 + 2.5);
+        assert_eq!(now.garrison_start, siege.garrison_start + 6.0);
+        assert!(!scene.state.sieges.embarked.contains_key(&FleetId(1)));
+        assert_eq!(
+            scene
+                .state
+                .sieges
+                .find_anomaly(scene.state.galaxy.planets.len()),
+            None
+        );
+        // Hält der Belagerer die Oberfläche, landet dort niemand mehr.
+        embark(&mut scene, 1, 1.0, 0.0);
+        for zone in &mut scene.state.sieges.active.get_mut(&planet).unwrap().zones {
+            zone.taken = true;
+        }
+        let reason = land_now(&mut scene, FOE, 1, 1.0).unwrap_err();
+        assert_eq!(
+            reason,
+            format!("die Oberfläche von {name} hält der Belagerer")
+        );
+
+        // Ohne Belagerung: Truppen und Nachschub kommen heim. Das Depot fasst nicht mehr
+        // als das größte, das sich planen lässt; der Rest bleibt an Bord.
+        let mut scene = Scene::new();
+        let home = scene.state.polities.get(ME).capital.unwrap();
+        let system = scene.state.galaxy.planet(home).system;
+        scene.place(0, system);
+        scene.state.sieges.assign.clear();
+        embark(&mut scene, 0, 5.0, 10_000.0);
+        let before = scene.state.sieges.defense(home).clone();
+        let tick = 7;
+        land_at(&mut scene, ME, 0, home, 5.0, tick).unwrap();
+        let defense = scene.state.sieges.defense(home);
+        assert_eq!(defense.regulars, before.regulars + 5.0);
+        assert_eq!(defense.depot, balance.depot_days_cap as f64);
+        let garrison = before.militia + before.regulars;
+        let unloaded = balance.depot_days_cap as f64 * (garrison + 5.0) - before.depot * garrison;
+        let aboard = &scene.state.sieges.embarked[&FleetId(0)];
+        assert_eq!(aboard.troops, 0.0);
+        assert!((aboard.supply - (10_000.0 - unloaded)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_world_is_handed_over_only_to_an_occupation_force() {
+        let mut scene = Scene::colony();
+        let balance = scene.data.balance.siege.clone();
+        let planet = scene.planet;
+        let name = scene.state.galaxy.planet(planet).name.clone();
+        let population = scene.state.galaxy.planet(planet).population;
+        let needed = occupation_force(population, &balance);
+        // Nur der Besitzer übergibt, und nur eine belagerte Welt.
+        let reason = surrender(&mut scene, ME).unwrap_err();
+        assert_eq!(
+            reason,
+            format!("{name} gehört nicht der eigenen Gemeinschaft")
+        );
+        let reason = surrender(&mut scene, FOE).unwrap_err();
+        assert_eq!(reason, format!("{name} wird nicht belagert"));
+        scene.day();
+        // Ohne Besatzungstruppe nimmt niemand die Übergabe an.
+        let reason = surrender(&mut scene, FOE).unwrap_err();
+        assert_eq!(reason, "niemand da, der die Übergabe annimmt");
+        embark(&mut scene, 0, 0.5 * needed, 0.0);
+        let reason = surrender(&mut scene, FOE).unwrap_err();
+        assert_eq!(reason, "niemand da, der die Übergabe annimmt");
+        // Truppen an Bord zählen nur, solange der Belagerer den Orbit hält.
+        embark(&mut scene, 0, needed + 1.0, 40.0);
+        let away = scene.fleet_system(1);
+        scene.place(1, scene.system);
+        let reason = surrender(&mut scene, FOE).unwrap_err();
+        assert_eq!(reason, "niemand da, der die Übergabe annimmt");
+        scene.place(1, away);
+
+        let militia = scene.state.sieges.defense(planet).militia;
+        assert!(militia > 0.0, "die Miliz steht noch");
+        surrender(&mut scene, FOE).unwrap();
+        // Was zur Besatzung fehlte, ist ohne Verluste gelandet; der Besitzwechsel steht aus.
+        assert!((scene.siege().army - needed).abs() < 1e-9);
+        assert!((scene.state.sieges.embarked[&FleetId(0)].troops - 1.0).abs() < 1e-9);
+        assert_eq!(
+            scene.state.sieges.pending,
+            vec![Conquest {
+                planet,
+                to: ME,
+                outcome: Outcome::Capitulated,
+                sack: false,
+            }]
+        );
+        let reason = surrender(&mut scene, FOE).unwrap_err();
+        assert_eq!(reason, format!("die Übergabe von {name} steht aus"));
+        let reason = land_now(&mut scene, ME, 0, 1.0).unwrap_err();
+        assert_eq!(reason, format!("die Übergabe von {name} steht aus"));
+
+        // Am nächsten Tagesabschluss gehört die Welt dem Belagerer, mit milderer Besatzung.
+        scene.day();
+        let state = &scene.state;
+        assert_eq!(state.galaxy.planet(planet).owner, Some(ME));
+        assert!(state.sieges.active.is_empty() && state.sieges.pending.is_empty());
+        let stats = &state.sieges.stats;
+        assert_eq!((stats.capitulated, stats.conquests()), (1, 1));
+        assert_eq!((stats.lost_attackers, stats.lost_defenders), (0.0, 0.0));
+        let defense = state.sieges.defense(planet);
+        assert_eq!(defense.occupation, balance.capitulation_mercy);
+        assert_eq!(defense.occupied_from, Some(FOE));
+        assert!((defense.regulars - needed).abs() < 1e-9);
+        assert_eq!(defense.scar, 0.0);
+        let told = state
+            .chronicle
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("übergeben") && entry.text.contains("besetzt"));
+        assert!(told, "die Chronik nennt die Übergabe");
+    }
+
+    #[test]
+    fn the_handover_of_a_capital_stays_pending_after_a_capitulation() {
+        let mut scene = Scene::new();
+        let planet = scene.planet;
+        let needed = occupation_force(
+            scene.state.galaxy.planet(planet).population,
+            &scene.data.balance.siege,
+        );
+        embark(&mut scene, 0, 17.0, 0.0);
+        assert!(needed < 17.0);
+        scene.day();
+        surrender(&mut scene, FOE).unwrap();
+        let due = scene.state.sieges.pending.clone();
+        assert_eq!(due.len(), 1);
+        let depot = scene.state.sieges.defense(planet).depot;
+        for _ in 0..3 {
+            scene.day();
+        }
+        // Die Hauptwelt bleibt beim Verteidiger, das Urteil steht, die Belagerung ruht.
+        assert_eq!(scene.state.galaxy.planet(planet).owner, Some(FOE));
+        assert_eq!(scene.state.sieges.pending, due);
+        let siege = scene.siege();
+        assert!(
+            siege
+                .report
+                .blocked
+                .contains(crate::siege::Blocked::Handover)
+        );
+        assert!((siege.army - needed).abs() < 1e-9);
+        assert_eq!(scene.state.sieges.defense(planet).depot, depot);
+        assert_eq!(scene.state.sieges.stats.conquests(), 0);
     }
 
     #[test]

@@ -708,6 +708,11 @@ pub(super) mod testing {
             self.state.fleets.list[fleet].regroup_until = Some(until);
         }
 
+        /// Die Flotte hat sich gesammelt und ist wieder einsatzbereit.
+        pub fn ready(&mut self, fleet: usize) {
+            self.state.fleets.list[fleet].regroup_until = None;
+        }
+
         /// Gibt einer Flotte den Blockadeauftrag.
         pub fn order_blockade(&mut self, fleet: usize) {
             self.state.fleets.list[fleet].stance = Stance::Blockade;

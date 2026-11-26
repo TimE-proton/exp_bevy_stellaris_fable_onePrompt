@@ -29,7 +29,8 @@ pub use conquest::{HandOverTerms, hand_over, mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
 pub use orders::{
-    begin_siege, embark_troops, lift_siege, peace_veto, set_garrison_orders, set_siege_orders,
+    armament_allowance, begin_siege, capitulate, embark_troops, land_troops, lift_siege,
+    peace_veto, set_garrison_orders, set_siege_orders,
 };
 pub use plugin::SiegePlugin;
 pub use step::{
