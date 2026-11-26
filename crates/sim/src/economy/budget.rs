@@ -157,6 +157,17 @@ impl BudgetMonth {
             .sum()
     }
 
+    /// Was die Ansprüche vor Rücklage und Ausschüttung zusammen verlangt haben. Liegt das
+    /// über den Einnahmen, trägt der Monat seine Ansprüche nicht: Er lebt von der Kasse,
+    /// oder es wird gekürzt.
+    pub fn claimed(&self) -> Money {
+        self.lines
+            .iter()
+            .filter(|(claim, _)| claim.is_spending())
+            .map(|(_, line)| line.wanted)
+            .sum()
+    }
+
     /// Was die Ansprüche verlangt, aber nicht bekommen haben.
     pub fn unpaid(&self) -> Money {
         self.lines
