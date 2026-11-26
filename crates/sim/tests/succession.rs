@@ -2040,16 +2040,29 @@ fn random_upheavals_keep_every_rule() {
 
 // --- 8. Determinismus -----------------------------------------------------------------------
 
-/// Eine Partie, in der nach zwei Jahren hintereinander alle vier Vorgänge geschehen.
-fn eventful(seed: u64) -> Headless {
+/// Eine Partie, in der nach zwei Jahren ein Gefecht läuft: Krieg zwischen der ersten und
+/// der vierten Gemeinschaft, die Flotte der ersten liegt im Heimatsystem der vierten.
+fn embattled(seed: u64) -> Headless {
+    let (a, d) = (PolityId(0), PolityId(3));
     let mut sim = observer(seed);
     sim.run_days(2 * DAYS_PER_YEAR);
+    sim.issue(a, SimCommand::DeclareWar { target: d });
+    let system = sim.galaxy().planet(capital(&sim, d)).system;
+    sim.world_mut().resource_mut::<Fleets>().list[a.index()].system = system;
+    sim.run_days(3);
+    assert!(battles(&sim).in_system(system).is_some());
+    sim
+}
+
+/// Dieselbe Partie, in der mitten im Gefecht alle vier Vorgänge geschehen.
+fn eventful(seed: u64) -> Headless {
+    let mut sim = embattled(seed);
     upheaval(&mut sim);
     sim
 }
 
-/// Alle vier Vorgänge auf einmal: Gründung, Übertragung unter Zwang, friedliches Ende,
-/// Unterstellung.
+/// Alle vier Vorgänge auf einmal: Gründung, Übertragung unter Zwang, erzwungenes Ende
+/// (die Flotte der Beendeten steht im Gefecht), Unterstellung.
 fn upheaval(sim: &mut Headless) {
     let tick = sim.clock().tick;
     let (a, b, c, d) = (PolityId(0), PolityId(1), PolityId(2), PolityId(3));
@@ -2058,7 +2071,7 @@ fn upheaval(sim: &mut Headless) {
     let taken = colonies(sim, b)[0];
     sim.succession(|succession| succession.transfer_planet(taken, c, forced_terms(c), tick))
         .unwrap();
-    sim.succession(|succession| succession.absorb(d, a, Path::Joined, tick))
+    sim.succession(|succession| succession.absorb(d, a, Path::Forced, tick))
         .unwrap();
     sim.succession(|succession| succession.subordinate(b, c, false, tick))
         .unwrap();
@@ -2073,13 +2086,13 @@ fn determinism() {
     assert_ne!(first.hash(), eventful(15).hash());
     assert_ne!(
         first.hash(),
-        {
-            let mut plain = observer(14);
-            plain.run_days(2 * DAYS_PER_YEAR);
-            plain.hash()
-        },
+        embattled(14).hash(),
         "die Eingriffe haben die Welt verändert"
     );
+    // Das Gefecht läuft noch, bis der Rechner es einstellt: Die Partie braucht jeden Takt.
+    assert_eq!(battles(&first).active.len(), 1);
+    assert!(sim::needs_fine_ticks(first.world()));
+    assert_sound(&first, "unmittelbar nach den Eingriffen");
 
     // Speichern und Laden unmittelbar nach den Eingriffen stellt den Zustand genau her.
     let text = first.save().to_ron().unwrap();
@@ -2099,4 +2112,9 @@ fn determinism() {
     assert_eq!(loaded.hash(), first.hash());
     assert_sound(&first, "400 Tage nach den Eingriffen");
     assert_eq!(first.polities().alive().count(), 6);
+    assert!(battles(&first).active.is_empty());
+    assert_eq!(
+        battles(&first).reports.last().map(|report| report.outcome),
+        Some(BattleOutcome::CalledOff)
+    );
 }
