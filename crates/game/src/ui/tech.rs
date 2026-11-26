@@ -324,8 +324,8 @@ fn budget(
     if entry.budget_share > 0.0 && entry.target.is_some() && income > 0.0 && spent <= 0.0 {
         ui.label(
             detail(
-                "Im letzten Monat floss kein Geld in die Forschung: Die Staatskasse lag nicht \
-                 über ihrer Rücklage.",
+                "Im letzten Monat floss kein Geld in die Forschung: Es gab kein Ziel, oder die \
+                 Staatskasse lag nicht über ihrer Rücklage.",
             )
             .color(WARN),
         );
