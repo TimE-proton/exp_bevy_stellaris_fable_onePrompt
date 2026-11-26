@@ -802,6 +802,16 @@ fn last_planet() {
     assert!(battles(&sim).active.is_empty());
     let report = battles(&sim).reports.last().expect("eine Bilanz");
     assert_eq!(report.outcome, BattleOutcome::CalledOff);
+    // Die aufgelöste Partei steht noch in der Bilanz, der Erbin zugerechnet, aber ohne
+    // Verlustwert: Fremde Verluste lastet das Ende des Gefechts niemandem an.
+    let ghost = report
+        .sides
+        .iter()
+        .find(|side| side.fleet == Some(theirs))
+        .expect("die aufgelöste Flotte war Partei");
+    assert_eq!((ghost.owner, ghost.lost_value), (a, 0.0));
+    assert!(!ghost.held_field);
+    assert!(report.sides.iter().all(|side| side.owner == a));
     assert!(fleets(&sim).list[ours.index()].alive);
     assert!(!fleets(&sim).list[ours.index()].in_battle);
     assert_sound(&sim, "am Tag nach dem Ende");

@@ -6,13 +6,13 @@
 //! ist die Struktur erschöpfend zerlegt: Ein später ergänztes Feld lässt diese Datei nicht
 //! mehr übersetzen, statt stillschweigend beim alten Besitzer zu bleiben.
 
-use super::{Battles, BuildOrder, Fleet, Fleets};
+use super::{Battles, BuildOrder, Debris, Fleet, Fleets};
 use crate::battle::{Battle, ShipStatus};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
-use crate::ids::{PlanetId, PolityId};
+use crate::ids::{PlanetId, PolityId, SystemId};
 use crate::polity::Polities;
 
 /// Bringt die Listen je Gemeinschaft auf `count` Einträge: zu Spielbeginn für alle, bei
@@ -155,6 +155,8 @@ pub(crate) fn pass_fleets(
 /// angefangene Bauten sind fort; wer im Gefecht stand, verlässt das Feld, ohne dass es als
 /// Verlust zählt. Die Parteien bleiben bis zum Ende ihres Gefechts in dessen Bilanz stehen
 /// und werden `into` zugerechnet, damit nichts mehr auf die beendete Gemeinschaft zeigt.
+/// Was sie in dem Gefecht schon verloren hatten, liegt sofort als Trümmer im System und
+/// wird der Erbin am Ende des Gefechts nicht als eigener Verlust angerechnet.
 /// Gibt die Zahl der aufgelösten Flotten und der gestrichenen Aufträge zurück.
 pub(crate) fn dissolve_fleets(
     fleets: &mut Fleets,
@@ -162,8 +164,10 @@ pub(crate) fn dissolve_fleets(
     data: &GameData,
     from: PolityId,
     into: PolityId,
+    tick: u64,
 ) -> (usize, usize) {
     let mut dissolved = 0;
+    let mut wreckage: Vec<(SystemId, f32)> = Vec::new();
     for fleet in &mut fleets.list {
         if fleet.owner != from || !fleet.alive {
             continue;
@@ -172,10 +176,13 @@ pub(crate) fn dissolve_fleets(
             .battle
             .and_then(|id| battles.active.iter_mut().find(|battle| battle.id == id))
         {
-            leave_field(battle, fleet);
+            wreckage.push((battle.system, leave_field(battle, fleet)));
         }
         fleet.ships.clear();
         dissolved += 1;
+    }
+    for (system, amount) in wreckage {
+        add_debris(battles, system, amount, tick);
     }
     // Eine Flotte ohne Schiffe besteht nicht mehr: weder im Gefecht noch auf dem Marsch.
     fleets.refresh(data);
@@ -186,14 +193,15 @@ pub(crate) fn dissolve_fleets(
 }
 
 /// Nimmt die Schiffe einer Flotte aus ihrem laufenden Gefecht: Sie gelten als dem Feld
-/// entkommen, ihre Geschosse im Flug verfallen.
-fn leave_field(battle: &mut Battle, fleet: &Fleet) {
+/// entkommen, ihre Geschosse im Flug verfallen. Gibt den Bauwert zurück, den die Partei in
+/// dem Gefecht schon verloren hatte; er steht danach nicht mehr in ihrer Bilanz.
+fn leave_field(battle: &mut Battle, fleet: &Fleet) -> f32 {
     let Some(side) = battle
         .combatants
         .iter()
         .position(|combatant| combatant.fleet == Some(fleet.id))
     else {
-        return;
+        return 0.0;
     };
     let combatant = &mut battle.combatants[side];
     for ship in &mut battle.ships {
@@ -203,6 +211,31 @@ fn leave_field(battle: &mut Battle, fleet: &Fleet) {
         }
     }
     battle.shots.retain(|shot| shot.side as usize != side);
+    std::mem::take(&mut combatant.lost_value)
+}
+
+/// Legt Trümmer in ein System: ein Feld je System, aufsteigend nach System.
+fn add_debris(battles: &mut Battles, system: SystemId, amount: f32, tick: u64) {
+    if amount <= 0.0 {
+        return;
+    }
+    match battles
+        .debris
+        .binary_search_by_key(&system, |entry| entry.system)
+    {
+        Ok(found) => {
+            battles.debris[found].amount += amount;
+            battles.debris[found].tick = tick;
+        }
+        Err(place) => battles.debris.insert(
+            place,
+            Debris {
+                system,
+                amount,
+                tick,
+            },
+        ),
+    }
 }
 
 /// Parteien laufender Gefechte, die für `from` kämpften, kämpfen für `into`.
@@ -490,8 +523,18 @@ mod tests {
         polities.get_mut(from).alive = false;
         assert!(reference_to_ended(&fleets, &battles, &polities).is_some());
 
+        // Die Partei hat in dem Gefecht schon ein Schiff verloren.
+        let system = battles.active[0].system;
+        battles.active[0].combatants[1].lost[1] = 1;
+        battles.active[0].combatants[1].lost_value = 500.0;
+        battles.debris.push(Debris {
+            system,
+            amount: 40.0,
+            tick: 3,
+        });
+
         assert_eq!(
-            dissolve_fleets(&mut fleets, &mut battles, &data, from, into),
+            dissolve_fleets(&mut fleets, &mut battles, &data, from, into, 900),
             (2, 1)
         );
         for index in [1, 2] {
@@ -512,12 +555,18 @@ mod tests {
                 .filter(|ship| ship.side == 1)
                 .all(|ship| ship.status == ShipStatus::Escaped)
         );
-        assert_eq!(battle.combatants[1].lost, [0; 6]);
+        assert_eq!(battle.combatants[1].lost, [0, 1, 0, 0, 0, 0]);
         assert_eq!(
             battle.combatants[1].escaped.iter().sum::<u32>() as usize,
             fielded
         );
         assert_eq!(battle.combatants[1].owner, into);
+        // Was sie zuvor verloren hatte, liegt als Trümmer im System und steht nicht mehr in
+        // ihrer Bilanz: Der Erbin, der die Partei jetzt zugerechnet wird, soll das Ende
+        // des Gefechts keine fremden Verluste anlasten.
+        assert_eq!(battle.combatants[1].lost_value, 0.0);
+        assert_eq!(battles.debris_in(system), 540.0);
+        assert_eq!(battles.debris[0].tick, 900);
         assert!(!battle.is_fighting(1) && battle.is_fighting(0));
         assert_eq!(fleets.find_anomaly(&data), None);
         assert_eq!(battles.find_anomaly(&fleets), None);

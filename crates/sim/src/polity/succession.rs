@@ -865,7 +865,7 @@ impl<'a> Succession<'a> {
         }
 
         let moved_fleets = if forced {
-            fleet_succession::dissolve_fleets(fleets, battles, data, from, into).0
+            fleet_succession::dissolve_fleets(fleets, battles, data, from, into, tick).0
         } else {
             fleet_succession::pass_fleets(fleets, battles, polities, from, into)
         };
