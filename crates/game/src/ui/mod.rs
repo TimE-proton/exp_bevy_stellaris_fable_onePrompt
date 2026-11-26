@@ -14,6 +14,7 @@ pub(crate) mod testing;
 pub use panels::{SimRefs, UiAction};
 
 use crate::battle_view::BattleViewShown;
+use crate::battle_view::campaign::{BattleMarkers, WatchBattle};
 use crate::battle_view::practice::{PracticeSetup, StartPractice};
 use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
@@ -188,6 +189,8 @@ pub struct PracticeParams<'w> {
     setup: ResMut<'w, PracticeSetup>,
     start: MessageWriter<'w, StartPractice>,
     battle_view: Res<'w, BattleViewShown>,
+    markers: Res<'w, BattleMarkers>,
+    watch: MessageWriter<'w, WatchBattle>,
 }
 
 pub struct UiPlugin;
@@ -286,6 +289,7 @@ fn draw_ui(
                 &mut ui_state,
                 &speed,
                 &selection,
+                &practice.markers.0,
                 &mut actions,
             );
         }
@@ -345,6 +349,9 @@ fn draw_ui(
                         notice.info(COMMAND_WAITS);
                     }
                 }
+            }
+            UiAction::WatchBattle(battle) => {
+                practice.watch.write(WatchBattle(battle));
             }
             UiAction::Quit => {
                 exit.write(AppExit::Success);

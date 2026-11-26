@@ -388,3 +388,402 @@ fn a_battle_that_is_only_shown_does_not_jump_back_and_forth() {
         assert_eq!(frame.poses[0].0, super::to_world(battle.ships[0].pos));
     }
 }
+
+// --- Gefechte der Partie, wie die Simulation sie führt ---
+
+mod campaign {
+    use super::*;
+    use crate::battle_view::campaign::{WATCH, WatchBattle, WatchedBattle, result_of};
+    use crate::battle_view::hud::{BACK_TO_MAP, RESULT_TITLE};
+    use crate::map::FocusSystem;
+    use crate::session::{Notice, SessionRequest};
+    use sim::battle::Doctrine;
+    use sim::clock::SimClock;
+    use sim::command::{CommandLog, CommandOutcome, CommandQueue, CommandSource, SimCommand};
+    use sim::fleet::{Battles, Fleets};
+    use sim::galaxy::Galaxy;
+    use sim::ids::{BattleId, FleetId, SystemId};
+    use sim::polity::Polities;
+    use sim::state::SimConfig;
+
+    fn view(game: &TestGame) -> ViewState {
+        *game.resource::<State<ViewState>>().get()
+    }
+
+    fn run(game: &mut TestGame, level: usize, frames: usize) {
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level,
+        };
+        game.frames(frames);
+        game.world_mut().resource_mut::<SimSpeed>().paused = true;
+        game.frames(3);
+    }
+
+    fn run_until(game: &mut TestGame, limit: usize, what: &str, done: impl Fn(&TestGame) -> bool) {
+        *game.world_mut().resource_mut::<SimSpeed>() = SimSpeed {
+            paused: false,
+            level: 5,
+        };
+        for _ in 0..limit {
+            if done(game) {
+                game.world_mut().resource_mut::<SimSpeed>().paused = true;
+                game.frames(3);
+                return;
+            }
+            game.frames(1);
+        }
+        panic!("nach {limit} Frames noch nicht: {what}");
+    }
+
+    fn home_of(game: &TestGame, polity: PolityId) -> SystemId {
+        let capital = game.resource::<Polities>().get(polity).capital.unwrap();
+        game.resource::<Galaxy>().planet(capital).system
+    }
+
+    /// Eine Partie, in der die Flotte des Spielers im Heimatsystem des nächsten Nachbarn
+    /// im Gefecht steht: Spiel, Spieler, eigene Flotte, Gefecht.
+    fn war() -> (TestGame, PolityId, FleetId, BattleId) {
+        let mut game = TestGame::start("--seed 3");
+        game.frames(4);
+        let me = game.resource::<SimConfig>().player.expect("Spieler");
+        let mine = game.resource::<Fleets>().of(me).next().expect("Flotte").id;
+        let home = home_of(&game, me);
+        let enemy = {
+            let galaxy = game.resource::<Galaxy>();
+            game.resource::<Polities>()
+                .alive()
+                .filter(|polity| polity.id != me)
+                .map(|polity| {
+                    let path = galaxy
+                        .shortest_path(home, home_of(&game, polity.id), |_| true)
+                        .expect("Weg");
+                    (polity.id, galaxy.path_length(&path))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("eine andere Gemeinschaft")
+                .0
+        };
+        let front = home_of(&game, enemy);
+        for command in [
+            SimCommand::DeclareWar { target: enemy },
+            SimCommand::MoveFleet {
+                fleet: mine,
+                to: front,
+            },
+        ] {
+            game.world_mut().resource_mut::<CommandQueue>().push(
+                me,
+                CommandSource::Player,
+                command,
+            );
+        }
+        run_until(&mut game, 4000, "Gefecht", |game| {
+            game.resource::<Fleets>().get(mine).unwrap().in_battle
+        });
+        let battle = game
+            .resource::<Battles>()
+            .of_fleet(mine)
+            .expect("die Flotte steht im Gefecht")
+            .0
+            .id;
+        (game, me, mine, battle)
+    }
+
+    /// Was die Ansicht zeigt, ist das Gefecht der Simulation: derselbe Takt, dieselben
+    /// Schiffe in demselben Zustand, und je Schiff auf dem Feld ein Rumpf in der Szene.
+    fn assert_view_shows_the_simulation(game: &mut TestGame, id: BattleId, when: &str) {
+        let real = game.resource::<Battles>().get(id).expect("Gefecht läuft");
+        let shown = shown_battle(game);
+        assert_eq!(shown.id, real.id);
+        assert_eq!(shown.tick, real.tick, "Takt {when}");
+        assert_eq!(shown.ships.len(), real.ships.len(), "Schiffe {when}");
+        assert_eq!(
+            sim::hash::hash_value(shown),
+            sim::hash::hash_value(real),
+            "die Ansicht weicht {when} vom Gefecht der Simulation ab"
+        );
+        assert_scene_matches_feed(game, when);
+    }
+
+    #[test]
+    fn a_campaign_battle_is_watched_commanded_left_and_concluded() {
+        let (mut game, me, mine, id) = war();
+        let system = game.resource::<Battles>().get(id).unwrap().system;
+        let place = game.resource::<Galaxy>().system(system).name.clone();
+        // Der Spieler erfährt vom Gefecht.
+        let notice = game.resource::<Notice>().text.clone();
+        assert!(
+            notice.contains(&format!(
+                "Bei {place} beginnt ein Gefecht mit eigenen Schiffen"
+            )),
+            "{notice}"
+        );
+        assert_eq!(view(&game), ViewState::Galaxy);
+
+        // --- Von der Marke auf der Karte in die Schlachtansicht ---
+        game.send(FocusSystem(system));
+        game.frames(4);
+        game.click_on(&format!("{WATCH}: {place}"));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        assert!(game.resource::<BattleViewShown>().0);
+        assert_eq!(game.resource::<WatchedBattle>().id, id);
+        let info = game.resource::<BattleFeed>().info.clone();
+        assert_eq!(info.title, format!("Gefecht bei {place}"));
+        let own = info.player_side.expect("der Spieler führt eine Partei");
+        assert_eq!(
+            game.resource::<Battles>().get(id).unwrap().combatants[own].fleet,
+            Some(mine)
+        );
+        assert!(
+            !info.can_restart,
+            "ein Gefecht der Partie beginnt nicht von vorn"
+        );
+        assert_view_shows_the_simulation(&mut game, id, "beim Öffnen");
+
+        // --- Die Ansicht folgt der Simulation über mehrere Tage, mit der Uhr der Partie ---
+        let per_day = sim::TICKS_PER_DAY;
+        for round in 0..4 {
+            let (clock, tick) = (game.resource::<SimClock>().tick, shown_battle(&game).tick);
+            run(&mut game, 2, 40);
+            let passed = game.resource::<SimClock>().tick - clock;
+            assert!(passed >= per_day, "in Runde {round} verging kein Tag");
+            // Ein Takt der Partie ist ein Takt des Gefechts: kein eigener Zeitlauf.
+            assert_eq!(shown_battle(&game).tick - tick, passed);
+            assert_view_shows_the_simulation(&mut game, id, &format!("in Runde {round}"));
+        }
+        // Die Kopfleiste sagt, wie Gefechtszeit und Kalender zusammenhängen.
+        let calendar = game.resource::<BattleFeed>().info.calendar.clone();
+        assert!(
+            calendar.starts_with(&game.resource::<SimClock>().date().to_string())
+                && calendar.contains("ein Kalendertag = 2,0 s Gefechtszeit"),
+            "{calendar}"
+        );
+        assert!(game.text(&calendar).is_some());
+        // In der Pause der Partie steht auch das Gefecht.
+        let tick = shown_battle(&game).tick;
+        game.frames(20);
+        assert_eq!(shown_battle(&game).tick, tick);
+        assert_eq!(game.resource::<Battles>().get(id).unwrap().tick, tick);
+
+        // --- Ein Befehl aus der Ansicht erreicht die Simulation ---
+        let before = game.resource::<Battles>().get(id).unwrap().combatants[own].clone();
+        let wanted = Doctrine::ALL
+            .into_iter()
+            .find(|doctrine| *doctrine != before.doctrine)
+            .unwrap();
+        let entries = game.resource::<CommandLog>().entries.len();
+        game.click_on(wanted.label());
+        // Die Zeit steht: Der Befehl wartet, und der Spieler erfährt es.
+        assert_eq!(game.resource::<CommandLog>().entries.len(), entries);
+        assert_eq!(game.resource::<Notice>().text, crate::ui::COMMAND_WAITS);
+        run(&mut game, 0, 6);
+        let log = game.resource::<CommandLog>();
+        let sent = &log.entries[entries];
+        assert_eq!(
+            sent.command,
+            SimCommand::SetFleetOrders {
+                fleet: mine,
+                formation: before.formation,
+                doctrine: wanted
+            }
+        );
+        assert_eq!((sent.polity, &sent.outcome), (me, &CommandOutcome::Applied));
+        assert_eq!(
+            game.resource::<Battles>().get(id).unwrap().combatants[own].doctrine,
+            wanted
+        );
+        assert_eq!(
+            game.resource::<Fleets>().get(mine).unwrap().doctrine,
+            wanted
+        );
+        assert_eq!(shown_battle(&game).combatants[own].doctrine, wanted);
+
+        // --- Verlassen: zurück zur Karte, das Gefecht läuft in der Partie weiter ---
+        game.click_on("Verlassen");
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(!game.resource::<BattleViewShown>().0);
+        assert!(!game.world().contains_resource::<WatchedBattle>());
+        assert!(!game.resource::<BattleFeed>().is_active());
+        assert_eq!(game.count::<ShipVisual>(), 0);
+        let tick = game.resource::<Battles>().get(id).unwrap().tick;
+        run(&mut game, 2, 20);
+        assert!(game.resource::<Battles>().get(id).unwrap().tick > tick);
+
+        // --- Wieder hinein, diesmal aus dem Flottenfenster ---
+        game.click_on(crate::ui::fleets::TITLE);
+        game.frames(3);
+        game.click_on(WATCH);
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        assert_view_shows_the_simulation(&mut game, id, "nach dem Wiedereintritt");
+
+        // --- Der Rückzug geht als Befehl an die Simulation; das Gefecht kommt zum Ende ---
+        game.click_on("Rückzug befehlen");
+        run(&mut game, 0, 6);
+        let log = game.resource::<CommandLog>();
+        let sent = log.entries.last().unwrap();
+        assert_eq!(sent.command, SimCommand::Retreat { fleet: mine });
+        assert_eq!(sent.outcome, CommandOutcome::Applied);
+        assert!(game.resource::<Battles>().get(id).unwrap().combatants[own].retreating);
+        assert_view_shows_the_simulation(&mut game, id, "nach dem Rückzugsbefehl");
+        run_until(&mut game, 6000, "Ende des Gefechts", |game| {
+            game.resource::<Battles>().get(id).is_none()
+        });
+        game.frames(3);
+
+        // --- Das Ende bei offener Ansicht: das Ergebnis aus der Bilanz der Simulation ---
+        assert_eq!(view(&game), ViewState::Battle, "die Ansicht bleibt offen");
+        assert!(game.resource::<WatchedBattle>().ended);
+        assert!(shown_battle(&game).finished);
+        let report = game
+            .resource::<Battles>()
+            .report(id)
+            .expect("Bilanz")
+            .clone();
+        let expected = result_of(
+            game.resource::<Galaxy>(),
+            game.resource::<Fleets>(),
+            game.resource::<Polities>(),
+            &report,
+        );
+        let shown = game
+            .resource::<BattleFeed>()
+            .info
+            .result
+            .clone()
+            .expect("Ergebnis");
+        assert_eq!(shown.days, report.days());
+        assert_eq!(shown.sides.len(), report.sides.len());
+        for (side, entry) in shown.sides.iter().zip(&report.sides) {
+            assert_eq!(side.name, entry.fleet_name);
+            assert_eq!(
+                (side.initial, side.lost, side.escaped),
+                (entry.initial, entry.lost, entry.escaped)
+            );
+        }
+        // Der Gegner hält das Feld, die eigene Flotte weicht aus: Das Fenster nennt beides.
+        assert!(game.window_rect(RESULT_TITLE).is_some());
+        assert!(game.text(&shown.headline).is_some(), "{}", shown.headline);
+        let winner = report
+            .sides
+            .iter()
+            .find(|side| side.held_field)
+            .expect("jemand hält das Feld");
+        assert_ne!(winner.owner, me);
+        assert!(
+            shown.headline.contains(&winner.fleet_name),
+            "{}",
+            shown.headline
+        );
+        let fleet = game.resource::<Fleets>().get(mine).unwrap().clone();
+        assert!(fleet.alive && fleet.is_regrouping());
+        let target = *fleet.route.last().expect("die Flotte weicht aus");
+        let target = game.resource::<Galaxy>().system(target).name.clone();
+        let mine_shown = &shown.sides[own];
+        assert!(
+            mine_shown
+                .whereabouts
+                .contains(&format!("Weicht aus nach {target}")),
+            "{}",
+            mine_shown.whereabouts
+        );
+        assert!(game.text(&mine_shown.whereabouts).is_some());
+        assert_eq!(shown, expected);
+
+        // --- Zurück zur Karte ---
+        game.click_on(BACK_TO_MAP);
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(!game.resource::<BattleFeed>().is_active());
+        assert_eq!(game.count::<BattleVisual>(), 0);
+        // Ein beendetes Gefecht lässt sich nicht mehr öffnen; der Spieler erfährt, warum.
+        game.send(WatchBattle(id));
+        game.frames(3);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(game.resource::<Notice>().text.contains("schon zu Ende"));
+    }
+
+    #[test]
+    fn loading_and_quitting_with_an_open_campaign_battle_leave_nothing_behind() {
+        let (mut game, _, _, id) = war();
+        // Über die Meldung in der Chronik in die Ansicht.
+        game.click_on(&format!("{WATCH}: Chronik"));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        run(&mut game, 2, 20);
+        let path = std::env::temp_dir().join(format!(
+            "konfluenz_test_{}_gefecht_offen.ron",
+            std::process::id()
+        ));
+        game.send(SessionRequest::Save(path.clone()));
+        game.frames(2);
+        run(&mut game, 2, 20);
+        let later = game.resource::<SimClock>().tick;
+
+        // Laden bei offener Ansicht: zurück auf der Karte des geladenen Stands.
+        game.send(SessionRequest::Load(path.clone()));
+        game.frames(6);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(game.state(), AppState::InGame);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(
+            game.resource::<SimClock>().tick < later,
+            "der frühere Stand gilt"
+        );
+        assert!(!game.resource::<BattleViewShown>().0);
+        assert!(!game.world().contains_resource::<WatchedBattle>());
+        assert!(!game.resource::<BattleFeed>().is_active());
+        assert_eq!(game.count::<BattleVisual>(), 0);
+        // Das Gefecht läuft im geladenen Stand und lässt sich wieder öffnen.
+        assert!(game.resource::<Battles>().get(id).is_some());
+        game.send(WatchBattle(id));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        run(&mut game, 2, 20);
+        assert_eq!(
+            shown_battle(&game).tick,
+            game.resource::<Battles>().get(id).unwrap().tick
+        );
+
+        // Zum Hauptmenü bei offener Ansicht: Nichts vom Gefecht bleibt stehen.
+        game.send(SessionRequest::QuitToMenu);
+        game.frames(5);
+        assert_eq!(game.state(), AppState::MainMenu);
+        assert!(!game.resource::<BattleViewShown>().0);
+        assert!(!game.world().contains_resource::<WatchedBattle>());
+        assert!(!game.resource::<BattleFeed>().is_active());
+        assert_eq!(game.count::<BattleVisual>(), 0);
+        // Eine neue Partie beginnt auf der Karte.
+        game.send(SessionRequest::NewGame { seed: 5 });
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Galaxy);
+    }
+
+    #[test]
+    fn foreign_battles_are_watched_only_where_the_player_is_present() {
+        use crate::battle_view::campaign::can_watch;
+
+        let (game, me, mine, id) = war();
+        let galaxy = game.resource::<Galaxy>();
+        let battle = game.resource::<Battles>().get(id).unwrap();
+        let mut fleets = game.resource::<Fleets>().clone();
+        assert!(can_watch(galaxy, &fleets, Some(me), battle));
+        // Ein Dritter ohne Flotte und Welt im System sieht es nicht; ein Beobachter schon.
+        let third = game
+            .resource::<Polities>()
+            .alive()
+            .map(|polity| polity.id)
+            .find(|polity| battle.combatants.iter().all(|c| c.owner != *polity))
+            .expect("eine unbeteiligte Gemeinschaft");
+        assert!(!can_watch(galaxy, &fleets, Some(third), battle));
+        assert!(can_watch(galaxy, &fleets, None, battle));
+        // Liegt eine seiner Flotten dort, sieht er zu.
+        let visitor = fleets.of(third).next().expect("Flotte").id;
+        fleets.list[visitor.index()].system = battle.system;
+        assert!(can_watch(galaxy, &fleets, Some(third), battle));
+        let _ = mine;
+    }
+}

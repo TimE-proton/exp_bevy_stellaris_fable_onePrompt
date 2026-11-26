@@ -5,7 +5,7 @@ use super::{FleetState, MERGE, SHOW_ON_MAP, SPLIT, WARN, dry_run, gated_button, 
 use crate::map::Selection;
 use crate::ui::UiState;
 use crate::ui::format::percent;
-use crate::ui::panels::{ACCENT, MUTED, SimRefs, UiAction, detail as small};
+use crate::ui::panels::{ACCENT, MUTED, SimRefs, UiAction, detail as small, watch_button};
 use bevy_egui::egui::{self, RichText};
 use sim::battle::{Doctrine, Formation};
 use sim::command::SimCommand;
@@ -234,6 +234,11 @@ pub fn fleet_detail(
                 planet: None,
             }));
             actions.push(UiAction::Focus(fleet.system));
+        }
+        if let Some((battle, _)) = sim.battles.of_fleet(fleet.id)
+            && watch_button(ui, "")
+        {
+            actions.push(UiAction::WatchBattle(battle.id));
         }
     });
     ui.horizontal_wrapped(|ui| standing_orders(ui, fleet, actions));

@@ -85,6 +85,48 @@ pub struct FeedInfo {
     pub can_restart: bool,
     /// Standbild: Das Gefecht wird nur gezeigt, nicht gerechnet.
     pub still: bool,
+    /// Weitere Parteien, die der Spieler führt (in der Partie ist jede Flotte eine Partei).
+    pub own_sides: Vec<usize>,
+    /// Wie die Gefechtszeit zur Zeit des Besitzers steht, etwa das Datum der Partie und
+    /// wie viel Gefechtszeit auf einen Kalendertag kommt. Leer in der Übung.
+    pub calendar: String,
+    /// Ergebnis, wie der Besitzer es festgestellt hat. Fehlt es, zieht die Ansicht am
+    /// Ende selbst Bilanz aus dem Stand des Gefechts.
+    pub result: Option<BattleResult>,
+}
+
+impl FeedInfo {
+    /// Führt der Spieler diese Partei?
+    pub fn commands(&self, side: usize) -> bool {
+        self.player_side == Some(side) || self.own_sides.contains(&side)
+    }
+}
+
+/// Ergebnis eines Gefechts der Partie, vom Besitzer in Worte gefasst.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BattleResult {
+    /// Ausgang in einem Satz, mit dem Sieger, wenn es einen gibt.
+    pub headline: String,
+    /// Dauer in Kalendertagen.
+    pub days: u64,
+    pub sides: Vec<ResultSide>,
+}
+
+/// Bilanz einer Partei: Schiffe je Klasse (Stelle = `ShipClass::index`) und ihr Verbleib.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResultSide {
+    pub name: String,
+    pub color: Rgb,
+    pub initial: [u32; 6],
+    pub lost: [u32; 6],
+    pub escaped: [u32; 6],
+    /// Verlorener Anteil am Bauwert.
+    pub loss_share: f32,
+    pub holds_field: bool,
+    /// Was die Partei getan hat: Rückzug, im Patt gelöst, vorzeitig ausgeschieden.
+    pub note: String,
+    /// Wo die Flotte jetzt ist und wohin sie ausweicht.
+    pub whereabouts: String,
 }
 
 /// Nachleuchten eines Schildtreffers an einem Schiff.
@@ -195,6 +237,15 @@ impl BattleFeed {
             );
         }
         copy_state(held, battle);
+    }
+
+    /// Das Gefecht ist bei seinem Besitzer zu Ende und dort schon abgeräumt. Der zuletzt
+    /// gezeigte Stand bleibt stehen und gilt als beendet; die Bilanz kommt vom Besitzer.
+    pub fn conclude(&mut self, result: BattleResult) {
+        if let Some(held) = self.battle.as_mut() {
+            held.finished = true;
+            self.info.result = Some(result);
+        }
     }
 
     /// Es gibt kein Gefecht mehr zu zeigen.
@@ -390,6 +441,7 @@ pub mod testing {
             player_side: Some(0),
             can_restart: true,
             still: false,
+            ..Default::default()
         }
     }
 

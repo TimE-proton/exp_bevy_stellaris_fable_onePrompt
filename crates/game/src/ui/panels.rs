@@ -2,6 +2,7 @@
 
 use super::format::{decimal, percent, population};
 use super::{LeftTab, UiState, economy, finance, fleets, tech};
+use crate::battle_view::campaign::{BattleMarker, WATCH, can_watch};
 use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
@@ -16,7 +17,7 @@ use sim::economy::{Economy, to_credits};
 use sim::finance::Finance;
 use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
-use sim::ids::{PlanetId, SystemId};
+use sim::ids::{BattleId, PlanetId, SystemId};
 use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
 use sim::state::SimConfig;
@@ -51,6 +52,8 @@ pub enum UiAction {
     /// Emittenten an der Börse zeigen.
     ShowIssuer(sim::ids::IssuerId),
     Command(SimCommand),
+    /// Ein laufendes Gefecht der Partie in der Schlachtansicht zeigen.
+    WatchBattle(sim::ids::BattleId),
     Quit,
 }
 
@@ -196,6 +199,7 @@ pub fn in_game(
     state: &mut UiState,
     speed: &SimSpeed,
     selection: &Selection,
+    markers: &[BattleMarker],
     actions: &mut Vec<UiAction>,
 ) {
     egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
@@ -203,7 +207,7 @@ pub fn in_game(
         .resizable(true)
         .default_size(118.0)
         .size_range(60.0..=320.0)
-        .show(root, |ui| chronicle(ui, sim));
+        .show(root, |ui| chronicle(ui, sim, actions));
     egui::Panel::left("auswahl")
         .resizable(true)
         .default_size(430.0)
@@ -216,6 +220,7 @@ pub fn in_game(
         .show(root, |ui| polities_panel(ui, sim, actions));
 
     let ctx = root.ctx().clone();
+    battle_markers(&ctx, root.available_rect_before_wrap(), markers, actions);
     let shown_planet = shown_planet(sim, selection);
     economy::chains_window(&ctx, sim, &mut state.chains_open, shown_planet);
     economy::flows_window(&ctx, sim, &mut state.flows_open, None);
@@ -228,6 +233,48 @@ pub fn in_game(
     }
     if state.help_open {
         help_window(root.ctx(), &mut state.help_open, false);
+    }
+}
+
+/// Ein Knopf zur Schlachtansicht, wie er an mehreren Stellen steht. `place` unterscheidet
+/// die Stellen für Vorleseprogramme.
+pub fn watch_button(ui: &mut egui::Ui, place: &str) -> bool {
+    let button = ui
+        .small_button(RichText::new(WATCH).color(Color32::from_rgb(235, 110, 95)))
+        .on_hover_text(
+            "Zeigt das laufende Gefecht in der Schlachtansicht. Es läuft mit der Zeit der \
+             Partie weiter; „Verlassen“ führt jederzeit zurück zur Karte.",
+        );
+    if !place.is_empty() {
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{WATCH}: {place}"))
+        });
+    }
+    button.clicked()
+}
+
+/// An der Marke jedes sichtbaren Gefechts auf der Karte steht der Knopf zur
+/// Schlachtansicht, soweit die Marke im freien Teil der Karte liegt. Die Knöpfe liegen
+/// in der Ebene der Karte, unter allen Fenstern.
+fn battle_markers(
+    ctx: &egui::Context,
+    free: egui::Rect,
+    markers: &[BattleMarker],
+    actions: &mut Vec<UiAction>,
+) {
+    for marker in markers {
+        let pos = egui::pos2(marker.at.x + 14.0, marker.at.y + 12.0);
+        if !free.shrink(8.0).contains(pos) {
+            continue;
+        }
+        egui::Area::new(egui::Id::new(("gefechtsmarke", marker.id.0)))
+            .order(egui::Order::Background)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                if watch_button(ui, &marker.system) {
+                    actions.push(UiAction::WatchBattle(marker.id));
+                }
+            });
     }
 }
 
@@ -338,7 +385,20 @@ fn top_bar(
     split_bar(ui, left, right);
 }
 
-fn chronicle(ui: &mut egui::Ui, sim: &SimRefs) {
+/// Das laufende Gefecht, von dem ein Eintrag der Chronik berichtet, wenn der Spieler es
+/// ansehen darf.
+fn battle_of_entry(sim: &SimRefs, entry: &sim::chronicle::ChronicleEntry) -> Option<BattleId> {
+    if entry.kind != ChronicleKind::War {
+        return None;
+    }
+    let battle = sim.battles.in_system(entry.system?)?;
+    // Einträge aus der Zeit vor dem Gefecht gelten einem früheren.
+    let began = sim.clock.tick.saturating_sub(battle.tick);
+    (entry.tick >= began && can_watch(sim.galaxy, sim.fleets, sim.config.player, battle))
+        .then_some(battle.id)
+}
+
+fn chronicle(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>) {
     ui.label(RichText::new("Chronik").strong());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -356,6 +416,11 @@ fn chronicle(ui: &mut egui::Ui, sim: &SimRefs) {
                         None => chronicle_color(entry.kind),
                     };
                     ui.label(RichText::new(&entry.text).color(color));
+                    if let Some(battle) = battle_of_entry(sim, entry)
+                        && watch_button(ui, "Chronik")
+                    {
+                        actions.push(UiAction::WatchBattle(battle));
+                    }
                 });
             }
         });
@@ -962,7 +1027,9 @@ mod tests {
                         planet,
                     };
                     let mut actions = Vec::new();
-                    frame(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut actions));
+                    frame(|ui| {
+                        in_game(ui, &refs, &mut state, &speed, &selection, &[], &mut actions)
+                    });
                     assert!(
                         actions.is_empty(),
                         "ohne Eingabe darf nichts ausgelöst werden"
@@ -977,6 +1044,7 @@ mod tests {
                     &mut state,
                     &speed,
                     &Selection::default(),
+                    &[],
                     &mut actions,
                 )
             });
@@ -1010,7 +1078,15 @@ mod tests {
         notice_text.info("Gespeichert: saves/schnell.ron");
         let mut screen = Screen::new(1600.0, 900.0);
         let mut draw = |ui: &mut egui::Ui| {
-            in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new());
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            );
             notice(ui, &notice_text);
         };
         // Neue Fenster blenden sich über einige Durchläufe ein; gemessen wird danach.
@@ -1072,8 +1148,17 @@ mod tests {
         for (width, rows) in [(1600.0, 1), (1280.0, 2), (1024.0, 2)] {
             let mut state = UiState::default();
             let mut screen = Screen::new(width, 720.0);
-            let painted = screen
-                .settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+            let painted = screen.settle(|ui| {
+                in_game(
+                    ui,
+                    &refs,
+                    &mut state,
+                    &speed,
+                    &selection,
+                    &[],
+                    &mut Vec::new(),
+                )
+            });
             // Was über den Reitern der linken Tafel steht, gehört zur Kopfleiste.
             let below = painted.text("Übersicht").expect("Reiter").top();
             let bar: Vec<(String, egui::Rect)> = painted
@@ -1093,12 +1178,29 @@ mod tests {
         // Die Knöpfe der zweiten Zeile tun weiter ihren Dienst.
         let mut state = UiState::default();
         let mut screen = Screen::new(1024.0, 720.0);
-        let painted =
-            screen.settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+        let painted = screen.settle(|ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
+        });
         let at = painted.text("Flotten").unwrap().center();
         assert!(!state.fleets_open);
         screen.click(at, |ui| {
-            in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new())
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
         });
         assert!(state.fleets_open);
     }
@@ -1162,8 +1264,17 @@ mod tests {
             ..Default::default()
         };
         let mut screen = Screen::new(1600.0, 900.0);
-        let painted =
-            screen.settle(|ui| in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new()));
+        let painted = screen.settle(|ui| {
+            in_game(
+                ui,
+                &refs,
+                &mut state,
+                &speed,
+                &selection,
+                &[],
+                &mut Vec::new(),
+            )
+        });
         // Unter „Was sich hier lohnt“ steht je Rezept die Rendite rechts neben dem Namen.
         let heading = painted
             .text("Was sich hier lohnt")

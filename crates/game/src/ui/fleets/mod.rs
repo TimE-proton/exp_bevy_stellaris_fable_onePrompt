@@ -5,8 +5,9 @@ mod detail;
 mod yards;
 
 use super::format::{decimal, percent};
-use super::panels::{MUTED, SimRefs, UiAction, color32, detail as small};
+use super::panels::{MUTED, SimRefs, UiAction, color32, detail as small, watch_button};
 use super::{FleetsTab, UiState};
+use crate::battle_view::campaign::can_watch;
 use crate::map::Selection;
 use bevy_egui::egui::{self, Color32, RichText};
 use sim::clock::Date;
@@ -414,13 +415,22 @@ fn fleets_tab(
             .collect();
         if !others.is_empty() {
             ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!(
-                    "Fremde Flotten in {}",
-                    sim.galaxy.system(system).name
-                ))
-                .color(MUTED),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Fremde Flotten in {}",
+                        sim.galaxy.system(system).name
+                    ))
+                    .color(MUTED),
+                );
+                // Ein Gefecht dort lässt sich ansehen, wo der Spieler selbst vor Ort ist.
+                if let Some(battle) = sim.battles.in_system(system)
+                    && can_watch(sim.galaxy, sim.fleets, sim.config.player, battle)
+                    && watch_button(ui, &sim.galaxy.system(system).name)
+                {
+                    actions.push(UiAction::WatchBattle(battle.id));
+                }
+            });
             for fleet in others {
                 let owner = sim.polities.get(fleet.owner);
                 ui.label(

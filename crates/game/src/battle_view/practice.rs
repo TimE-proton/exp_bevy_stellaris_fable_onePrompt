@@ -294,6 +294,7 @@ fn feed_info(config: &PracticeConfig) -> FeedInfo {
         player_side: (!config.lineup).then_some(0),
         can_restart: !config.lineup,
         still: config.lineup,
+        ..default()
     }
 }
 

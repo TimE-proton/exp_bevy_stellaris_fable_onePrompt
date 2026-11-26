@@ -6,13 +6,13 @@
 //! zeichnen und geben Aktionen zurück. Erst das System am Ende wendet sie an.
 
 use super::camera::{CameraRequest, HudLayout, LAYOUT_GAP, Projector, SelectedShip, ViewOptions};
-use super::feed::{BattleFeed, BattleOrder, BattleViewRequest};
+use super::feed::{BattleFeed, BattleOrder, BattleResult, BattleViewRequest};
 use super::{Part, ViewFrame, ViewTimings};
 use crate::pointer::UiCover;
 use crate::time_control::{SPEED_LABELS, SimSpeed};
 use crate::ui::UiState;
 use crate::ui::format::{decimal, percent};
-use crate::ui::panels::{self, ACCENT, MUTED, color32};
+use crate::ui::panels::{self, ACCENT, MUTED, color32, detail};
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
 use bevy_egui::{EguiContexts, egui::epaint::Shape};
@@ -25,6 +25,10 @@ const WARNING: Color32 = Color32::from_rgb(235, 110, 95);
 const GOOD: Color32 = Color32::from_rgb(110, 200, 120);
 const SHIELD: Color32 = Color32::from_rgb(90, 160, 255);
 const ARMOR: Color32 = Color32::from_rgb(190, 170, 140);
+
+/// Beschriftungen des Ergebnisses eines Gefechts der Partie.
+pub const RESULT_TITLE: &str = "Ergebnis des Gefechts";
+pub const BACK_TO_MAP: &str = "Zur Karte";
 
 /// Ab dieser Rumpflänge auf dem Bildschirm (Pixel) verschwindet die Markierung ganz;
 /// darunter blendet sie sich ein.
@@ -306,7 +310,10 @@ pub fn battle_hud(
         layout.column = rect.map(reserved);
     }
     if battle.finished && refs.options.summary {
-        summary(&ctx, refs, battle, actions);
+        match &refs.feed.info.result {
+            Some(result) => campaign_result(&ctx, result, actions),
+            None => summary(&ctx, refs, battle, actions),
+        }
     }
     Some(layout)
 }
@@ -331,6 +338,13 @@ fn top_bar(ui: &mut egui::Ui, refs: &HudRefs, battle: &Battle, actions: &mut Vec
         ui.separator();
         ui.label("Gefechtszeit");
         ui.label(RichText::new(clock(battle.time)).monospace().strong());
+        if !refs.feed.info.calendar.is_empty() {
+            ui.label(RichText::new(&refs.feed.info.calendar).color(MUTED))
+                .on_hover_text(
+                    "Das Gefecht läuft mit der Zeit der Partie: Pause und Geschwindigkeit \
+                     gelten für beide.",
+                );
+        }
         if battle.finished {
             let text = if battle.timed_out {
                 "ZEITGRENZE"
@@ -469,7 +483,7 @@ fn side_panel(
                         .strong()
                         .color(color),
                 );
-                if refs.feed.info.player_side == Some(side) {
+                if refs.feed.info.commands(side) {
                     ui.label(RichText::new("(du)").color(MUTED));
                 }
                 if combatant.stalemate {
@@ -547,7 +561,7 @@ fn side_panel(
                     ui.label(percent(summary.morale));
                     ui.end_row();
                 });
-            if refs.feed.info.player_side == Some(side) {
+            if refs.feed.info.commands(side) {
                 ui.separator();
                 orders(ui, battle, side, actions);
             }
@@ -954,6 +968,88 @@ fn summary(ctx: &egui::Context, refs: &HudRefs, battle: &Battle, actions: &mut V
                 if ui
                     .button("Feld ansehen")
                     .on_hover_text("Bilanz ausblenden; „Bilanz“ in der Kopfleiste holt sie zurück")
+                    .clicked()
+                {
+                    actions.push(HudAction::ToggleSummary);
+                }
+            });
+        });
+    if !open {
+        actions.push(HudAction::ToggleSummary);
+    }
+}
+
+/// Ergebnis eines Gefechts der Partie: Ausgang, Verluste je Partei, wer das Feld hält und
+/// wohin die anderen ausweichen. Die Zahlen stammen aus der Bilanz der Simulation.
+fn campaign_result(ctx: &egui::Context, result: &BattleResult, actions: &mut Vec<HudAction>) {
+    let mut open = true;
+    egui::Window::new(RESULT_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .frame(panel_frame(ctx))
+        .default_pos([ctx.content_rect().center().x - 280.0, 130.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(540.0);
+            ui.label(RichText::new(&result.headline).strong().color(ACCENT));
+            let days = match result.days {
+                1 => "Dauer ein Tag".to_string(),
+                days => format!("Dauer {days} Tage"),
+            };
+            ui.label(RichText::new(days).color(MUTED));
+            ui.add_space(4.0);
+            for (index, side) in result.sides.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(&side.name)
+                            .strong()
+                            .color(color32(side.color)),
+                    );
+                    let mut notes = Vec::new();
+                    if side.holds_field {
+                        notes.push("hält das Feld".to_string());
+                    }
+                    if !side.note.is_empty() {
+                        notes.push(side.note.clone());
+                    }
+                    notes.push(format!("Verlust am Bauwert {}", percent(side.loss_share)));
+                    ui.label(RichText::new(notes.join(" · ")).color(MUTED));
+                });
+                ui.label(detail(&side.whereabouts));
+                egui::Grid::new(("ergebnis", index))
+                    .striped(true)
+                    .num_columns(4)
+                    .show(ui, |ui| {
+                        column_titles(
+                            ui,
+                            &[
+                                ("Klasse", ""),
+                                ("anfangs", ""),
+                                ("verloren", "Zerstört oder treibend dem Gegner überlassen."),
+                                ("entkommen", "Hat das Feld verlassen."),
+                            ],
+                        );
+                        for class in ShipClass::ALL {
+                            let index = class.index();
+                            if side.initial[index] == 0 {
+                                continue;
+                            }
+                            ui.label(class.plural());
+                            ui.label(side.initial[index].to_string());
+                            count(ui, side.lost[index], Some(WARNING));
+                            count(ui, side.escaped[index], None);
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(6.0);
+            }
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new(BACK_TO_MAP).strong()).clicked() {
+                    actions.push(HudAction::Request(BattleViewRequest::Leave));
+                }
+                if ui
+                    .button("Feld ansehen")
+                    .on_hover_text("Ergebnis ausblenden; „Bilanz“ in der Kopfleiste holt es zurück")
                     .clicked()
                 {
                     actions.push(HudAction::ToggleSummary);

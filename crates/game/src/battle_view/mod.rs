@@ -3,12 +3,13 @@
 //! Gerechnet wird ein Gefecht im Kern, in einer Ebene; hier wird es gezeigt. Die Ansicht
 //! liest allein den [`BattleFeed`] und schickt Befehle des Spielers als [`BattleOrder`]
 //! zurück. Wem das Gefecht gehört, ist ihr gleich: Die Gefechtsübung ([`practice`]) und
-//! später die Partie füllen denselben Feed.
+//! die Partie ([`campaign`]) füllen denselben Feed.
 //!
 //! Ebene und Welt: x bleibt x, die y-Achse der Ebene zeigt in der Welt nach −z, oben ist
 //! +y. Ein Kurswinkel der Ebene ist damit eine Drehung um die y-Achse.
 
 mod camera;
+pub mod campaign;
 mod effects;
 pub mod feed;
 mod hud;
@@ -344,6 +345,7 @@ impl Plugin for BattleViewPlugin {
         effects::plugin(app);
         overlay::plugin(app);
         practice::plugin(app);
+        campaign::plugin(app);
     }
 }
 
