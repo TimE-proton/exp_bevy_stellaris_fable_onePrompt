@@ -18,10 +18,11 @@ use sim::finance::{
     Finance, Secession, Stage, apply_secession, ownership_of_region, polity_of_issuer,
 };
 use sim::fleet::{BattleOutcome, Battles, Fleets};
+use sim::galaxy::Galaxy;
 use sim::harness::{Headless, check_invariants};
 use sim::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId};
 use sim::logistics::Logistics;
-use sim::polity::{Founding, TransferTerms};
+use sim::polity::{Founding, Polities, TransferTerms};
 use sim::state::{SaveGame, SimConfig, money_drift};
 use sim::tech::Research;
 use std::collections::BTreeMap;
@@ -1196,6 +1197,294 @@ fn impossible_calls_are_rejected_and_change_nothing() {
 }
 
 #[test]
+fn the_invariant_check_finds_what_it_should() {
+    let (a, b, c, d) = (PolityId(0), PolityId(1), PolityId(2), PolityId(3));
+    let mut base = observer(8);
+    base.run_days(2 * DAYS_PER_YEAR);
+    let tick = base.clock().tick;
+    // Zur Lage gehören eine beendete Gemeinschaft (d) und eine unterstellte (c unter b).
+    base.succession(|succession| succession.absorb(d, a, Path::Joined, tick))
+        .unwrap();
+    base.succession(|succession| succession.subordinate(c, b, true, tick))
+        .unwrap();
+    assert_sound(&base, "Ausgangslage");
+    let home = capital(&base, a);
+    let foreign = capital(&base, b);
+    let free = base
+        .galaxy()
+        .planets
+        .iter()
+        .find(|planet| planet.owner.is_none())
+        .expect("nach zwei Jahren sind noch Welten frei")
+        .id;
+    let firm = *finance(&base).issuers.keys().next().unwrap();
+
+    // Jeder Eingriff bricht genau eine Regel; die Meldung nennt sie.
+    let broken = |change: &dyn Fn(&mut Headless)| {
+        let mut sim = twin(&base);
+        change(&mut sim);
+        check_invariants(sim.world()).expect_err("die Prüfung hätte anschlagen müssen")
+    };
+    let cases: Vec<(&str, Box<dyn Fn(&mut Headless)>)> = vec![
+        // Listen je Gemeinschaft und je Planet.
+        (
+            "Liste je Gemeinschaft (Staatskassen)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Economy>().treasuries.pop();
+            }),
+        ),
+        (
+            "Liste je Gemeinschaft (Kulturen)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Diplomacy>().culture.pop();
+            }),
+        ),
+        (
+            "Liste je Gemeinschaft (Soldrückstand)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Fleets>().arrears.pop();
+            }),
+        ),
+        (
+            "Liste je Gemeinschaft (verlorene Schiffe)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Battles>().ships_lost.push(0);
+            }),
+        ),
+        (
+            "Liste je Gemeinschaft (Fahrtfaktoren)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Logistics>().tech_speed.pop();
+            }),
+        ),
+        (
+            "Liste je Planet (kultureller Abstand)",
+            Box::new(|sim| {
+                sim.world_mut().resource_mut::<Endgame>().gap.pop();
+            }),
+        ),
+        (
+            "Spur eines Wechsels",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Endgame>().path[free.index()] = Path::Forced;
+            }),
+        ),
+        (
+            "Spur eines Wechsels",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Endgame>().absorbed_pop[home.index()] = 12.0;
+            }),
+        ),
+        (
+            "Sitz ohne Besitzer",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Endgame>().seat[free.index()] = true;
+            }),
+        ),
+        // Lebende Gemeinschaften.
+        (
+            "lebt ohne Hauptwelt",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Polities>()
+                    .get_mut(a)
+                    .capital = None;
+            }),
+        ),
+        (
+            "besitzt seine Hauptwelt nicht",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Polities>()
+                    .get_mut(a)
+                    .capital = Some(foreign);
+            }),
+        ),
+        // Beendete Gemeinschaften haben nichts mehr.
+        (
+            "die geendet hat",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Galaxy>()
+                    .planet_mut(free)
+                    .owner = Some(d);
+            }),
+        ),
+        (
+            "führt aber eine Hauptwelt",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Polities>()
+                    .get_mut(d)
+                    .capital = Some(home);
+            }),
+        ),
+        (
+            "hält aber eine Staatskasse",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Economy>().treasuries[d.index()] = 5;
+            }),
+        ),
+        (
+            "führt aber ein Handelshaus",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Logistics>().houses[0].polity = d;
+            }),
+        ),
+        (
+            "die geendet hat",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Fleets>().list[a.index()].owner = d;
+            }),
+        ),
+        (
+            "Bauauftrag",
+            Box::new(move |sim| {
+                let mut fleets = sim.world_mut().resource_mut::<Fleets>();
+                let id = fleets.next_order;
+                fleets.next_order += 1;
+                fleets.orders.push(sim::fleet::BuildOrder {
+                    id,
+                    polity: d,
+                    planet: home,
+                    design: 0,
+                    progress: 0.0,
+                    spent: 0,
+                    stalled: false,
+                    started: 0,
+                });
+            }),
+        ),
+        (
+            "Krieg zwischen",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Diplomacy>()
+                    .wars
+                    .insert((a, d));
+            }),
+        ),
+        (
+            "Anleihe",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Finance>()
+                    .bonds
+                    .push(sim::finance::Bond {
+                        issuer: d,
+                        holder: HolderId::Elite(home),
+                        principal: 1000,
+                        rate: 0.05,
+                        matures_on: 9_999,
+                    });
+            }),
+        ),
+        (
+            "Anleihe",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Finance>()
+                    .bonds
+                    .push(sim::finance::Bond {
+                        issuer: a,
+                        holder: HolderId::State(d),
+                        principal: 1000,
+                        rate: 0.05,
+                        matures_on: 9_999,
+                    });
+            }),
+        ),
+        (
+            "einem Staat, der geendet hat",
+            Box::new(move |sim| {
+                let mut finance = sim.world_mut().resource_mut::<Finance>();
+                let issuer = finance.issuers.get_mut(&firm).unwrap();
+                issuer.shares += 3;
+                issuer.holdings.insert(HolderId::State(d), 3);
+            }),
+        ),
+        (
+            "einem Staat, der geendet hat",
+            Box::new(move |sim| {
+                let mut finance = sim.world_mut().resource_mut::<Finance>();
+                let issuer = finance.issuers.get_mut(&firm).unwrap();
+                issuer.offered.insert(HolderId::State(d), 3);
+            }),
+        ),
+        (
+            "nennt eine Gemeinschaft, die geendet hat",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Finance>().regions[free.index()].owner_seen =
+                    Some(d);
+            }),
+        ),
+        // Oberhäupter leben und sind frei; Kriege führen nur Freie.
+        (
+            "untersteht aber noch",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Diplomacy>().standing[d.index()].overlord = Some(a);
+            }),
+        ),
+        (
+            "nicht lebt oder nicht frei ist",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Diplomacy>().standing[a.index()].overlord = Some(d);
+            }),
+        ),
+        (
+            "nicht lebt oder nicht frei ist",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Diplomacy>().standing[a.index()].overlord = Some(c);
+            }),
+        ),
+        (
+            "nicht lebt oder nicht frei ist",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<Diplomacy>().standing[a.index()].overlord = Some(a);
+            }),
+        ),
+        (
+            "Krieg zwischen",
+            Box::new(move |sim| {
+                sim.world_mut()
+                    .resource_mut::<Diplomacy>()
+                    .wars
+                    .insert((a, c));
+            }),
+        ),
+        // Der Spieler führt eine lebende, freie Gemeinschaft.
+        (
+            "der Spieler führt",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<SimConfig>().player = Some(d);
+            }),
+        ),
+        (
+            "der Spieler führt",
+            Box::new(move |sim| {
+                sim.world_mut().resource_mut::<SimConfig>().player = Some(c);
+            }),
+        ),
+    ];
+    for (expected, change) in &cases {
+        let message = broken(change.as_ref());
+        assert!(
+            message.contains(expected),
+            "erwartet „{expected}“: {message}"
+        );
+    }
+    // Was erlaubt ist, schlägt nicht an: ein Spieler an der Spitze eines Verbunds, ein
+    // Krieg zwischen Freien.
+    let mut sim = twin(&base);
+    sim.world_mut().resource_mut::<SimConfig>().player = Some(b);
+    sim.world_mut()
+        .resource_mut::<Diplomacy>()
+        .wars
+        .insert((a, b));
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+}
+
+#[test]
 fn the_number_of_free_states_is_capped() {
     let mut sim = observer(3);
     sim.run_days(12 * DAYS_PER_YEAR);
@@ -1382,6 +1671,59 @@ fn endings() {
         );
         assert!(outcome.joined > 0.0 && outcome.forced > outcome.joined);
     }
+    // Ohne jeden Eingriff: Erschöpfen sich die Vorkommen ganz, verfällt die Wirtschaft,
+    // die Bevölkerung bricht zusammen, und die Partie endet ohne Überlebende.
+    {
+        let mut sim = Headless::new(
+            exhausting_data(),
+            SimConfig {
+                seed: 2,
+                player: None,
+            },
+        );
+        let outcome = run_to_the_end(&mut sim, 120 * DAYS_PER_YEAR);
+        assert_eq!(
+            (outcome.ending, outcome.survivor),
+            (Ending::Extinction, None)
+        );
+        // Kein Krieg, keine Unterstellung: Der Zusammenbruch ist physisch.
+        assert_eq!(sim.polities().alive().count(), 6);
+        assert!(diplomacy(&sim).wars.is_empty());
+        let levers = &data().balance.endgame;
+        let state = endgame(&sim);
+        assert!(state.months_below >= levers.collapse_months);
+        assert!(total_population(&sim) < levers.collapse_share * state.peak_population);
+        assert!(state.peak_population > 20_000.0);
+        // Der Boden null gilt: Abgebaute Vorkommen sind restlos erschöpft.
+        let exhausted = sim
+            .galaxy()
+            .planets
+            .iter()
+            .flat_map(|planet| planet.deposits.iter())
+            .filter(|deposit| deposit.reserve == 0.0)
+            .count();
+        assert!(exhausted >= 6, "{exhausted} Vorkommen erschöpft");
+        let text = &sim
+            .world()
+            .resource::<Chronicle>()
+            .entries
+            .back()
+            .unwrap()
+            .text;
+        assert!(
+            text.contains("Auslöschung") && text.contains("zusammengebrochen"),
+            "{text}"
+        );
+    }
+}
+
+/// Spieldaten, in denen sich die Vorkommen tausendmal so schnell erschöpfen und nichts
+/// von ihnen bleibt.
+fn exhausting_data() -> GameData {
+    let mut data = data().clone();
+    data.balance.economy.depletion *= 1000.0;
+    data.balance.economy.reserve_floor = 0.0;
+    data
 }
 
 // --- 8. Determinismus -----------------------------------------------------------------------

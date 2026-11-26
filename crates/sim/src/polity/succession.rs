@@ -189,7 +189,7 @@ pub struct Absorbed {
     pub fleets: usize,
 }
 
-fn living<'p>(polities: &'p Polities, polity: PolityId) -> Result<&'p Polity, String> {
+fn living(polities: &Polities, polity: PolityId) -> Result<&Polity, String> {
     match polities.list.get(polity.index()) {
         Some(found) if found.alive => Ok(found),
         Some(found) => Err(format!("{} besteht nicht mehr", found.name)),
