@@ -249,10 +249,11 @@ fn health_color(fraction: f32) -> Color32 {
     }
 }
 
-/// Rahmen der Tafeln über der Schlacht: deckend. Durch die leicht durchsichtigen Fenster
-/// der Partie schienen sonst Markierungen, Namen und Leuchtspuren in die Zahlen.
+/// Rahmen der Tafeln über der Schlacht. Er deckt, wie alle Fenster der Oberfläche
+/// (`panels::apply_style`): Sonst schienen Markierungen, Namen und Leuchtspuren in die
+/// Zahlen.
 fn panel_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::window(&ctx.global_style()).fill(panels::opaque_window_fill(ctx))
+    egui::Frame::window(&ctx.global_style())
 }
 
 /// Zeichnet alle Tafeln der Schlachtansicht. Gibt zurück, was Kopfleiste, Lagetafeln und
@@ -270,10 +271,8 @@ pub fn battle_hud(
     // nicht an seinem Platz, seine Größe kennt es aber schon.
     let reserved = |rect: egui::Rect| rect.width() + EDGE_GAP + LAYOUT_GAP;
     markers(root.ctx(), refs, battle);
-    let style = root.ctx().global_style();
-    let bar = egui::Panel::top("gefechtsleiste")
-        .frame(egui::Frame::side_top_panel(&style).fill(style.visuals.panel_fill.to_opaque()))
-        .show(root, |ui| top_bar(ui, refs, battle, actions));
+    let bar =
+        egui::Panel::top("gefechtsleiste").show(root, |ui| top_bar(ui, refs, battle, actions));
     // Die Tafeln hängen unter der Kopfleiste, wie hoch sie auch ist: In schmalen Fenstern
     // hat sie zwei Zeilen.
     let top = bar.response.rect.bottom() + PANEL_GAP;

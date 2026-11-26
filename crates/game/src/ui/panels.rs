@@ -56,8 +56,10 @@ pub const MUTED: Color32 = Color32::from_rgb(140, 150, 165);
 
 pub fn apply_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = Color32::from_rgba_unmultiplied(14, 17, 26, 238);
-    visuals.window_fill = Color32::from_rgba_unmultiplied(18, 22, 33, 245);
+    // Deckend: Durch leicht durchsichtige Leisten, Tafeln und Fenster schienen die
+    // Beschriftungen der Karte und die Markierungen der Schlacht in ihren Text.
+    visuals.panel_fill = Color32::from_rgb(14, 17, 26);
+    visuals.window_fill = Color32::from_rgb(18, 22, 33);
     visuals.selection.bg_fill = Color32::from_rgb(60, 90, 140);
     ctx.set_visuals(visuals);
 }
@@ -101,13 +103,6 @@ pub fn split_bar(
     if let Some(width) = measured {
         ui.data_mut(|data| data.insert_temp(id, width));
     }
-}
-
-/// Fensterfarbe ohne Durchsicht. Die Fenster der Partie lassen die Karte leicht
-/// durchscheinen; über der Schlacht stünden dann Markierungen und Leuchtspuren in den
-/// Zahlen der Tafeln.
-pub fn opaque_window_fill(ctx: &egui::Context) -> Color32 {
-    ctx.global_style().visuals.window_fill().to_opaque()
 }
 
 pub fn color32(color: Rgb) -> Color32 {
@@ -798,14 +793,9 @@ pub const BATTLE_KEYS: [(&str, &str); 16] = [
 /// Hilfefenster. In der Schlachtansicht (`battle`) zeigt es deren Bedienung.
 pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
     let keys: &[(&str, &str)] = if battle { &BATTLE_KEYS } else { &MAP_KEYS };
-    let mut frame = egui::Frame::window(&ctx.global_style());
-    if battle {
-        frame = frame.fill(opaque_window_fill(ctx));
-    }
     egui::Window::new("Hilfe")
         .open(open)
         .resizable(false)
-        .frame(frame)
         .show(ctx, |ui| {
             egui::Grid::new("hilfe")
                 .num_columns(2)
@@ -977,6 +967,82 @@ mod tests {
                 )
             });
         }
+    }
+
+    #[test]
+    fn bars_panels_and_windows_of_the_campaign_are_opaque() {
+        use crate::ui::testing::Screen;
+
+        let fixture = fixture();
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        let speed = SimSpeed::default();
+        let selection = Selection {
+            system: Some(SystemId(0)),
+            planet: None,
+        };
+        let mut state = UiState {
+            menu_open: true,
+            help_open: true,
+            flows_open: true,
+            chains_open: true,
+            fleets_open: true,
+            exchange_open: true,
+            treasury_open: true,
+            ..Default::default()
+        };
+        let mut notice_text = Notice::default();
+        notice_text.info("Gespeichert: saves/schnell.ron");
+        let mut screen = Screen::new(1600.0, 900.0);
+        let mut draw = |ui: &mut egui::Ui| {
+            in_game(ui, &refs, &mut state, &speed, &selection, &mut Vec::new());
+            notice(ui, &notice_text);
+        };
+        // Neue Fenster blenden sich über einige Durchläufe ein; gemessen wird danach.
+        for _ in 0..8 {
+            screen.settle(&mut draw);
+        }
+        let painted = screen.settle(&mut draw);
+        // Kopfleiste, Chronik, beide Seitentafeln, sieben Fenster und der Hinweis: Durch
+        // keinen dieser Hintergründe scheint die Karte.
+        let backgrounds: Vec<_> = painted
+            .rects
+            .iter()
+            .filter(|(rect, _)| rect.width() >= 200.0 && rect.height() >= 20.0)
+            .collect();
+        assert!(
+            backgrounds.len() >= 12,
+            "{} Hintergründe",
+            backgrounds.len()
+        );
+        for (rect, color) in backgrounds {
+            assert_eq!(color.a(), 255, "Hintergrund {rect:?} ist durchsichtig");
+        }
+        // Die vier Leisten und Tafeln sind darunter: je ein Hintergrund an jedem Rand.
+        let at_edge = |edge: fn(&egui::Rect) -> bool| {
+            painted
+                .rects
+                .iter()
+                .any(|(rect, color)| edge(rect) && color.a() == 255)
+        };
+        assert!(
+            at_edge(|rect| rect.top() <= 0.0 && rect.width() >= 1590.0),
+            "Kopfleiste"
+        );
+        assert!(
+            at_edge(|rect| rect.bottom() >= 900.0 && rect.width() >= 1590.0),
+            "Chronik"
+        );
+        assert!(
+            at_edge(|rect| rect.left() <= 0.0 && rect.height() >= 300.0 && rect.width() < 800.0),
+            "linke Tafel"
+        );
+        assert!(
+            at_edge(|rect| rect.right() >= 1600.0
+                && rect.height() >= 300.0
+                && rect.width() < 800.0),
+            "rechte Tafel"
+        );
     }
 
     #[test]
