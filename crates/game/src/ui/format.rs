@@ -27,7 +27,7 @@ pub fn grouped(value: f64) -> String {
         text.push(digit);
     }
     if value < -0.5 {
-        text.insert(0, '−');
+        text.insert(0, '-');
     }
     text
 }
@@ -52,6 +52,6 @@ mod tests {
         assert_eq!(grouped(3000.0), "3.000");
         assert_eq!(grouped(400_000.0), "400.000");
         assert_eq!(grouped(1_234_567.0), "1.234.567");
-        assert_eq!(grouped(-54_000.0), "−54.000");
+        assert_eq!(grouped(-54_000.0), "-54.000");
     }
 }

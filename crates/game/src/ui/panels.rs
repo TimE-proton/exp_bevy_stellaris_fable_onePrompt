@@ -57,6 +57,11 @@ pub enum UiAction {
 pub const ACCENT: Color32 = Color32::from_rgb(250, 180, 64);
 pub const MUTED: Color32 = Color32::from_rgb(140, 150, 165);
 
+/// Text für Einzelheiten und Erläuterungen: kleiner als der Fließtext, aber gut lesbar.
+pub fn detail(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(11.0)
+}
+
 pub fn apply_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     // Deckend: Durch leicht durchsichtige Leisten, Tafeln und Fenster schienen die
@@ -309,8 +314,8 @@ fn top_bar(
             state.help_open = !state.help_open;
         }
         ui.separator();
-        ui.toggle_value(&mut state.fleets_open, "Flotten");
-        ui.toggle_value(&mut state.tech_open, "Forschung");
+        ui.toggle_value(&mut state.fleets_open, fleets::TITLE);
+        ui.toggle_value(&mut state.tech_open, tech::TITLE);
         ui.toggle_value(&mut state.treasury_open, "Staat");
         ui.toggle_value(&mut state.exchange_open, "Börse");
         ui.toggle_value(&mut state.chains_open, "Ketten");

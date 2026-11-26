@@ -77,14 +77,14 @@ pub struct FleetMarker {
     pub target: Option<SystemId>,
 }
 
-/// Abstand zweier Flotten, die im selben System liegen.
+/// Kleinster Abstand zweier Flotten, die im selben System liegen.
 const BERTH_GAP: f32 = 15.0;
 
 /// Die Markierungen aller Flotten. Wer marschiert, steht auf seiner Route, um die
 /// Strecke vorgerückt, die er heute wirklich schafft ([`sim::fleet::Fleet::day_range`]:
 /// Antriebstechnik hebt sie, ein leerer Tank drosselt sie). Wer in einem System liegt
-/// oder dort kämpft, steht neben dem Stern; mehrere Flotten nebeneinander, damit im
-/// Gefecht beide Seiten zu sehen sind.
+/// oder dort kämpft, steht neben dem Stern; mehrere Flotten im Abstand `gap`
+/// nebeneinander, damit im Gefecht beide Seiten zu sehen sind.
 pub fn fleet_markers(
     data: &sim::GameData,
     galaxy: &Galaxy,
@@ -92,6 +92,7 @@ pub fn fleet_markers(
     battles: &Battles,
     research: &Research,
     day_fraction: f32,
+    gap: f32,
 ) -> Vec<FleetMarker> {
     let mut berths = vec![0u16; galaxy.systems.len()];
     fleets
@@ -112,7 +113,7 @@ pub fn fleet_markers(
                 )
             } else {
                 let berth = &mut berths[fleet.system.index()];
-                let offset = Vec2::new(11.0 + BERTH_GAP * *berth as f32, 9.0);
+                let offset = Vec2::new(11.0 + gap * *berth as f32, 9.0);
                 *berth += 1;
                 Vec2::from(galaxy.system(fleet.system).pos) + offset
             };
@@ -183,7 +184,17 @@ fn draw_traffic(
     // Flotten: Dreiecke in der Farbe ihrer Gemeinschaft. Im Gefecht rot umrandet; wer sich
     // nach einem Abzug sammelt, ist blasser und trägt einen offenen gelben Bogen.
     let size = 6.5 * scale.clamp(0.6, 2.0);
-    for marker in fleet_markers(&data, &galaxy, &fleets, &battles, &research, day_fraction) {
+    // Aus der Ferne sind die Markierungen größer; dann rücken sie auch weiter auseinander.
+    let gap = (size * 2.6).max(BERTH_GAP);
+    for marker in fleet_markers(
+        &data,
+        &galaxy,
+        &fleets,
+        &battles,
+        &research,
+        day_fraction,
+        gap,
+    ) {
         let at = marker.at;
         let regrouping = matches!(marker.state, FleetState::Regrouping { .. });
         let color = color_of(marker.owner).with_alpha(if regrouping { 0.55 } else { 1.0 });
@@ -306,6 +317,7 @@ mod tests {
             world.resource::<Battles>(),
             world.resource::<Research>(),
             day_fraction(world.resource::<SimClock>().tick),
+            BERTH_GAP,
         )
     }
 
@@ -478,6 +490,7 @@ mod tests {
                 &state.battles,
                 &state.research,
                 0.5,
+                BERTH_GAP,
             )
         };
         let shown = markers(&state);

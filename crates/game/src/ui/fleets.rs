@@ -1,7 +1,7 @@
 //! Flotten des Spielers: Schiffe, Zustand, Aufträge, Marsch und Rückzug.
 
 use super::format::{decimal, percent};
-use super::panels::{ACCENT, MUTED, SimRefs, UiAction, color32};
+use super::panels::{ACCENT, MUTED, SimRefs, UiAction, color32, detail};
 use crate::map::Selection;
 use bevy_egui::egui::{self, Color32, RichText};
 use sim::battle::{Doctrine, Formation};
@@ -9,6 +9,11 @@ use sim::clock::Date;
 use sim::command::SimCommand;
 use sim::data::{GameData, ShipClass};
 use sim::fleet::{Battles, Fleet, Stance};
+
+/// Beschriftungen des Fensters. Das README nennt sie; ein Test hält beide beieinander.
+pub const TITLE: &str = "Flotten";
+pub const MARCH: &str = "Marsch zum Ziel";
+pub const RETREAT: &str = "Rückzug";
 
 const BATTLE: Color32 = Color32::from_rgb(235, 110, 95);
 const REGROUP: Color32 = Color32::from_rgb(240, 190, 80);
@@ -106,10 +111,11 @@ pub fn ships_by_class(data: &GameData, fleet: &Fleet) -> String {
     }
 }
 
+/// Wo die Flotte steht; mit einer Route das zuletzt verlassene System und ihr Ziel.
 fn location(sim: &SimRefs, fleet: &Fleet) -> String {
     let here = &sim.galaxy.system(fleet.system).name;
     match fleet.route.last() {
-        Some(target) => format!("{} → {}", here, sim.galaxy.system(*target).name),
+        Some(target) => format!("{} nach {}", here, sim.galaxy.system(*target).name),
         None => here.clone(),
     }
 }
@@ -147,7 +153,7 @@ fn movement_button(
         FleetState::Fighting | FleetState::Retreating => {
             // Im Gefecht gibt es keinen Marsch: Der Weg hinaus ist der Rückzug.
             let ordered = state == FleetState::Retreating;
-            let button = egui::Button::new(RichText::new("Rückzug").color(BATTLE));
+            let button = egui::Button::new(RichText::new(RETREAT).color(BATTLE));
             let response = ui
                 .add_enabled(!ordered, button)
                 .on_hover_text(
@@ -162,7 +168,7 @@ fn movement_button(
             }
         }
         FleetState::Regrouping { until } => {
-            ui.add_enabled(false, egui::Button::new("Marsch zum Ziel"))
+            ui.add_enabled(false, egui::Button::new(MARCH))
                 .on_disabled_hover_text(format!(
                     "Die Flotte sammelt sich bis zum {} und nimmt so lange keinen Marschbefehl \
                      an. Einen Abzug führt sie zu Ende.",
@@ -173,7 +179,7 @@ fn movement_button(
             let can_move =
                 target.is_some_and(|system| system != fleet.system || !fleet.route.is_empty());
             let response = ui
-                .add_enabled(can_move, egui::Button::new("Marsch zum Ziel"))
+                .add_enabled(can_move, egui::Button::new(MARCH))
                 .on_disabled_hover_text(match target {
                     Some(system) => format!(
                         "Die Flotte liegt schon in {}.",
@@ -213,12 +219,14 @@ fn fleet_row(
         actions.push(UiAction::Focus(fleet.system));
     }
     ui.vertical(|ui| {
+        // Die Spalten sind so breit wie ihr Text; umbrochen wird in der Tabelle nicht.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.label(location(sim, fleet));
         let mut note = state.label();
         if !fleet.has_fuel() && !state.in_battle() {
             note.push_str(", Tank leer");
         }
-        let shown = ui.label(RichText::new(note).color(state.color()).small());
+        let shown = ui.label(detail(note).color(state.color()));
         if !fleet.has_fuel() {
             shown.on_hover_text(
                 "Ohne Treibstoff schleppt sich die Flotte nur noch voran; sie sperrt kein \
@@ -227,17 +235,17 @@ fn fleet_row(
         }
     });
     ui.vertical(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.label(ships_by_class(sim.data, fleet));
         let (ammo, fuel) = fleet.supply(sim.data);
         ui.label(
-            RichText::new(format!(
+            detail(format!(
                 "Stärke {} · Munition {} · Treibstoff {}",
                 decimal(fleet.strength as f64, 0),
                 percent(ammo),
                 percent(fuel)
             ))
-            .color(MUTED)
-            .small(),
+            .color(MUTED),
         );
     });
     if let Some(stance) = pick(
@@ -285,7 +293,7 @@ pub fn fleets_window(
     selection: &Selection,
     actions: &mut Vec<UiAction>,
 ) {
-    egui::Window::new("Flotten")
+    egui::Window::new(TITLE)
         .open(open)
         .default_pos([330.0, 110.0])
         .default_width(560.0)

@@ -4,9 +4,14 @@
 
 use crate::args::{Args, USAGE};
 use crate::battle_view::practice::{MAX_SHIPS_PER_SIDE, PRESETS, PracticeSetup};
+use crate::ui::fleets::{self, FleetState};
 use crate::ui::panels::BATTLE_KEYS;
+use crate::ui::tech;
 use sim::GameData;
 use sim::battle::{Doctrine, Formation};
+use sim::data::TechBranch;
+use sim::fleet::Stance;
+use sim::state::SAVE_FORMAT;
 
 const README: &str = include_str!("../../../README.md");
 
@@ -50,10 +55,58 @@ fn looks_like_a_fleet(word: &str) -> bool {
 fn the_manual_has_its_parts() {
     let manual = section("## Bedienung");
     // Die Unterabschnitte gehören zur Bedienung und nicht hinter den nächsten Abschnitt.
+    assert!(manual.contains("\n### Forschung\n"));
+    assert!(manual.contains("\n### Flotten\n"));
     assert!(manual.contains("\n### Gefechtsübung\n"));
     assert!(manual.contains("\n### Schlachtansicht\n"));
     assert!(!manual.contains("\n## "));
     assert!(section("### Gefechtsübung").len() < manual.len());
+}
+
+#[test]
+fn the_manual_names_what_the_research_and_fleet_windows_offer() {
+    // Knöpfe und Reiter stehen im README so, wie sie im Fenster beschriftet sind.
+    let research = section("### Forschung");
+    for label in [tech::TITLE, tech::RESEARCH, tech::SET_BUDGET] {
+        assert!(research.contains(&format!("„{label}“")), "„{label}“ fehlt");
+    }
+    // Lange Beschriftungen dürfen im Fließtext umbrechen.
+    let flowing = research.replace('\n', " ");
+    assert!(flowing.contains(&format!("„{}“", tech::AUTOMATIC)));
+    for tab in [tech::TAB_OWN, tech::TAB_OTHERS] {
+        assert!(research.contains(&format!("**{tab}.**")), "Reiter {tab}");
+    }
+    for branch in TechBranch::ALL {
+        assert!(research.contains(branch.label()), "{}", branch.label());
+    }
+
+    let fleet_part = section("### Flotten");
+    for label in [fleets::TITLE, fleets::MARCH, fleets::RETREAT] {
+        assert!(
+            fleet_part.contains(&format!("„{label}“")),
+            "„{label}“ fehlt"
+        );
+    }
+    for stance in Stance::ALL {
+        assert!(fleet_part.contains(stance.label()), "{}", stance.label());
+    }
+    // Jeder Zustand, den die Liste zeigt, hat seine Zeile.
+    for state in [
+        FleetState::Stationed,
+        FleetState::Marching,
+        FleetState::Fighting,
+    ] {
+        assert!(fleet_part.contains(&state.label()), "{}", state.label());
+    }
+    assert!(fleet_part.contains("| sammelt sich bis"));
+    assert!(
+        FleetState::Regrouping { until: 0 }
+            .label()
+            .starts_with("sammelt sich bis")
+    );
+
+    // Das Speicherformat, das das README nennt, ist das des Kerns.
+    assert!(section("## Bedienung").contains(&format!("Speicherformat unter {SAVE_FORMAT}")));
 }
 
 #[test]

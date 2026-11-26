@@ -116,12 +116,66 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
 | Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt"), Besitz (Zusammenhalt, Eigentümer) |
-| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staatsfinanzen, Flotten |
+| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staatsfinanzen, Forschung, Flotten |
 | F1 | Hilfe |
 | Esc | Menü |
 
 Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
 siehe unten.
+
+Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 4) lassen sich nicht
+mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist. Lehnt
+die Simulation einen Befehl ab, steht der Grund als Hinweis oben im Fenster.
+
+### Forschung
+
+„Forschung“ in der Kopfleiste öffnet das Forschungsfenster mit zwei Reitern.
+
+**Eigene Forschung.** Der Baum zeigt die fünf Zweige Wirtschaft, Antrieb, Waffen,
+Verteidigung und Bodenkrieg als Spalten und ihre Stufen als Zeilen. Jede Technologie nennt
+ihren Stand, ihre Kosten in Forschungspunkten und ihre Wirkungen.
+
+| Stand | Bedeutung |
+|---|---|
+| erforscht | Die Wirkungen gelten |
+| in Arbeit | Das Ziel, in das die Forschungspunkte fließen, mit dem Fortschritt und der Zeit bis zum Abschluss beim Tempo des letzten Monats |
+| Knopf „Erforschen“ | Alle Voraussetzungen sind erfüllt; der Knopf macht die Technologie zum Ziel. Was am bisherigen Ziel erarbeitet ist, bleibt erhalten |
+| fehlt: … | Gesperrt; genannt sind die Voraussetzungen, die noch fehlen |
+
+Über dem Baum stehen Etat und Ziel. Der Etat ist der Anteil der laufenden Staatseinnahmen,
+der monatlich in die Forschung geht: am Regler einstellen und mit „Etat festsetzen“
+bestätigen; er gilt ab dem nächsten Monatsersten. Gezahlt wird nur, was nach Sold und
+Einkäufen der Flotte über der Rücklage der Staatskasse liegt. Zu Beginn wählt eine
+Automatik das Ziel und prüft es jeden Monat. Ein selbst gesetztes Ziel gilt bis zu seinem
+Abschluss; danach ruht die Forschung, bis ein neues gewählt ist oder „Automatik
+einschalten“ die Wahl zurückgibt. Unter dem Baum steht die Summe der Wirkungen aller
+erforschten Technologien.
+
+**Einschätzung der anderen.** Den genauen Stand ihrer Forschung kennt nur jede Gemeinschaft
+selbst. Der Reiter zeigt je Gemeinschaft und Zweig die Spanne der Stufen, die nach dem
+eigenen Einblick möglich ist, etwa 0–4. In der Leiste daneben sind volle Kästchen bestätigt
+(mindestens diese Stufe), getönte möglich und leere ausgeschlossen; eine einzelne grüne
+Zahl ist genau bekannt. Der Einblick wächst durch Besitz an den Betrieben der anderen und
+durch Gefechte gegen sie; ohne neue Gefechte verblasst er wieder.
+
+### Flotten
+
+„Flotten“ in der Kopfleiste öffnet die Liste der eigenen Flotten: Ort und Zustand, Schiffe
+je Klasse, Stärke, Munition und Treibstoff. Je Flotte lassen sich der Auftrag (Wache,
+Blockade, Kaperfahrt, Geleitschutz) und für Gefechte Aufstellung und Doktrin wählen. Liegen
+fremde Flotten im gewählten System, nennt das Fenster auch sie.
+
+| Zustand | Was die Flotte annimmt |
+|---|---|
+| einsatzbereit, auf dem Marsch | „Marsch zum Ziel“ schickt sie in das System, das auf der Karte gewählt ist |
+| im Gefecht | Keinen Marsch. „Rückzug“ lässt die Schiffe das Feld verlassen und ist nicht umkehrbar; neue Aufstellung und Doktrin gelten sofort |
+| sammelt sich bis … | Nach dem Abzug aus einem Gefecht keinen Marschbefehl, bis die Frist abläuft; einen Abzug führt die Flotte zu Ende |
+
+Auf der Karte sind Flotten Dreiecke in der Farbe ihrer Gemeinschaft. Ein roter Ring heißt:
+im Gefecht; ein offener gelber Bogen: sammelt sich. Eine Flotte auf dem Marsch rückt jeden
+Tag um die Strecke vor, die Antriebstechnik und Treibstoff hergeben. Mit leerem Tank
+schleppt sie sich nur noch voran; dann sperrt sie kein System, kapert nicht und gibt kein
+Geleit.
 
 ### Gefechtsübung
 
@@ -413,7 +467,7 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 | 1 | Workspace, Galaxie, Planeten, Karte, Kamera, Zeitsteuerung | fertig |
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
-| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte; offen: Militär-KI, Oberfläche |
+| 4 | Raumkampf mit Schiffsklassen und Modulen | Kern fertig: Schiffe, Werften, Nachschub, Gefechte in der Partie, Forschung mit Wirkung auf Flotten und Gefechte. Oberfläche: Forschungsfenster, Flotten mit Zustand, Rückzug und stehenden Befehlen; offen: Militär-KI, Bauliste und Umgliedern im Flottenfenster, Gefechte der Partie in der 3D-Ansicht |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |

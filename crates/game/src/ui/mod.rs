@@ -6,7 +6,7 @@ mod finance;
 pub(crate) mod fleets;
 pub(crate) mod format;
 pub(crate) mod panels;
-mod tech;
+pub(crate) mod tech;
 #[cfg(test)]
 pub(crate) mod testing;
 

@@ -6,7 +6,7 @@
 //! Spannen, nie den wahren Stand.
 
 use super::format::{grouped, percent};
-use super::panels::{ACCENT, MUTED, SimRefs, UiAction, color32};
+use super::panels::{ACCENT, MUTED, SimRefs, UiAction, color32, detail};
 use super::{TechTab, UiState};
 use bevy_egui::egui::{self, Color32, RichText};
 use sim::command::SimCommand;
@@ -20,6 +20,14 @@ const GOOD: Color32 = Color32::from_rgb(120, 200, 130);
 const BAD: Color32 = Color32::from_rgb(235, 110, 95);
 const WARN: Color32 = Color32::from_rgb(240, 190, 80);
 const TEXT: Color32 = Color32::from_rgb(225, 230, 240);
+
+/// Beschriftungen des Fensters. Das README nennt sie; ein Test hält beide beieinander.
+pub const TITLE: &str = "Forschung";
+pub const TAB_OWN: &str = "Eigene Forschung";
+pub const TAB_OTHERS: &str = "Einschätzung der anderen";
+pub const RESEARCH: &str = "Erforschen";
+pub const SET_BUDGET: &str = "Etat festsetzen";
+pub const AUTOMATIC: &str = "Automatik einschalten";
 
 /// Breite einer Technologie im Baum.
 const CARD_WIDTH: f32 = 156.0;
@@ -165,24 +173,21 @@ pub fn tech_window(
 ) {
     let mut open = state.tech_open;
     let screen = ctx.content_rect();
-    egui::Window::new("Forschung")
+    egui::Window::new(TITLE)
         .open(&mut open)
         .resizable(false)
         .default_pos([300.0, 56.0])
-        // Platz für den ganzen Baum; das Fenster selbst ist so groß wie sein Inhalt.
-        .default_size([TREE_WIDTH + 24.0, screen.height()])
+        // Platz für den ganzen Baum unter der Kopfleiste; das Fenster selbst ist so groß
+        // wie sein Inhalt.
+        .default_size([TREE_WIDTH + 24.0, (screen.height() - 70.0).max(200.0)])
         .show(ctx, |ui| {
             let Some(player) = sim.config.player else {
                 ui.label("Beobachter forschen nicht.");
                 return;
             };
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.tech_tab, TechTab::Own, "Eigene Forschung");
-                ui.selectable_value(
-                    &mut state.tech_tab,
-                    TechTab::Others,
-                    "Einschätzung der anderen",
-                );
+                ui.selectable_value(&mut state.tech_tab, TechTab::Own, TAB_OWN);
+                ui.selectable_value(&mut state.tech_tab, TechTab::Others, TAB_OTHERS);
             });
             ui.separator();
             // In kleinen Fenstern rollt der Inhalt, statt über den Rand zu ragen.
@@ -273,7 +278,7 @@ fn budget(
             .research_percent
             .filter(|wanted| (wanted - current).abs() >= 0.5);
         let button = ui
-            .add_enabled(pending.is_some(), egui::Button::new("Etat festsetzen"))
+            .add_enabled(pending.is_some(), egui::Button::new(SET_BUDGET))
             .on_hover_text("Gilt ab dem nächsten Monatsersten.")
             .on_disabled_hover_text(format!(
                 "Es gilt der eingestellte Etat von {}.",
@@ -296,7 +301,7 @@ fn budget(
     let income = to_credits(sim.economy.state_income_of(player));
     let spent = to_credits(entry.spent_last_month);
     ui.label(
-        RichText::new(format!(
+        detail(format!(
             "Es gilt {} · Staatseinnahmen des Vormonats {} Credits · zuletzt {} Credits für \
              {} Forschungspunkte im Monat",
             percent(entry.budget_share as f32),
@@ -304,17 +309,15 @@ fn budget(
             grouped(spent),
             grouped(entry.points_last_month)
         ))
-        .color(MUTED)
-        .small(),
+        .color(MUTED),
     );
     if entry.budget_share > 0.0 && entry.target.is_some() && income > 0.0 && spent <= 0.0 {
         ui.label(
-            RichText::new(
+            detail(
                 "Im letzten Monat floss kein Geld in die Forschung: Die Staatskasse lag nicht \
                  über ihrer Rücklage.",
             )
-            .color(WARN)
-            .small(),
+            .color(WARN),
         );
     }
 }
@@ -372,21 +375,19 @@ fn target(
     ui.horizontal(|ui| {
         if entry.auto {
             ui.label(
-                RichText::new(
+                detail(
                     "Die Automatik wählt das Ziel und prüft es jeden Monat. „Erforschen“ an \
                      einer Technologie legt es selbst fest.",
                 )
-                .color(MUTED)
-                .small(),
+                .color(MUTED),
             );
         } else {
             ui.label(
-                RichText::new("Das Ziel ist selbst gewählt. Ist es erforscht, ruht die Forschung.")
-                    .color(MUTED)
-                    .small(),
+                detail("Das Ziel ist selbst gewählt. Ist es erforscht, ruht die Forschung.")
+                    .color(MUTED),
             );
             if ui
-                .small_button("Automatik einschalten")
+                .small_button(AUTOMATIC)
                 .on_hover_text(
                     "Die Wahl des Ziels geht an die Automatik zurück; sie wählt sofort neu.",
                 )
@@ -411,14 +412,13 @@ fn tree(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId, actions: &mut Vec<Ui
         .min_col_width(0.0)
         .spacing([6.0, 6.0])
         .show(ui, |ui| {
-            ui.label(RichText::new("Stufe").color(MUTED).small());
+            ui.label(detail("Stufe").color(MUTED));
             for branch in TechBranch::ALL {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(branch.label()).strong());
                     ui.label(
-                        RichText::new(format!("Stufe {}", sim.research.tier(data, player, branch)))
-                            .color(MUTED)
-                            .small(),
+                        detail(format!("Stufe {}", sim.research.tier(data, player, branch)))
+                            .color(MUTED),
                     );
                 });
             }
@@ -469,7 +469,7 @@ fn tech_card(
             ui.label(RichText::new(&def.name).strong().color(title));
             match &state {
                 TechState::Known => {
-                    ui.label(RichText::new("erforscht").color(GOOD).small());
+                    ui.label(detail("erforscht").color(GOOD));
                 }
                 TechState::Researching { done, months_left } => {
                     ui.add(
@@ -483,14 +483,12 @@ fn tech_card(
                         None => "Dauer offen".into(),
                     };
                     ui.label(
-                        RichText::new(format!("in Arbeit: {} · {time}", percent(*done)))
-                            .color(ACCENT)
-                            .small(),
+                        detail(format!("in Arbeit: {} · {time}", percent(*done))).color(ACCENT),
                     );
                 }
                 TechState::Available { done } => {
                     ui.horizontal(|ui| {
-                        let button = ui.small_button("Erforschen").on_hover_text(
+                        let button = ui.small_button(RESEARCH).on_hover_text(
                             "Als Forschungsziel setzen. Was am bisherigen Ziel erarbeitet \
                              ist, bleibt erhalten.",
                         );
@@ -500,7 +498,7 @@ fn tech_card(
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
                                 true,
-                                format!("Erforschen: {}", def.name),
+                                format!("{RESEARCH}: {}", def.name),
                             )
                         });
                         if button.clicked() {
@@ -509,11 +507,7 @@ fn tech_card(
                             }));
                         }
                         if *done > 0.005 {
-                            ui.label(
-                                RichText::new(format!("begonnen: {}", percent(*done)))
-                                    .color(MUTED)
-                                    .small(),
-                            );
+                            ui.label(detail(format!("begonnen: {}", percent(*done))).color(MUTED));
                         }
                     });
                 }
@@ -522,37 +516,33 @@ fn tech_card(
                         .iter()
                         .map(|required| data.techs[*required as usize].name.as_str())
                         .collect();
-                    ui.label(
-                        RichText::new(format!("gesperrt, es fehlt: {}", names.join(", ")))
-                            .color(MUTED)
-                            .small(),
-                    );
+                    // Gesperrt: Die Karte nennt, was noch fehlt.
+                    ui.label(detail(format!("fehlt: {}", names.join(", "))).color(MUTED));
                 }
             }
             let cost = sim.research.cost(data, player, tech);
             let known = state == TechState::Known;
             if !known && cost < def.cost - 0.5 {
-                ui.label(
-                    RichText::new(format!(
-                        "Kosten {} statt {}",
-                        grouped(cost),
-                        grouped(def.cost)
-                    ))
-                    .small(),
-                )
+                ui.label(detail(format!(
+                    "Kosten {} statt {}",
+                    grouped(cost),
+                    grouped(def.cost)
+                )))
                 .on_hover_text(
                     "Nachlass durch Wissenstransfer: Gemeinschaften in der Nähe beherrschen \
                      diese Stufe erkennbar.",
                 );
             } else {
                 ui.label(
-                    RichText::new(format!("Kosten {}", grouped(def.cost)))
-                        .color(if known { MUTED } else { TEXT })
-                        .small(),
+                    detail(format!("Kosten {}", grouped(def.cost))).color(if known {
+                        MUTED
+                    } else {
+                        TEXT
+                    }),
                 );
             }
             for effect in &def.effects {
-                ui.label(RichText::new(effect_text(*effect)).small());
+                ui.label(detail(effect_text(*effect)));
             }
         });
 }
@@ -576,10 +566,10 @@ fn estimates(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
             for title in ["Gemeinschaft", "Einblick"] {
-                ui.label(RichText::new(title).color(MUTED).small());
+                ui.label(detail(title).color(MUTED));
             }
             for branch in TechBranch::ALL {
-                ui.label(RichText::new(branch.label()).color(MUTED).small());
+                ui.label(detail(branch.label()).color(MUTED));
             }
             ui.end_row();
             // Zum Vergleich der eigene Stand; den kennt die Gemeinschaft genau.
@@ -599,7 +589,7 @@ fn estimates(ui: &mut egui::Ui, sim: &SimRefs, player: PolityId) {
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(BOX_WIDTH, BOX_HEIGHT), egui::Sense::hover());
             paint_box(ui, rect, kind, sample);
-            ui.label(RichText::new(label).color(MUTED).small());
+            ui.label(detail(label).color(MUTED));
             ui.add_space(8.0);
         }
     });
@@ -614,7 +604,7 @@ fn estimate_row(ui: &mut egui::Ui, sim: &SimRefs, viewer: PolityId, target: &Pol
                 .color(color)
                 .strong(),
         );
-        ui.label(RichText::new("eigener Stand").color(MUTED).small());
+        ui.label(detail("eigener Stand").color(MUTED));
     } else {
         ui.label(RichText::new(&target.name).color(color));
         ui.label(percent(sim.research.intel(viewer, target.id)))
@@ -668,7 +658,7 @@ fn paint_box(ui: &egui::Ui, rect: egui::Rect, kind: TierBox, color: Color32) {
             ui.painter().rect_stroke(
                 rect,
                 1.0,
-                egui::Stroke::new(1.0, blend(color, background, 0.75)),
+                egui::Stroke::new(1.0, blend(color, background, 0.5)),
                 egui::StrokeKind::Inside,
             );
         }
