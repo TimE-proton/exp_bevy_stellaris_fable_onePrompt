@@ -2,14 +2,23 @@
 //! laufen, speichert auf Wunsch Bildschirmfotos und beendet sich. Damit lässt sich prüfen,
 //! dass Fenster, Karte, Schlachtansicht, Oberfläche und Simulation gemeinsam hochkommen,
 //! auch ohne Menschen davor.
+//!
+//! „OK“ heißt mehr als „nicht abgestürzt“: Zu jedem Foto wird festgehalten, was die Engine
+//! in diesem Augenblick wirklich zeichnet, also im Sichtfeld der Kamera hat und nicht
+//! ausblendet (Schiffe und Wrackteile des Gefechts, Objekte der Karte), und am Ende müssen
+//! die verlangten Fotodateien geschrieben sein. Eine leere Szene, eine Kamera, die am
+//! Geschehen vorbeisieht, oder ein Foto, das nie ankam, ergeben „FEHLER“ und einen
+//! Fehlercode. Ob eine Tafel der Oberfläche etwas verdeckt, prüft der Selbsttest nicht;
+//! dafür sind die Fotos da.
 
 use crate::args::{Args, numbered};
 use crate::battle_view::feed::BattleFeed;
 use crate::battle_view::practice::{LINEUP_ROW_GAP, PracticeBattle};
 use crate::battle_view::{
-    CameraRequest, EffectStats, PART_LABELS, SelectedShip, ViewOptions, ViewTimings, to_world,
+    CameraRequest, EffectStats, PART_LABELS, SceneCensus, SelectedShip, ViewOptions, ViewTimings,
+    to_world,
 };
-use crate::map::{FocusSystem, Selection};
+use crate::map::{FocusSystem, MapCensus, Selection};
 use crate::session::SessionRequest;
 use crate::state::AppState;
 use crate::time_control::{SPEEDS, SimSpeed};
@@ -20,12 +29,60 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use sim::battle::{Battle, BeamKind};
 use sim::clock::SimClock;
 use sim::galaxy::Galaxy;
+use std::path::{Path, PathBuf};
+
+/// So viele Frames wartet der Selbsttest am Ende höchstens darauf, dass die Engine die
+/// angeforderten Fotos geschrieben hat (sie tut das einige Frames nach der Anforderung).
+const PHOTO_WAIT_FRAMES: u32 = 90;
+
+/// Fordert ein Bildschirmfoto an. Eine alte Datei gleichen Namens verschwindet vorher:
+/// Liegt die Datei am Ende da, stammt sie aus diesem Lauf.
+fn take_photo(commands: &mut Commands, path: PathBuf) {
+    let _ = std::fs::remove_file(&path);
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
+
+/// Liegt das Foto vor, mit Inhalt?
+fn photo_written(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|file| file.len() > 0)
+}
 
 #[derive(Resource)]
 struct Selftest {
     total: u32,
     frame: u32,
     shot_taken: bool,
+    /// Datei des angeforderten Fotos.
+    photo: Option<PathBuf>,
+    /// Zahl der Kartenobjekte im Sichtfeld der Kamera, als das Foto ausgelöst wurde.
+    visible: Option<usize>,
+    /// Frames, die am Ende schon auf das Foto gewartet wurde.
+    waited: u32,
+}
+
+impl Selftest {
+    /// Das verlangte Foto, solange es (noch) nicht vorliegt.
+    fn missing_photo(&self) -> Option<&Path> {
+        self.photo.as_deref().filter(|path| !photo_written(path))
+    }
+
+    /// Was am Ende gegen ein „OK“ spricht: eine Karte, von der nichts im Sichtfeld der
+    /// Kamera lag, und ein Foto, das nicht geschrieben wurde.
+    fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.visible.unwrap_or(0) == 0 {
+            problems.push("von der Karte liegt nichts im Sichtfeld der Kamera".to_string());
+        }
+        if let Some(path) = self.missing_photo() {
+            problems.push(format!(
+                "das Foto {} wurde nicht geschrieben",
+                path.display()
+            ));
+        }
+        problems
+    }
 }
 
 pub struct SelftestPlugin;
@@ -51,6 +108,9 @@ impl Plugin for SelftestPlugin {
             total: frames.max(30),
             frame: 0,
             shot_taken: false,
+            photo: None,
+            visible: None,
+            waited: 0,
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
         .add_systems(Update, drive.run_if(in_state(AppState::InGame)));
@@ -72,6 +132,7 @@ fn drive(
     mut ui_state: ResMut<UiState>,
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
+    census: MapCensus,
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -90,28 +151,41 @@ fn drive(
         ui_state.tab = LeftTab::Ownership;
         ui_state.exchange_open = true;
     }
-    if test.frame == total.saturating_sub(12)
-        && !test.shot_taken
-        && let Some(path) = args.screenshot.clone()
-    {
+    if test.frame >= total.saturating_sub(12) && !test.shot_taken {
         test.shot_taken = true;
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path));
+        // Was die Kamera in diesem Augenblick von der Karte erfasst, gehört zum Urteil.
+        test.visible = Some(census.visible());
+        if let Some(path) = args.screenshot.clone() {
+            take_photo(&mut commands, path.clone());
+            test.photo = Some(path);
+        }
     }
     if test.frame >= total {
+        // Die Engine schreibt das Foto einige Frames nach der Anforderung.
+        if test.missing_photo().is_some() && test.waited < PHOTO_WAIT_FRAMES {
+            test.waited += 1;
+            return;
+        }
+        let problems = test.problems();
+        if !problems.is_empty() {
+            println!("SELBSTTEST FEHLER: {}", problems.join("; "));
+            exit.write(AppExit::error());
+            return;
+        }
         let owned = galaxy
             .planets
             .iter()
             .filter(|planet| planet.owner.is_some())
             .count();
         println!(
-            "SELBSTTEST OK: {} Frames, Datum {}, Takt {}, {} von {} Planeten besiedelt",
+            "SELBSTTEST OK: {} Frames, Datum {}, Takt {}, {} von {} Planeten besiedelt, \
+             {} Kartenobjekte im Sichtfeld der Kamera",
             test.frame,
             clock.date(),
             clock.tick,
             owned,
-            galaxy.planets.len()
+            galaxy.planets.len(),
+            test.visible.unwrap_or(0),
         );
         exit.write(AppExit::Success);
     }
@@ -154,9 +228,75 @@ struct Pending {
     frames_left: u32,
     /// Nummer des Fotos; 0 heißt: nur warten.
     photo: u32,
+    /// Was auf dem Foto zu sehen sein muss.
+    subject: Subject,
     next: Phase,
     /// Stufe, mit der es danach weitergeht; `None` lässt die Zeit angehalten.
     resume: Option<usize>,
+}
+
+/// Was ein Foto zeigen muss.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Subject {
+    /// Jedes Schiff auf dem Feld (Übersicht, alle Klassen der Schaustellung).
+    AllShips,
+    /// Wenigstens so viele Schiffe (Nahaufnahmen).
+    Ships(usize),
+    /// Wracks und Trümmer, wenn es welche gibt; sonst wenigstens ein Schiff.
+    Wreckage,
+}
+
+/// Was in der Szene stand und im Sichtfeld der Kamera lag, als ein Foto ausgelöst wurde.
+#[derive(Clone, Debug, PartialEq)]
+struct Photo {
+    number: u32,
+    /// Datei, wenn eine verlangt war.
+    path: Option<PathBuf>,
+    subject: Subject,
+    /// Schiffe auf dem Feld laut Gefecht.
+    in_play: usize,
+    /// Rümpfe in der Szene und davon im Sichtfeld der Kamera.
+    hulls: usize,
+    visible_hulls: usize,
+    /// Wracks laut Gefecht und Wrackteile im Sichtfeld der Kamera.
+    wrecks: usize,
+    visible_wreck_parts: usize,
+}
+
+impl Photo {
+    /// Was an dem Foto nicht stimmt: Die Szene zeigt nicht, was das Gefecht hält, oder das
+    /// Verlangte liegt nicht im Sichtfeld der Kamera.
+    fn problem(&self) -> Option<String> {
+        let number = self.number;
+        if self.hulls != self.in_play {
+            return Some(format!(
+                "Foto {number}: {} Schiffe auf dem Feld, aber {} Rümpfe in der Szene",
+                self.in_play, self.hulls
+            ));
+        }
+        // Gleich, was das Foto zeigen soll: Vom Gefecht muss etwas zu sehen sein.
+        if self.in_play + self.wrecks > 0 && self.visible_hulls + self.visible_wreck_parts == 0 {
+            return Some(format!(
+                "Foto {number}: weder Schiff noch Wrack im Sichtfeld der Kamera"
+            ));
+        }
+        match self.subject {
+            Subject::AllShips if self.visible_hulls < self.in_play => Some(format!(
+                "Foto {number}: nur {} von {} Schiffen im Sichtfeld der Kamera",
+                self.visible_hulls, self.in_play
+            )),
+            Subject::Ships(least) if self.visible_hulls < least.min(self.in_play) => Some(format!(
+                "Foto {number}: {} Schiffe im Sichtfeld der Kamera, mindestens {} verlangt",
+                self.visible_hulls,
+                least.min(self.in_play)
+            )),
+            Subject::Wreckage if self.wrecks > 0 && self.visible_wreck_parts == 0 => Some(format!(
+                "Foto {number}: {} Wracks, aber kein Wrackteil im Sichtfeld der Kamera",
+                self.wrecks
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -170,7 +310,10 @@ struct PracticeTest {
     contact: Option<f32>,
     /// Gefechtszeit, zu der die laufende Phase begann.
     phase_since: f32,
-    photos: u32,
+    /// Die ausgelösten Fotos und was dabei im Sichtfeld der Kamera lag.
+    photos: Vec<Photo>,
+    /// Frames, die am Ende schon auf die Fotodateien gewartet wurde.
+    waited: u32,
     peak_in_play: usize,
 }
 
@@ -188,7 +331,8 @@ impl PracticeTest {
             pending: None,
             contact: None,
             phase_since: 0.0,
-            photos: 0,
+            photos: Vec::new(),
+            waited: 0,
             peak_in_play: 0,
         }
     }
@@ -200,7 +344,7 @@ impl PracticeTest {
         &mut self,
         speed: &mut SimSpeed,
         clock: &mut Time<Virtual>,
-        photo: u32,
+        (photo, subject): (u32, Subject),
         next: Phase,
         resume: Option<usize>,
     ) {
@@ -209,9 +353,42 @@ impl PracticeTest {
         self.pending = Some(Pending {
             frames_left: 2 * SETTLE_FRAMES,
             photo,
+            subject,
             next,
             resume,
         });
+    }
+
+    /// So viele Fotos gehören mindestens zu einem vollständigen Lauf (das vierte Foto des
+    /// Gefechts gibt es nur, wenn es zu Ende kam).
+    fn wanted(&self) -> u32 {
+        if self.lineup { LINEUP_PHOTOS } else { 3 }
+    }
+
+    /// Was am Ende gegen ein „OK“ spricht: Fotos, die fehlen oder nicht zeigen, was sie
+    /// sollen, und Dateien, die nicht geschrieben wurden.
+    fn problems(&self) -> Vec<String> {
+        let wanted = self.wanted();
+        let mut problems: Vec<String> = self.photos.iter().filter_map(Photo::problem).collect();
+        if (self.photos.len() as u32) < wanted {
+            problems.push(format!("nur {} von {wanted} Fotos", self.photos.len()));
+        }
+        for path in self.missing_files() {
+            problems.push(format!(
+                "das Foto {} wurde nicht geschrieben",
+                path.display()
+            ));
+        }
+        problems
+    }
+
+    /// Verlangte Fotodateien, die (noch) nicht vorliegen.
+    fn missing_files(&self) -> Vec<&Path> {
+        self.photos
+            .iter()
+            .filter_map(|photo| photo.path.as_deref())
+            .filter(|path| !photo_written(path))
+            .collect()
     }
 }
 
@@ -328,6 +505,7 @@ fn drive_practice(
     feed: Res<BattleFeed>,
     practice: Option<Res<PracticeBattle>>,
     stats: Res<EffectStats>,
+    census: SceneCensus,
     mut timings: ResMut<ViewTimings>,
     mut speed: ResMut<SimSpeed>,
     mut clock: ResMut<Time<Virtual>>,
@@ -359,12 +537,24 @@ fn drive_practice(
     if let Some(mut pending) = test.pending {
         pending.frames_left = pending.frames_left.saturating_sub(1);
         if pending.frames_left == SETTLE_FRAMES && pending.photo > 0 {
-            if let Some(path) = args.screenshot.as_deref() {
-                commands
-                    .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(numbered(path, pending.photo)));
+            let path = args
+                .screenshot
+                .as_deref()
+                .map(|path| numbered(path, pending.photo));
+            if let Some(path) = &path {
+                take_photo(&mut commands, path.clone());
             }
-            test.photos += 1;
+            // Was die Kamera jetzt erfasst, gehört zum Urteil über dieses Foto.
+            test.photos.push(Photo {
+                number: pending.photo,
+                path,
+                subject: pending.subject,
+                in_play,
+                hulls: census.hulls(),
+                visible_hulls: census.visible_hulls(),
+                wrecks: battle.wrecks.len(),
+                visible_wreck_parts: census.visible_wreck_parts(),
+            });
         }
         if pending.frames_left == 0 {
             test.phase = pending.next;
@@ -403,7 +593,13 @@ fn drive_practice(
                 || out_of_time
             {
                 camera.write(CameraRequest::Overview);
-                test.hold(&mut speed, &mut clock, 1, Phase::CloseUp, Some(FIGHT_SPEED));
+                test.hold(
+                    &mut speed,
+                    &mut clock,
+                    (1, Subject::AllShips),
+                    Phase::CloseUp,
+                    Some(FIGHT_SPEED),
+                );
             }
         }
         Phase::CloseUp => {
@@ -426,7 +622,7 @@ fn drive_practice(
                 test.hold(
                     &mut speed,
                     &mut clock,
-                    2,
+                    (2, Subject::Ships(1)),
                     Phase::Aftermath,
                     Some(FIGHT_SPEED),
                 );
@@ -435,7 +631,7 @@ fn drive_practice(
                 test.hold(
                     &mut speed,
                     &mut clock,
-                    2,
+                    (2, Subject::Ships(1)),
                     Phase::Aftermath,
                     Some(FIGHT_SPEED),
                 );
@@ -474,7 +670,7 @@ fn drive_practice(
                 test.hold(
                     &mut speed,
                     &mut clock,
-                    3,
+                    (3, Subject::Wreckage),
                     Phase::Finish,
                     Some(SPEEDS.len() - 1),
                 );
@@ -487,7 +683,13 @@ fn drive_practice(
                 camera.write(CameraRequest::Overview);
                 options.summary = true;
                 let photo = if battle.finished { 4 } else { 0 };
-                test.hold(&mut speed, &mut clock, photo, Phase::Done, None);
+                test.hold(
+                    &mut speed,
+                    &mut clock,
+                    (photo, Subject::AllShips),
+                    Phase::Done,
+                    None,
+                );
             }
         }
         Phase::Lineup(_) if frame < WARMUP_FRAMES => {}
@@ -530,11 +732,26 @@ fn drive_practice(
             } else {
                 Phase::Lineup(step + 1)
             };
-            test.hold(&mut speed, &mut clock, step, next, None);
+            // Erst alle Klassen, dann je zwei aus der Nähe.
+            let subject = if step == 1 {
+                Subject::AllShips
+            } else {
+                Subject::Ships(2)
+            };
+            test.hold(&mut speed, &mut clock, (step, subject), next, None);
         }
         Phase::Done => {
-            let wanted = if test.lineup { LINEUP_PHOTOS } else { 3 };
-            let complete = test.photos >= wanted;
+            // Die Engine schreibt die Fotos einige Frames nach der Anforderung.
+            if !test.missing_files().is_empty() && test.waited < PHOTO_WAIT_FRAMES {
+                test.waited += 1;
+                return;
+            }
+            let problems = test.problems();
+            if !problems.is_empty() {
+                println!("SELBSTTEST FEHLER: {}", problems.join("; "));
+                exit.write(AppExit::error());
+                return;
+            }
             let ended = if test.lineup {
                 "Schaustellung".to_string()
             } else if battle.finished {
@@ -560,11 +777,20 @@ fn drive_practice(
                     practice.feed_time.as_secs_f64() * 1e6 / ticks
                 )
             });
-            let verdict = if complete { "OK" } else { "FEHLER" };
+            let seen: Vec<String> = test
+                .photos
+                .iter()
+                .map(|photo| {
+                    format!(
+                        "{}: {} von {} Schiffen und {} Wrackteile",
+                        photo.number, photo.visible_hulls, photo.in_play, photo.visible_wreck_parts
+                    )
+                })
+                .collect();
             println!(
-                "SELBSTTEST {verdict}: Gefechtsübung, {frame} Frames, Gefechtszeit {} s ({ended}), \
+                "SELBSTTEST OK: Gefechtsübung, {frame} Frames, Gefechtszeit {} s ({ended}), \
                  {} Schiffe ({} zugleich im Feld), {} Wracks, höchstens {} Geschosse und {} Strahlen gezeigt, \
-                 {} Effektplätze, {} Fotos, Ansicht {:.0} µs im Mittel (Median {:.0} µs) und {:.0} µs höchstens je Frame \
+                 {} Effektplätze, {} Fotos (im Sichtfeld der Kamera je Foto: {}), Ansicht {:.0} µs im Mittel (Median {:.0} µs) und {:.0} µs höchstens je Frame \
                  (im Mittel: {}; im teuersten Frame: {}; {} Frames gemessen){per_tick}",
                 decimal(battle.time as f64, 1),
                 battle.ships.len(),
@@ -573,7 +799,8 @@ fn drive_practice(
                 stats.peak_shots,
                 stats.peak_beams,
                 stats.entities,
-                test.photos,
+                test.photos.len(),
+                seen.join("; "),
                 timings.average_micros(),
                 timings.median_micros(),
                 timings.worst_micros(),
@@ -581,11 +808,381 @@ fn drive_practice(
                 worst_parts.join(", "),
                 timings.frames,
             );
-            exit.write(if complete {
-                AppExit::Success
-            } else {
-                AppExit::error()
+            exit.write(AppExit::Success);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::battle_view::{BattleCamera, ShipVisual};
+    use crate::map::MapCamera;
+    use crate::testing::TestGame;
+
+    /// Ein Foto, an dem nichts auszusetzen ist: zehn Schiffe, alle im Bild, dazu Wracks.
+    fn photo(subject: Subject) -> Photo {
+        Photo {
+            number: 1,
+            path: None,
+            subject,
+            in_play: 10,
+            hulls: 10,
+            visible_hulls: 10,
+            wrecks: 3,
+            visible_wreck_parts: 12,
+        }
+    }
+
+    fn problem(photo: Photo) -> String {
+        photo.problem().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_photo_is_judged_by_what_is_in_view() {
+        for subject in [Subject::AllShips, Subject::Ships(2), Subject::Wreckage] {
+            assert_eq!(photo(subject).problem(), None, "{subject:?}");
+            // Das Gefecht hält Schiffe, die Szene zeigt keine.
+            let empty = Photo {
+                hulls: 0,
+                visible_hulls: 0,
+                ..photo(subject)
+            };
+            assert!(
+                problem(empty).contains("aber 0 Rümpfe in der Szene"),
+                "{subject:?}"
+            );
+            // Die Szene steht, aber die Kamera sieht nichts davon.
+            let blank = Photo {
+                visible_hulls: 0,
+                visible_wreck_parts: 0,
+                ..photo(subject)
+            };
+            assert!(
+                problem(blank).contains("weder Schiff noch Wrack im Sichtfeld der Kamera"),
+                "{subject:?}"
+            );
+        }
+
+        // Die Übersicht muss jedes Schiff zeigen.
+        let partial = Photo {
+            visible_hulls: 9,
+            ..photo(Subject::AllShips)
+        };
+        assert!(problem(partial).contains("nur 9 von 10 Schiffen im Sichtfeld der Kamera"));
+
+        // Eine Nahaufnahme braucht die verlangten Schiffe, aber nicht mehr, als es gibt.
+        let alone = Photo {
+            visible_hulls: 1,
+            ..photo(Subject::Ships(2))
+        };
+        assert!(
+            problem(alone).contains("1 Schiffe im Sichtfeld der Kamera, mindestens 2 verlangt")
+        );
+        let last_ship = Photo {
+            in_play: 1,
+            hulls: 1,
+            visible_hulls: 1,
+            ..photo(Subject::Ships(2))
+        };
+        assert_eq!(last_ship.problem(), None);
+
+        // Das Trümmerfoto braucht Wrackteile, wenn es Wracks gibt; Schiffe im Bild ersetzen
+        // sie nicht.
+        let no_parts = Photo {
+            visible_wreck_parts: 0,
+            ..photo(Subject::Wreckage)
+        };
+        assert!(
+            problem(no_parts).contains("3 Wracks, aber kein Wrackteil im Sichtfeld der Kamera")
+        );
+        let no_wrecks = Photo {
+            wrecks: 0,
+            visible_wreck_parts: 0,
+            visible_hulls: 1,
+            ..photo(Subject::Wreckage)
+        };
+        assert_eq!(no_wrecks.problem(), None);
+
+        // Nach einem Gefecht ohne Überlebende zeigt die Übersicht die Wracks.
+        let graveyard = Photo {
+            in_play: 0,
+            hulls: 0,
+            visible_hulls: 0,
+            ..photo(Subject::AllShips)
+        };
+        assert_eq!(graveyard.problem(), None);
+    }
+
+    /// Ein Ort für ein Foto dieses Tests.
+    fn photo_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("konfluenz_test_{}_{name}.png", std::process::id()))
+    }
+
+    #[test]
+    fn missing_photos_and_files_count_against_the_run() {
+        let mut test = PracticeTest::new(400, false);
+        assert_eq!(test.problems(), ["nur 0 von 3 Fotos"]);
+        for number in 1..=3 {
+            test.photos.push(Photo {
+                number,
+                ..photo(Subject::AllShips)
             });
         }
+        assert_eq!(test.problems(), Vec::<String>::new());
+
+        // Ein verlangtes Foto zählt erst, wenn die Datei mit Inhalt vorliegt.
+        let path = photo_file("urteil");
+        let _ = std::fs::remove_file(&path);
+        test.photos[1].path = Some(path.clone());
+        assert_eq!(test.missing_files(), [path.as_path()]);
+        assert_eq!(
+            test.problems(),
+            [format!(
+                "das Foto {} wurde nicht geschrieben",
+                path.display()
+            )]
+        );
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(test.problems().len(), 1, "eine leere Datei ist kein Foto");
+        std::fs::write(&path, b"bild").unwrap();
+        assert_eq!(test.problems(), Vec::<String>::new());
+        std::fs::remove_file(&path).unwrap();
+
+        // Die Schaustellung braucht alle vier Fotos.
+        let mut lineup = PracticeTest::new(200, true);
+        lineup.photos = test.photos.clone();
+        lineup.photos[1].path = None;
+        assert_eq!(lineup.problems(), ["nur 3 von 4 Fotos"]);
+    }
+
+    /// Lässt den Selbsttest der Gefechtsübung ohne Fenster bis zum Urteil laufen; `disturb`
+    /// darf die Szene vorher stören.
+    fn practice_run(
+        command_line: &str,
+        disturb: impl FnOnce(&mut App),
+    ) -> (AppExit, Vec<String>, Vec<Photo>) {
+        let mut game = TestGame::start(command_line);
+        disturb(&mut game.app);
+        let exit = game.run_to_exit(1500);
+        let test = game.resource::<PracticeTest>();
+        (exit, test.problems(), test.photos.clone())
+    }
+
+    const BATTLE: &str = "--practice --selftest 400 --seed 3";
+    const LINEUP: &str = "--practice --lineup --selftest 200";
+
+    #[test]
+    fn the_practice_selftest_passes_with_the_battle_in_view() {
+        let (exit, problems, photos) = practice_run(BATTLE, |_| {});
+        assert_eq!(exit, AppExit::Success, "{problems:?}");
+        assert!(photos.len() >= 3, "{photos:?}");
+        // Die Übersicht hat jedes Schiff im Bild, und es sind welche da.
+        let overview = &photos[0];
+        assert_eq!(overview.subject, Subject::AllShips);
+        assert!(overview.in_play > 0);
+        assert_eq!(overview.hulls, overview.in_play);
+        assert_eq!(overview.visible_hulls, overview.in_play);
+        // Die Nahaufnahme zeigt Schiffe, das Trümmerfoto Wrackteile.
+        assert!(photos[1].visible_hulls >= 1, "{:?}", photos[1]);
+        assert!(photos[2].wrecks > 0, "{:?}", photos[2]);
+        assert!(photos[2].visible_wreck_parts > 0, "{:?}", photos[2]);
+    }
+
+    #[test]
+    fn the_practice_selftest_passes_for_every_preset_fleet() {
+        // Vom Geplänkel bis zum Großgefecht mit Bordjägern: Die Übersicht erfasst jedes
+        // Schiff, und der Selbsttest hat nichts auszusetzen.
+        for preset in &crate::battle_view::practice::PRESETS {
+            let [a, b] = preset.fleets;
+            let (exit, problems, photos) =
+                practice_run(&format!("{BATTLE} --fleet-a {a} --fleet-b {b}"), |_| {});
+            assert_eq!(exit, AppExit::Success, "{}: {problems:?}", preset.name);
+            assert!(photos[0].in_play > 0, "{}", preset.name);
+            assert_eq!(
+                photos[0].visible_hulls, photos[0].in_play,
+                "{}",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_lineup_selftest_passes_with_every_class_in_view() {
+        let (exit, problems, photos) = practice_run(LINEUP, |_| {});
+        assert_eq!(exit, AppExit::Success, "{problems:?}");
+        assert_eq!(photos.len(), LINEUP_PHOTOS as usize);
+        assert!(photos[0].in_play > 0);
+        assert_eq!(photos[0].visible_hulls, photos[0].in_play);
+        for photo in &photos[1..] {
+            assert!(photo.visible_hulls >= 2, "{photo:?}");
+        }
+    }
+
+    fn hide_hulls(mut hulls: Query<&mut Visibility, With<ShipVisual>>) {
+        for mut visibility in &mut hulls {
+            *visibility = Visibility::Hidden;
+        }
+    }
+
+    fn hide_one_hull(mut hulls: Query<(&ShipVisual, &mut Visibility)>) {
+        for (hull, mut visibility) in &mut hulls {
+            if hull.index == 0 {
+                *visibility = Visibility::Hidden;
+            }
+        }
+    }
+
+    fn remove_hulls(mut commands: Commands, hulls: Query<Entity, With<ShipVisual>>) {
+        for hull in &hulls {
+            commands.entity(hull).despawn();
+        }
+    }
+
+    /// Stellt die Schlachtkamera weit über das Feld, mit dem Rücken zu ihm.
+    fn look_away(mut camera: Single<&mut Transform, With<BattleCamera>>) {
+        **camera = Transform::from_xyz(0.0, 90_000.0, 0.0).looking_to(Vec3::Y, Vec3::Z);
+    }
+
+    #[test]
+    fn the_practice_selftest_fails_when_the_ships_are_hidden() {
+        let (exit, problems, photos) = practice_run(LINEUP, |app| {
+            app.add_systems(Update, hide_hulls);
+        });
+        assert!(exit.is_error(), "{photos:?}");
+        assert_eq!(problems.len(), LINEUP_PHOTOS as usize, "{problems:?}");
+        for problem in &problems {
+            assert!(
+                problem.contains("weder Schiff noch Wrack im Sichtfeld der Kamera"),
+                "{problem}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_practice_selftest_fails_when_the_camera_looks_elsewhere() {
+        let (exit, problems, photos) = practice_run(BATTLE, |app| {
+            app.add_systems(PostUpdate, look_away.before(TransformSystems::Propagate));
+        });
+        assert!(exit.is_error(), "{photos:?}");
+        assert!(photos.len() >= 3);
+        // Jedes Foto zeigt den leeren Raum, und jedes wird beanstandet.
+        assert_eq!(problems.len(), photos.len(), "{problems:?}");
+        for problem in &problems {
+            assert!(
+                problem.contains("weder Schiff noch Wrack im Sichtfeld der Kamera"),
+                "{problem}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_practice_selftest_fails_when_one_ship_is_missing_from_the_overview() {
+        let (exit, problems, photos) = practice_run(LINEUP, |app| {
+            app.add_systems(Update, hide_one_hull);
+        });
+        assert!(exit.is_error(), "{photos:?}");
+        let all = photos[0].in_play;
+        assert!(
+            problems.contains(&format!(
+                "Foto 1: nur {} von {all} Schiffen im Sichtfeld der Kamera",
+                all - 1
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_practice_selftest_fails_when_the_scene_holds_no_ships() {
+        let (exit, problems, photos) = practice_run(LINEUP, |app| {
+            app.add_systems(Update, remove_hulls);
+        });
+        assert!(exit.is_error(), "{photos:?}");
+        let all = photos[0].in_play;
+        assert!(all > 0);
+        assert!(
+            problems.contains(&format!(
+                "Foto 1: {all} Schiffe auf dem Feld, aber 0 Rümpfe in der Szene"
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_practice_photo_that_was_never_written_fails_the_selftest() {
+        // Ohne Grafikkarte entsteht kein Foto. Eine alte Datei gleichen Namens darf nicht
+        // als Foto dieses Laufs durchgehen.
+        let path = photo_file("schau");
+        let stale = numbered(&path, 1);
+        std::fs::write(&stale, b"alt").unwrap();
+        let (exit, problems, photos) =
+            practice_run(&format!("{LINEUP} --screenshot {}", path.display()), |_| {});
+        assert!(exit.is_error(), "{photos:?}");
+        assert_eq!(problems.len(), LINEUP_PHOTOS as usize, "{problems:?}");
+        assert!(
+            problems.contains(&format!(
+                "das Foto {} wurde nicht geschrieben",
+                stale.display()
+            )),
+            "{problems:?}"
+        );
+        assert!(!stale.exists());
+    }
+
+    fn campaign_run(
+        command_line: &str,
+        disturb: impl FnOnce(&mut App),
+    ) -> (AppExit, Vec<String>, Option<usize>) {
+        let mut game = TestGame::start(command_line);
+        disturb(&mut game.app);
+        let exit = game.run_to_exit(600);
+        let test = game.resource::<Selftest>();
+        (exit, test.problems(), test.visible)
+    }
+
+    const CAMPAIGN: &str = "--selftest 60 --seed 3";
+
+    #[test]
+    fn the_campaign_selftest_passes_with_the_map_in_view() {
+        let (exit, problems, visible) = campaign_run(CAMPAIGN, |_| {});
+        assert_eq!(exit, AppExit::Success, "{problems:?}");
+        assert!(visible.is_some_and(|visible| visible > 0), "{visible:?}");
+    }
+
+    /// Schiebt die Kartenkamera weit neben die Galaxie.
+    fn lose_the_map(mut camera: Single<&mut Transform, With<MapCamera>>) {
+        camera.translation.x = 4.0e6;
+    }
+
+    #[test]
+    fn the_campaign_selftest_fails_when_the_map_is_out_of_view() {
+        let (exit, problems, visible) = campaign_run(CAMPAIGN, |app| {
+            app.add_systems(PostUpdate, lose_the_map.before(TransformSystems::Propagate));
+        });
+        assert!(exit.is_error(), "{visible:?}");
+        assert_eq!(
+            problems,
+            ["von der Karte liegt nichts im Sichtfeld der Kamera"]
+        );
+    }
+
+    #[test]
+    fn a_campaign_photo_that_was_never_written_fails_the_selftest() {
+        let path = photo_file("partie");
+        std::fs::write(&path, b"alt").unwrap();
+        let (exit, problems, visible) = campaign_run(
+            &format!("{CAMPAIGN} --screenshot {}", path.display()),
+            |_| {},
+        );
+        assert!(exit.is_error());
+        assert!(visible.is_some_and(|visible| visible > 0));
+        assert_eq!(
+            problems,
+            [format!(
+                "das Foto {} wurde nicht geschrieben",
+                path.display()
+            )]
+        );
+        assert!(!path.exists());
     }
 }

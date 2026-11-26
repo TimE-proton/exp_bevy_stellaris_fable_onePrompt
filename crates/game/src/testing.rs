@@ -80,18 +80,16 @@ impl TestGame {
         }
     }
 
-    /// Lässt Frames laufen, bis `done` zutrifft; bricht nach `limit` Frames ab.
-    pub fn frames_until(&mut self, limit: usize, mut done: impl FnMut(&mut World) -> bool) {
+    /// Lässt Frames laufen, bis das Spiel sich beenden will, und liefert, womit. Bricht
+    /// nach `limit` Frames ab.
+    pub fn run_to_exit(&mut self, limit: usize) -> AppExit {
         for _ in 0..limit {
-            if done(self.app.world_mut()) {
-                return;
-            }
             self.app.update();
+            if let Some(exit) = self.app.should_exit() {
+                return exit;
+            }
         }
-        assert!(
-            done(self.app.world_mut()),
-            "nach {limit} Frames nicht eingetreten"
-        );
+        panic!("nach {limit} Frames hat sich das Spiel nicht beendet");
     }
 
     pub fn world(&self) -> &World {

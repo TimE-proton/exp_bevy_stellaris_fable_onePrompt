@@ -110,12 +110,6 @@ impl Screen {
         self.draw(&mut draw)
     }
 
-    /// Bewegt den Mauszeiger an eine Stelle und lässt ihn dort einen Durchlauf lang ruhen.
-    pub fn hover(&mut self, at: egui::Pos2, mut draw: impl FnMut(&mut egui::Ui)) -> Painted {
-        self.run(vec![egui::Event::PointerMoved(at)], &mut draw);
-        self.draw(&mut draw)
-    }
-
     /// Ein Linksklick: Zeiger hinbewegen, drücken, loslassen, jeweils ein Durchlauf.
     /// `draw` läuft in jedem davon; was der Klick auslöst, fällt beim Loslassen an.
     pub fn click(&mut self, at: egui::Pos2, mut draw: impl FnMut(&mut egui::Ui)) -> Painted {

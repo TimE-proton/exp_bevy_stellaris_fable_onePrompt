@@ -22,6 +22,12 @@ mod system_tests;
 pub use camera::{CameraRequest, SelectedShip, ViewOptions};
 pub use effects::EffectStats;
 pub use feed::{BattleFeed, BattleOrder, BattleViewRequest};
+pub use scene::SceneCensus;
+// Für Tests, die die Szene von außen stören (etwa die des Selbsttests).
+#[cfg(test)]
+pub(crate) use camera::BattleCamera;
+#[cfg(test)]
+pub(crate) use scene::ShipVisual;
 
 use crate::state::{AppState, ViewState};
 use bevy::prelude::*;

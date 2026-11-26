@@ -16,7 +16,9 @@ Aufruf: game [Optionen]
   --lineup            Mit --practice: je ein Schiff jeder Klasse nebeneinander zeigen
   --data-dir PFAD     Verzeichnis der RON-Spieldaten (Standard: assets/data)
   --selftest [N]      Selbsttest: Partie starten, N Frames laufen lassen (Standard 240),
-                      beenden; mit --practice eine Gefechtsübung, höchstens N Frames
+                      beenden; mit --practice eine Gefechtsübung, höchstens N Frames.
+                      Endet mit einem Fehler, wenn dabei nichts von Karte oder Gefecht im
+                      Sichtfeld der Kamera lag oder ein verlangtes Foto nicht entstand
   --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
                       nummeriert sie (DATEI_1.png, DATEI_2.png, …)
   --help              Diese Hilfe";

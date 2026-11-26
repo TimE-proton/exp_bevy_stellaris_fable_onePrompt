@@ -12,7 +12,9 @@ use super::{
     to_world,
 };
 use crate::map::MapCamera;
+use bevy::camera::visibility::ViewVisibility;
 use bevy::camera_controller::free_camera::FreeCameraState;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use sim::battle::{ShipStatus, Wreck};
 use sim::data::{Rgb, ShipClass};
@@ -417,6 +419,38 @@ pub struct SceneState {
     /// es von Anfang an da war, als Bordjäger startet oder mit einer Verstärkung eintrifft.
     shown: Vec<bool>,
     wrecks_seen: usize,
+}
+
+/// Zählt, was die Engine von der Szene wirklich zeichnet. Maßgeblich ist ihr Urteil aus
+/// dem letzten Frame: im Sichtfeld einer eingeschalteten Kamera und nicht ausgeblendet.
+/// Der Selbsttest prüft damit, dass die Fotos nicht bloß den leeren Raum zeigen.
+#[derive(SystemParam)]
+pub struct SceneCensus<'w, 's> {
+    hulls: Query<'w, 's, &'static ViewVisibility, With<ShipVisual>>,
+    wreck_parts: Query<'w, 's, &'static ViewVisibility, With<WreckPart>>,
+}
+
+impl SceneCensus<'_, '_> {
+    /// Rümpfe in der Szene, ob die Kamera sie erfasst oder nicht.
+    pub fn hulls(&self) -> usize {
+        self.hulls.iter().count()
+    }
+
+    /// Rümpfe im Sichtfeld der Kamera.
+    pub fn visible_hulls(&self) -> usize {
+        self.hulls
+            .iter()
+            .filter(|visibility| visibility.get())
+            .count()
+    }
+
+    /// Rumpfhälften und Trümmerstücke von Wracks im Sichtfeld der Kamera.
+    pub fn visible_wreck_parts(&self) -> usize {
+        self.wreck_parts
+            .iter()
+            .filter(|visibility| visibility.get())
+            .count()
+    }
 }
 
 pub(super) fn plugin(app: &mut App) {

@@ -3,8 +3,9 @@
 use crate::pointer::WorldMouse;
 use crate::session::SessionEpoch;
 use crate::state::{AppState, ViewState};
-use bevy::camera::visibility::RenderLayers;
+use bevy::camera::visibility::{RenderLayers, ViewVisibility};
 use bevy::camera::{CameraOutputMode, ClearColorConfig};
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
@@ -62,6 +63,24 @@ struct PlanetDot;
 
 #[derive(Component)]
 struct PlanetRing(PlanetId);
+
+/// Zählt, was die Engine von der Karte wirklich zeichnet (ihr Urteil aus dem letzten Frame:
+/// im Sichtfeld der Kartenkamera und nicht ausgeblendet). Der Selbsttest prüft damit, dass
+/// sein Foto nicht bloß die Oberfläche zeigt.
+#[derive(SystemParam)]
+pub struct MapCensus<'w, 's> {
+    entities: Query<'w, 's, &'static ViewVisibility, With<MapEntity>>,
+}
+
+impl MapCensus<'_, '_> {
+    /// Sterne, Routen, Planeten und Beschriftungen im Sichtfeld der Kamera.
+    pub fn visible(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|visibility| visibility.get())
+            .count()
+    }
+}
 
 /// Geteilte Meshes und Materialien: gleiche Handles lassen Bevy die Karte bündeln.
 #[derive(Resource)]
