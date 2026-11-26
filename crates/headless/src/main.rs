@@ -3,6 +3,7 @@
 
 mod battle;
 mod research;
+mod siege;
 
 use clap::{Parser, Subcommand};
 use sim::GameData;
@@ -89,6 +90,8 @@ enum Command {
     Battle(battle::BattleArgs),
     /// Forschung je Gemeinschaft und Jahrzehnt; mit --seeds die Übersicht über viele Seeds.
     Research(research::ResearchArgs),
+    /// Belagerung eines Planeten: Tagesbericht und die drei Wege im Vergleich.
+    Siege(siege::SiegeArgs),
 }
 
 fn parse_range(text: &str) -> Result<(u64, u64), String> {
@@ -530,6 +533,7 @@ fn main() -> ExitCode {
                 );
             }
         }
+        Command::Siege(args) => return siege::run(&data, args),
     }
     ExitCode::SUCCESS
 }
