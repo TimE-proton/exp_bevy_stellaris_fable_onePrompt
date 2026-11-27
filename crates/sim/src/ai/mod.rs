@@ -90,6 +90,9 @@ pub struct Campaign {
     pub troops: f64,
     /// So oft ist die Flotte schon zum Auftanken oder Truppenholen heimgekehrt.
     pub sorties: u32,
+    /// Das Ziel wurde mit der weiteren Suche gewählt (`reach_wide`, `odds_wide`).
+    #[serde(default)]
+    pub wide: bool,
 }
 
 /// Ein Gefecht mit einer fremden Flotte, wie es die Führung in Erinnerung behält.
@@ -158,6 +161,21 @@ pub struct MilitaryPlan {
     /// Begonnene Feldzüge über die ganze Partie, für Berichte.
     #[serde(default)]
     pub campaigns: u32,
+    /// Tag, an dem zuletzt ein Feldzug endete (0: noch keiner). Truppen, die danach an
+    /// Bord bleiben, gehen nach `land_after_days` an Land.
+    #[serde(default)]
+    pub campaign_end: u64,
+    /// Seit diesem Tag findet die Gemeinschaft im Krieg kein Ziel für einen Feldzug;
+    /// `None`, sobald sie eines hat oder Frieden herrscht.
+    #[serde(default)]
+    pub searching_since: Option<u64>,
+    /// Wie oft ein Feldzug an einer Welt gescheitert ist: Jedes Mal ruht sie länger.
+    #[serde(default)]
+    pub failures: BTreeMap<PlanetId, u32>,
+    /// Monatserste in Folge, an denen schon der Unterhalt dessen, was an Verteidigung
+    /// steht, den Etat überstieg.
+    #[serde(default)]
+    pub defense_over_months: u32,
 }
 
 fn long_calm() -> u32 {
@@ -184,6 +202,10 @@ impl Default for MilitaryPlan {
             campaign: None,
             spurned: BTreeMap::new(),
             campaigns: 0,
+            campaign_end: 0,
+            searching_since: None,
+            failures: BTreeMap::new(),
+            defense_over_months: 0,
         }
     }
 }

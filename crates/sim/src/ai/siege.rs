@@ -22,6 +22,7 @@ use super::levers::{Hand, destination};
 use super::military::{Situation, led};
 use super::{AiState, Campaign, CampaignStage, MilitaryMode, MilitaryPlan};
 use crate::battle::Doctrine;
+use crate::clock::DAYS_PER_MONTH;
 use crate::command::CommandQueue;
 use crate::data::{DefenseRow, GameData};
 use crate::economy::to_credits;
@@ -112,19 +113,30 @@ pub fn troops_wanted(data: &GameData, facts: &TargetFacts, force: &Force) -> f64
 
 /// Bewertet ein Ziel; `None`, wenn ein Feldzug dagegen nicht in Frage kommt.
 ///
-/// In Frage kommt eine Welt, die in Reichweite liegt (`reach`), an der die Flotte dem
-/// gewachsen ist, was eingreifen kann (`odds`), deren Stationen sie in `station_days`
+/// In Frage kommt eine Welt, die in Reichweite liegt (`reach`, bei der weiteren Suche
+/// `reach_wide`), an der die Flotte dem gewachsen ist, was eingreifen kann (`odds`, bei
+/// der weiteren Suche `odds_wide`), deren Stationen sie in `station_days`
 /// niederkämpft, für die die Besatzungstruppe an Bord passt, und die auf einem der drei
 /// Wege zu nehmen ist: Die Truppen an Bord reichen für einen Sturm, oder der Tank reicht,
 /// um sie auszuhungern, oder kein Schild schützt sie vor Beschuss.
 ///
 /// Der Wert ist die Beute (eine Hauptwelt zählt `capital_bonus`-fach), geteilt durch den
 /// Weg und durch die Stärke der Verteidigung, gemessen an den Plätzen an Bord.
-pub fn target_score(data: &GameData, facts: &TargetFacts, force: &Force) -> Option<f64> {
+pub fn target_score(
+    data: &GameData,
+    facts: &TargetFacts,
+    force: &Force,
+    wide: bool,
+) -> Option<f64> {
     let ai = &data.balance.military.ai;
     let (levers, balance) = (&ai.siege, &data.balance.siege);
     let estimate = &facts.estimate;
-    if facts.route_fuel > levers.reach as f64 || facts.odds < levers.odds {
+    let (reach, least_odds) = if wide {
+        (levers.reach_wide, levers.odds_wide)
+    } else {
+        (levers.reach, levers.odds)
+    };
+    if facts.route_fuel > reach as f64 || facts.odds < least_odds {
         return None;
     }
     let occupation = levers.occupation_margin * occupation_force(facts.population, balance);
@@ -160,10 +172,11 @@ pub fn choose_target(
     data: &GameData,
     candidates: &[TargetFacts],
     force: &Force,
+    wide: bool,
 ) -> Option<(PlanetId, f64)> {
     candidates
         .iter()
-        .filter_map(|facts| Some((facts, target_score(data, facts, force)?)))
+        .filter_map(|facts| Some((facts, target_score(data, facts, force, wide)?)))
         .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.planet.cmp(&a.0.planet)))
         .map(|(facts, _)| (facts.planet, troops_wanted(data, facts, force)))
 }
@@ -196,6 +209,8 @@ pub struct SiegeContext {
     pub relief_odds: f64,
     /// Wagemut der Gemeinschaft ([`Disposition::boldness`]).
     pub boldness: f64,
+    /// Sold und Wartung der belagernden Flotte je Tag, in Anteilen der Beute.
+    pub upkeep_share: f64,
     /// Staatskasse in Monaten Flottenkosten.
     pub treasury_months: f64,
     /// Reguläre, die am Sammelplatz über die Stammgarnison hinaus bereitstehen, und
@@ -248,13 +263,16 @@ pub fn days_on_station(data: &GameData, fuel: f64, fuel_home: f64) -> f64 {
 ///
 /// - Ein Entsatz, dem die Flotte nicht gewachsen ist (`defend_odds`), hebt die
 ///   Belagerung auf. Ruht sie, weil der Orbit umstritten ist, bleibt alles, wie es ist.
-/// - Reicht der Tank nicht mehr für den Rückweg, kehrt die Flotte heim.
+/// - Reicht der Tank nicht mehr für den Rückweg, kehrt die Flotte heim zum Auftanken,
+///   wenn ein voller Tank vom nächsten Hafen aus über dem Ziel Zeit für einen der Wege
+///   ließe; sonst gibt sie auf.
 /// - Sonst gilt unter den drei vorausgerechneten Wegen der billigste, der die Welt
 ///   nimmt, bevor der Tank zur Neige geht, ohne die Flotte mehr als `hull_limit` ihres
 ///   Rumpfs und die Truppe mehr als `storm_loss_limit` zu kosten. Die Kosten zählen in
-///   Anteilen der Beute: Tage (`day_cost`, mal `haste`, wenn Entsatz droht), verlorene
-///   Truppen, verlorene Beute, verlorener Rumpf. Der laufende Weg gilt um `stick`
-///   billiger. Flächenbeschuss scheidet aus, wo die Gemeinschaft selbst viel besitzt.
+///   Anteilen der Beute: Tage (`day_cost` und Sold und Wartung der Flotte mal
+///   `upkeep_weight`, mal `haste`, wenn Entsatz droht), verlorene Truppen, verlorene
+///   Beute, verlorener Rumpf. Der laufende Weg gilt um `stick` billiger.
+///   Flächenbeschuss scheidet aus, wo die Gemeinschaft selbst viel besitzt.
 /// - Führt kein Weg zum Ziel, holt die Flotte Truppen, wenn es an ihnen liegt und zu
 ///   Hause welche stehen; sonst gibt sie auf.
 pub fn decide(data: &GameData, card: &SiegeCard, context: &SiegeContext) -> SiegeDecision {
@@ -287,14 +305,32 @@ pub fn decide(data: &GameData, card: &SiegeCard, context: &SiegeContext) -> Sieg
             Withdraw::Hopeless
         })
     };
+    let force = card.troops.army + card.troops.embarked;
+    // Was ein voller Tank vom nächsten eigenen Hafen aus über dem Ziel an Zeit ließe, und
+    // ob einer der Wege darin zum Ziel führte: Nur dann lohnt die Heimkehr zum Auftanken.
+    let full_tank = days_on_station(
+        data,
+        levers.sail_fuel as f64 - context.fuel_home,
+        context.fuel_home,
+    );
+    let in_reach = card.forecasts.iter().any(|(course, forecast)| {
+        forecast.falls
+            && forecast.days as f64 <= full_tank
+            && forecast.hull_loss <= levers.hull_limit
+            && (*course == Course::Starve
+                || forecast.own_losses <= balance.storm_loss_limit * force)
+    });
     let usable = days_on_station(data, card.fuel, context.fuel_home);
     if usable <= 0.0 {
-        return again(Withdraw::Refuel);
+        return if in_reach {
+            again(Withdraw::Refuel)
+        } else {
+            leave(Withdraw::Hopeless)
+        };
     }
 
-    let force = card.troops.army + card.troops.embarked;
     let threatened = context.relief_odds < ai.offensive_odds;
-    let day_cost = levers.day_cost
+    let day_cost = (levers.day_cost + levers.upkeep_weight * context.upkeep_share.max(0.0))
         * (0.5 + context.boldness.clamp(0.0, 1.0))
         * if threatened { levers.haste } else { 1.0 };
     let running = course_of(&orders);
@@ -341,18 +377,6 @@ pub fn decide(data: &GameData, card: &SiegeCard, context: &SiegeContext) -> Sieg
             return leave(Withdraw::FetchTroops);
         }
         // Reichte ein voller Tank? Dann auftanken und wiederkommen.
-        let full_tank = days_on_station(
-            data,
-            levers.sail_fuel as f64 - context.fuel_home,
-            context.fuel_home,
-        );
-        let in_reach = card.forecasts.iter().any(|(course, forecast)| {
-            forecast.falls
-                && forecast.days as f64 <= full_tank
-                && forecast.hull_loss <= levers.hull_limit
-                && (*course == Course::Starve
-                    || forecast.own_losses <= balance.storm_loss_limit * force)
-        });
         if in_reach && usable < full_tank - 1.0 {
             return again(Withdraw::Refuel);
         }
@@ -384,8 +408,10 @@ pub fn decide(data: &GameData, card: &SiegeCard, context: &SiegeContext) -> Sieg
         Course::Storm => (Fire::Support, true, invested && aboard),
         Course::Area => {
             // Gelandet wird, sobald der Sturm unter dem Beschuss mit tragbaren Verlusten
-            // gelingt: dieselbe Probe, mit der die Prognose rechnet.
-            let land = invested && aboard && {
+            // gelingt: dieselbe Probe, mit der die Prognose rechnet. Erst, wenn der
+            // Beschuss schon seit dem Vortag gilt: Eine Prognose, die nur einen Tag hielt,
+            // trägt keine Landung.
+            let land = invested && aboard && running == Course::Area && card.days > 1 && {
                 let mut trial = Projection::new(&card.view, balance);
                 trial.siege.orders.fire = Fire::Area;
                 trial.storm_succeeds(balance)
@@ -471,8 +497,9 @@ fn readiness(data: &GameData, war: bool) -> f64 {
 ///
 /// Anlagen wachsen bis zur Stufe des Ziels (im Frieden nur der Anteil `defense_peace`,
 /// gekürzt um `scale`, begrenzt durch die Technik in `caps`); was schon steht, bleibt
-/// stehen. Reguläre: das Ziel mal der Miliz, im Frieden derselbe Anteil, mindestens `hold` (die Garnison, die eine besetzte Welt ruhig hält,
-/// soweit sie schon steht), dazu `extra` für einen Feldzug; nie mehr, als die Welt
+/// stehen, außer `dismantle` erlaubt den Abbau. Reguläre: das Ziel mal der Miliz, im
+/// Frieden derselbe Anteil, mindestens `hold` (die Garnison, die eine besetzte Welt ruhig
+/// hält, soweit sie schon steht), dazu `extra` für einen Feldzug; nie mehr, als die Welt
 /// ausheben darf oder schon hält, in ganzen Verbänden. Das Depot wird nicht gekürzt: Es
 /// kostet keinen Unterhalt, und ohne Vorräte löst sich die Miliz vom ersten Tag an auf.
 pub fn planned_defense(
@@ -484,12 +511,17 @@ pub fn planned_defense(
     scale: f64,
     extra: f64,
     hold: f64,
+    dismantle: bool,
 ) -> DefensePlan {
     let balance = &data.balance.siege;
     let wanted = [row.stations, row.guns, row.shield, row.bunkers];
     let level = |works: Works| {
         let index = works.index();
-        let standing = works.level(defense).ceil() as u8;
+        let standing = if dismantle {
+            0
+        } else {
+            works.level(defense).ceil() as u8
+        };
         let target =
             (wanted[index] as f64 * readiness(data, war) * scale.clamp(0.0, 1.0)).floor() as u8;
         target.max(standing).min(caps[index])
@@ -807,11 +839,16 @@ pub fn lead_sieges(
         let mut plan = ai.plan(id);
         plan.spurned.retain(|_, until| sit.day < *until);
         let enemies: Vec<PolityId> = sit.diplomacy.enemies_of(id).collect();
+        if enemies.is_empty() {
+            plan.searching_since = None;
+        }
         if let Some(campaign) = plan.campaign {
-            let sound = sit
+            let fleet = sit
                 .fleets
                 .get(campaign.fleet)
-                .is_some_and(|fleet| fleet.alive && fleet.owner == id)
+                .filter(|fleet| fleet.alive && fleet.owner == id);
+            // Die Welt ist gefallen oder kein Ziel mehr, der Sammelplatz verloren.
+            let sound = fleet.is_some()
                 && sit.galaxy.planet(campaign.staging).owner == Some(id)
                 && sit
                     .galaxy
@@ -819,7 +856,13 @@ pub fn lead_sieges(
                     .owner
                     .is_some_and(|owner| enemies.contains(&owner));
             if !sound {
-                plan.campaign = None;
+                match fleet {
+                    Some(fleet) => release(sit, &mut plan, &mut hand, id, fleet),
+                    None => {
+                        plan.campaign = None;
+                        plan.campaign_end = sit.day;
+                    }
+                }
             }
         }
         if plan.campaign.is_some() {
@@ -837,8 +880,83 @@ pub fn lead_sieges(
     }
 }
 
+/// Eine Welt des Gegners, wie die Führung sie heute als Ziel sieht: Weg vom nächsten
+/// eigenen Hafen (`ways`), Kräfteverhältnis der Flotte (`own`) gegen die Gegner im Umkreis
+/// (`foes`), Schätzung der Verteidigung.
+fn target_facts(
+    sit: &Situation,
+    id: PolityId,
+    planet: PlanetId,
+    ways: &[f32],
+    own: &ClassValues,
+    foes: &BTreeMap<SystemId, ClassValues>,
+) -> TargetFacts {
+    let data = sit.data;
+    let world = sit.galaxy.planet(planet);
+    TargetFacts {
+        planet,
+        capital: world
+            .owner
+            .is_some_and(|owner| sit.polities.get(owner).capital == Some(planet)),
+        value: prize_value(sit, planet),
+        population: world.population,
+        route_fuel: ways[world.system.index()] as f64
+            * data.balance.military.fuel_per_distance as f64,
+        odds: odds(data, own, &foes_around(sit, foes, world.system), 1.0),
+        estimate: world_estimate(data, sit.galaxy, sit.sieges, sit.seed, id, planet),
+    }
+}
+
+/// Wert der Beute einer Welt in Credits: ihre Betriebe und ihre Bevölkerung.
+fn prize_value(sit: &Situation, planet: PlanetId) -> f64 {
+    firm_value(sit.data, sit.galaxy, sit.economy, sit.logistics, planet)
+        + sit.data.balance.siege.prize_per_million * sit.galaxy.planet(planet).population
+}
+
+/// Verteidigung zuerst: ein System, das der Gemeinschaft gehört (nach der Mehrheit
+/// seiner Bevölkerung) und in dem ein Gegner steht. Solange es eines gibt, bleibt die
+/// Hauptflotte. Eine eigene Welt in fremdem Gebiet macht das System nicht zum eigenen:
+/// Dass der Gegner in seinem eigenen System liegt, hält keinen Feldzug auf.
+fn intruder_at_home(
+    sit: &Situation,
+    id: PolityId,
+    foes: &BTreeMap<SystemId, ClassValues>,
+) -> Option<SystemId> {
+    foes.keys()
+        .copied()
+        .find(|system| sit.galaxy.system_owner(*system) == Some(id))
+}
+
+/// Sucht die Führung weiter? Ja, wenn sie seit `widen_days` Tagen kein Ziel findet.
+pub fn wide_search(data: &GameData, searching_since: Option<u64>, day: u64) -> bool {
+    let levers = &data.balance.military.ai.siege;
+    searching_since.is_some_and(|since| day >= since + levers.widen_days)
+}
+
+/// So lange ruht eine Welt, an der ein Feldzug gescheitert ist: `retry_days`, nach jedem
+/// früheren Scheitern am selben Ziel einmal mehr.
+pub fn retry_ban(data: &GameData, failures: u32) -> u64 {
+    data.balance.military.ai.siege.retry_days * (1 + failures as u64)
+}
+
+/// Etat der Verteidigung im Monat, in Credits: `defense_share` der Einnahmen (im Krieg mal
+/// `war_factor`). Es zählt das lange Mittel `usual`, aber höchstens das Mittel der
+/// letzten Monate `recent`: Wer Gebiet verloren hat, nimmt weniger ein, und das lange
+/// Mittel folgt erst nach Jahren.
+pub fn defense_budget(data: &GameData, usual: f64, recent: &[f64], war: bool) -> f64 {
+    let levers = &data.balance.military.ai;
+    let revenue = if recent.is_empty() {
+        usual
+    } else {
+        usual.min(recent.iter().sum::<f64>() / recent.len() as f64)
+    };
+    levers.siege.defense_share * revenue * if war { levers.war_factor } else { 1.0 }
+}
+
 /// Beginnt einen Feldzug, wenn die Hauptflotte im Hafen liegt, kein Gegner im eigenen
-/// Gebiet steht und eine Welt des Gegners als Ziel taugt.
+/// Gebiet steht, eine Welt des Gegners als Ziel taugt und am Sammelplatz wenigstens die
+/// Besatzungstruppe für sie bereitsteht. Findet die Führung `widen_days` lang kein Ziel,
+/// sucht sie weiter ([`target_score`]).
 fn start_campaign(
     sit: &Situation,
     ai: &AiState,
@@ -847,6 +965,7 @@ fn start_campaign(
     enemies: &[PolityId],
 ) {
     let data = sit.data;
+    let levers = &data.balance.military.ai.siege;
     let Some(staging) = sit.polities.get(id).seat(sit.galaxy) else {
         return;
     };
@@ -858,11 +977,7 @@ fn start_campaign(
         return;
     };
     let foes = foes_by_system(sit, id, enemies);
-    // Verteidigung zuerst: Solange ein Gegner im eigenen Gebiet steht, bleibt die Flotte.
-    if foes
-        .keys()
-        .any(|system| sit.galaxy.owns_planet_in(id, *system))
-    {
+    if intruder_at_home(sit, id, &foes).is_some() {
         return;
     }
     let force = Force {
@@ -871,7 +986,7 @@ fn start_campaign(
     };
     let own = own_values(data, fleet);
     let ways = way_to_bases(sit, &ports);
-    let fuel_per_distance = data.balance.military.fuel_per_distance as f64;
+    let wide = wide_search(data, plan.searching_since, sit.day);
     let candidates: Vec<TargetFacts> = sit
         .galaxy
         .planets
@@ -884,22 +999,20 @@ fn start_campaign(
                 .is_none_or(|siege| siege.attacker == id)
         })
         .filter(|world| ways[world.system.index()].is_finite())
-        .map(|world| TargetFacts {
-            planet: world.id,
-            capital: world
-                .owner
-                .is_some_and(|owner| sit.polities.get(owner).capital == Some(world.id)),
-            value: firm_value(data, sit.galaxy, sit.economy, sit.logistics, world.id)
-                + data.balance.siege.prize_per_million * world.population,
-            population: world.population,
-            route_fuel: ways[world.system.index()] as f64 * fuel_per_distance,
-            odds: odds(data, &own, &foes_around(sit, &foes, world.system), 1.0),
-            estimate: world_estimate(data, sit.galaxy, sit.sieges, sit.seed, id, world.id),
-        })
+        .map(|world| target_facts(sit, id, world.id, &ways, &own, &foes))
         .collect();
-    let Some((target, troops)) = choose_target(data, &candidates, &force) else {
+    let Some((target, troops)) = choose_target(data, &candidates, &force, wide) else {
+        plan.searching_since.get_or_insert(sit.day);
         return;
     };
+    // Ohne die Besatzungstruppe am Sammelplatz wartet der Feldzug nur: Erst wenn sie
+    // ausgehoben ist, beginnt er.
+    let least = levers.occupation_margin
+        * occupation_force(sit.galaxy.planet(target).population, &data.balance.siege);
+    if troops_ready(sit, id, staging) + aboard(sit, fleet) < least {
+        return;
+    }
+    plan.searching_since = None;
     plan.operations.remove(&fleet.id);
     plan.campaigns += 1;
     plan.campaign = Some(Campaign {
@@ -911,7 +1024,49 @@ fn start_campaign(
         stage_day: sit.day,
         troops,
         sorties: 0,
+        wide,
     });
+}
+
+/// Taugt das Ziel des Feldzugs noch, gemessen an den Häfen, der Schätzung und den
+/// Gegnern von heute? Gezählt werden die Truppen, die die Flotte an Bord hat: Für einen
+/// Sturm müssen sie reichen, sonst der Tank zum Aushungern oder der Beschuss.
+fn still_worth(
+    sit: &Situation,
+    id: PolityId,
+    enemies: &[PolityId],
+    campaign: &Campaign,
+    fleet: &Fleet,
+    troops: f64,
+) -> bool {
+    let data = sit.data;
+    let foes = foes_by_system(sit, id, enemies);
+    let ways = way_to_bases(sit, &bases(sit, id));
+    let facts = target_facts(
+        sit,
+        id,
+        campaign.target,
+        &ways,
+        &own_values(data, fleet),
+        &foes,
+    );
+    let force = Force {
+        berths: troops,
+        firepower: fleet_firepower(data, fleet),
+    };
+    target_score(data, &facts, &force, campaign.wide).is_some()
+}
+
+/// Beendet den Feldzug und gibt die Flotte der Grundhaltung zurück: Sie läuft den
+/// nächsten eigenen Hafen an, statt über dem Ziel liegen zu bleiben, bis ihr Tank leer
+/// ist.
+fn release(sit: &Situation, plan: &mut MilitaryPlan, hand: &mut Hand, id: PolityId, fleet: &Fleet) {
+    plan.campaign = None;
+    plan.campaign_end = sit.day;
+    hand.set_stance(fleet, Stance::Escort);
+    if let Some(port) = last_port(sit, &bases(sit, id), fleet.system) {
+        hand.move_fleet(fleet, port);
+    }
 }
 
 /// Führt den laufenden Feldzug einen Tag weiter.
@@ -931,6 +1086,7 @@ fn run_campaign(
     };
     let Some(fleet) = sit.fleets.get(campaign.fleet) else {
         plan.campaign = None;
+        plan.campaign_end = sit.day;
         return;
     };
     // Im Gefecht und beim Sammeln nimmt die Flotte keine Befehle an.
@@ -944,10 +1100,16 @@ fn run_campaign(
     let odds_at = |system: SystemId| odds(data, &own, &foes_around(sit, &foes, system), 1.0);
     let docked_in = |system: SystemId| fleet.route.is_empty() && fleet.system == system;
     let troops = aboard(sit, fleet);
-    let give_up = |plan: &mut MilitaryPlan, cautious: bool| {
-        plan.campaign = None;
-        plan.spurned
-            .insert(campaign.target, sit.day + levers.retry_days);
+    // Aufgeben: Mit `ban` liegt es am Ziel, und es ruht `retry_days`, nach jedem weiteren
+    // Scheitern ein Vielfaches davon; mit `cautious` beginnt so bald kein Angriff.
+    let give_up = |plan: &mut MilitaryPlan, hand: &mut Hand, cautious: bool, ban: bool| {
+        release(sit, plan, hand, id, fleet);
+        if ban {
+            let failures = plan.failures.entry(campaign.target).or_insert(0);
+            plan.spurned
+                .insert(campaign.target, sit.day + retry_ban(data, *failures));
+            *failures += 1;
+        }
         if cautious {
             plan.no_offensive_before = sit.day + ai.caution_days;
         }
@@ -982,13 +1144,19 @@ fn run_campaign(
                 || (waited >= levers.muster_days / 2 && have >= least);
             let safe = odds_at(target.system) >= levers.odds;
             if supplied && manned && safe && strength <= 0.0 {
+                // Bevor sie ausläuft: Taugt das Ziel noch, von den Häfen von heute aus?
+                if !still_worth(sit, id, enemies, &campaign, fleet, have) {
+                    give_up(plan, hand, false, true);
+                    return;
+                }
                 campaign.stage = CampaignStage::March;
                 campaign.stage_day = sit.day;
                 hand.set_stance(fleet, Stance::Blockade);
                 hand.set_orders(fleet, fleet.formation, Doctrine::Balanced);
             } else if waited >= levers.muster_days {
-                // Truppen, Treibstoff oder die Lage am Ziel kommen nicht zusammen.
-                give_up(plan, false);
+                // Truppen, Treibstoff oder die Lage am Ziel kommen nicht zusammen. Am Ziel
+                // liegt das nicht: Es bleibt wählbar.
+                give_up(plan, hand, false, false);
                 return;
             }
         }
@@ -999,7 +1167,7 @@ fn run_campaign(
                 hand.begin_siege(sit.sieges, fleet, target.id);
             } else if odds_at(target.system) < ai.defend_odds {
                 // Am Ziel steht inzwischen, wem die Flotte nicht gewachsen ist.
-                give_up(plan, true);
+                give_up(plan, hand, true, true);
                 return;
             } else if destination(fleet) != target.system {
                 // Der Weg führt über den eigenen Hafen, der dem Ziel am nächsten liegt:
@@ -1012,6 +1180,13 @@ fn run_campaign(
                     }
                     Some(_) if fleet.min_fuel() < levers.sail_fuel => {}
                     _ => {
+                        // Den Hafen verlässt sie nur, wenn das Ziel von dort aus noch in
+                        // Reichweite liegt und mit den Truppen an Bord zu nehmen ist:
+                        // Ging unterwegs ein näherer Hafen verloren, wäre es das nicht.
+                        if !still_worth(sit, id, enemies, &campaign, fleet, troops) {
+                            give_up(plan, hand, false, true);
+                            return;
+                        }
                         hand.move_fleet(fleet, target.system);
                     }
                 }
@@ -1028,7 +1203,7 @@ fn run_campaign(
                 if campaign.sorties < levers.sorties {
                     home(&mut campaign);
                 } else {
-                    give_up(plan, true);
+                    give_up(plan, hand, true, true);
                     return;
                 }
             } else if sit
@@ -1037,13 +1212,13 @@ fn run_campaign(
                 .is_some_and(|siege| siege.attacker != id)
             {
                 // Ein anderer belagert die Welt schon.
-                give_up(plan, false);
+                give_up(plan, hand, false, true);
                 return;
             } else if sit.sieges.assign.get(&fleet.id) != Some(&target.id) {
                 if fleet.has_fuel() && waited < OPENING_DAYS {
                     hand.begin_siege(sit.sieges, fleet, target.id);
                 } else {
-                    give_up(plan, false);
+                    give_up(plan, hand, false, true);
                     return;
                 }
             } else if let Some(card) = siege_card(&refs(sit), target.id, sit.day) {
@@ -1056,14 +1231,24 @@ fn run_campaign(
                     sit.fleets,
                     sit.polities.get(id),
                 ));
+                let military = &data.balance.military;
+                let prize = prize_value(sit, target.id);
                 let context = SiegeContext {
                     fuel_home: if way.is_finite() {
-                        way * data.balance.military.fuel_per_distance as f64
+                        way * military.fuel_per_distance as f64
                     } else {
                         0.0
                     },
                     relief_odds: odds_at(target.system),
                     boldness: character.boldness,
+                    upkeep_share: if prize > 0.0 {
+                        fleet.build_value(data)
+                            * (military.upkeep_per_month + military.maintenance_per_month)
+                            / DAYS_PER_MONTH as f64
+                            / prize
+                    } else {
+                        0.0
+                    },
                     treasury_months: if claim > 0.0 {
                         to_credits(sit.economy.treasury(id)) / claim
                     } else {
@@ -1089,11 +1274,11 @@ fn run_campaign(
                                 campaign.troops = berths_of(data, fleet);
                             }
                             Withdraw::Hopeless => {
-                                give_up(plan, false);
+                                give_up(plan, hand, false, true);
                                 return;
                             }
                             Withdraw::Relief => {
-                                give_up(plan, true);
+                                give_up(plan, hand, true, true);
                                 return;
                             }
                         }
@@ -1107,7 +1292,7 @@ fn run_campaign(
                 }
             } else if waited >= OPENING_DAYS {
                 // Die Belagerung kommt nicht zustande (kein Treibstoff, Orbit umstritten).
-                give_up(plan, true);
+                give_up(plan, hand, true, true);
                 return;
             }
         }
@@ -1115,7 +1300,10 @@ fn run_campaign(
     plan.campaign = Some(campaign);
 }
 
-/// Im Frieden gehen Truppen, die noch an Bord sind, in einem eigenen Hafen wieder an Land.
+/// Truppen, die noch an Bord einer Flotte ohne Feldzug sind, gehen in einem eigenen
+/// Hafen wieder an Land: im Frieden sofort, im Krieg `land_after_days` nach dem Ende des
+/// letzten Feldzugs. Bis dahin warten sie auf einen neuen; danach fehlen sie der
+/// Verteidigung, und ihr Sold liefe für nichts.
 fn land_idle_troops(
     sit: &Situation,
     plan: &MilitaryPlan,
@@ -1123,7 +1311,10 @@ fn land_idle_troops(
     id: PolityId,
     peace: bool,
 ) {
-    if !peace || sit.sieges.embarked.is_empty() {
+    let levers = &sit.data.balance.military.ai.siege;
+    let idle =
+        peace || (plan.campaign.is_none() && sit.day >= plan.campaign_end + levers.land_after_days);
+    if !idle || sit.sieges.embarked.is_empty() {
         return;
     }
     for fleet in sit.fleets.of(id) {
@@ -1131,6 +1322,7 @@ fn land_idle_troops(
         if troops <= 0.0
             || !fleet.is_ready()
             || !fleet.route.is_empty()
+            || sit.sieges.assign.contains_key(&fleet.id)
             || plan
                 .campaign
                 .is_some_and(|campaign| campaign.fleet == fleet.id)
@@ -1236,9 +1428,12 @@ fn defend_besieged(sit: &Situation, hand: &mut Hand, id: PolityId, character: &D
 /// Je Welt gilt das Ausbauziel ihrer Lage ([`exposure`]). Die Hauptwelt hält im Krieg
 /// zusätzlich die Truppen für einen Feldzug bereit: so viele, wie dem laufenden fehlen,
 /// sonst für `expedition_share` der Plätze der Hauptflotte. Kosten Sold und Unterhalt
-/// aller Pläne mehr als `defense_share` der Einnahmen auf lange Sicht (im Krieg mal
-/// `war_factor`), werden alle Pläne in Stufen gekürzt. Welten unter Belagerung und
-/// solche, deren Plan ein Drehbuch gesetzt hat, bleiben, wie sie sind.
+/// aller Pläne mehr als `defense_share` der Einnahmen (im Krieg mal `war_factor`),
+/// werden alle Pläne in Stufen gekürzt. Es zählen die Einnahmen auf lange Sicht, aber
+/// höchstens die der letzten drei Monate: Wer Gebiet verloren hat, nimmt weniger ein.
+/// Trägt der Etat schon nicht, was steht, plant die KI nach `dismantle_after_months`
+/// Monaten in Folge auch stehende Anlagen ab. Welten unter Belagerung und solche, deren
+/// Plan ein Drehbuch gesetzt hat, bleiben, wie sie sind.
 pub fn plan_defenses(
     sit: &Situation,
     ai: &mut AiState,
@@ -1253,7 +1448,7 @@ pub fn plan_defenses(
         if mode == MilitaryMode::Resting {
             continue;
         }
-        let plan = ai.plan(id);
+        let mut plan = ai.plan(id);
         // Erst planen, wenn die Einnahmen bekannt sind.
         if plan.usual_revenue <= 0.0 {
             continue;
@@ -1305,7 +1500,8 @@ pub fn plan_defenses(
                 (world.id, exposure_of(sit, id, world.id), hold)
             })
             .collect();
-        let plans_at = |scale: f64| -> Vec<(PlanetId, DefensePlan)> {
+        let dismantle = plan.defense_over_months >= levers.siege.dismantle_after_months;
+        let plans_at = |scale: f64, dismantle: bool| -> Vec<(PlanetId, DefensePlan)> {
             worlds
                 .iter()
                 .map(|(planet, exposure, hold)| {
@@ -1325,22 +1521,42 @@ pub fn plan_defenses(
                             scale,
                             extra,
                             *hold,
+                            dismantle,
                         ),
                     )
                 })
                 .collect()
         };
-        let budget = levers.siege.defense_share
-            * plan.usual_revenue
-            * if war { levers.war_factor } else { 1.0 };
-        let scale = affordable_scale(budget, |scale| {
-            plans_at(scale)
+        let upkeep_at = |scale: f64, dismantle: bool| -> f64 {
+            plans_at(scale, dismantle)
                 .iter()
                 .map(|(_, plan)| plan_upkeep(data, plan))
                 .sum()
+        };
+        let recent: Vec<f64> = sit.economy.budget(id).map_or_else(Vec::new, |budget| {
+            budget
+                .history
+                .iter()
+                .rev()
+                .take(3)
+                .map(|month| to_credits(month.revenue))
+                .collect()
         });
+        let budget = defense_budget(data, plan.usual_revenue, &recent, war);
+        let scale = affordable_scale(budget, |scale| upkeep_at(scale, dismantle));
+        // Monate, in denen schon das, was steht, den Etat übersteigt.
+        let over = upkeep_at(0.0, false) > budget;
+        let over_months = if over {
+            plan.defense_over_months.saturating_add(1)
+        } else {
+            0
+        };
+        if plan.defense_over_months != over_months {
+            plan.defense_over_months = over_months;
+            *ai.plan_mut(id) = plan;
+        }
         let mut hand = Hand::new(queue, id);
-        for (planet, wanted) in plans_at(scale) {
+        for (planet, wanted) in plans_at(scale, dismantle) {
             if ai.defense_hold.contains(&planet) || sit.sieges.siege(planet).is_some() {
                 continue;
             }
@@ -1352,6 +1568,7 @@ pub fn plan_defenses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{Campaign, CampaignStage};
     use crate::ids::FleetId;
     use crate::siege::Embarked;
     use crate::siege::orbit::testing::Scene;
@@ -1393,7 +1610,7 @@ mod tests {
         let data = data();
         let levers = &data.balance.military.ai.siege;
         let near = colony(1);
-        assert!(target_score(&data, &near, &FLEET).is_some());
+        assert!(target_score(&data, &near, &FLEET, false).is_some());
         // Außer Reichweite, gegen eine überlegene Flotte oder ohne Platz für die
         // Besatzungstruppe kommt eine Welt nicht in Frage.
         let far = TargetFacts {
@@ -1409,26 +1626,26 @@ mod tests {
             ..near
         };
         for rejected in [far, guarded, huge] {
-            assert_eq!(target_score(&data, &rejected, &FLEET), None);
+            assert_eq!(target_score(&data, &rejected, &FLEET, false), None);
         }
         // Stationen, die die Flotte nicht in der Frist niederkämpft.
         let mut stations = near;
         stations.estimate.stations = 3.0;
-        assert_eq!(target_score(&data, &stations, &FLEET), None);
+        assert_eq!(target_score(&data, &stations, &FLEET, false), None);
         stations.estimate.stations = 1.0;
-        assert!(target_score(&data, &stations, &FLEET).is_some());
+        assert!(target_score(&data, &stations, &FLEET, false).is_some());
         // Zu stark für einen Sturm, zu gut versorgt zum Aushungern, vom Schild gedeckt:
         // Kein Weg führt hinein. Ohne Schild bleibt der Beschuss.
         let mut fortress = near;
         fortress.estimate = estimate(20.0, 30.0, 200.0);
         fortress.estimate.shield = 1;
-        assert_eq!(target_score(&data, &fortress, &FLEET), None);
+        assert_eq!(target_score(&data, &fortress, &FLEET, false), None);
         fortress.estimate.shield = 0;
-        assert!(target_score(&data, &fortress, &FLEET).is_some());
+        assert!(target_score(&data, &fortress, &FLEET, false).is_some());
         // Knappe Vorräte nahe dem eigenen Hafen: Der Tank reicht, um sie auszuhungern.
         fortress.estimate = estimate(20.0, 30.0, 30.0);
         fortress.estimate.shield = 1;
-        assert!(target_score(&data, &fortress, &FLEET).is_some());
+        assert!(target_score(&data, &fortress, &FLEET, false).is_some());
 
         // Unter gleichen Welten gewinnt die nähere, dann die kleinere Nummer; mehr Beute
         // wiegt einen längeren Weg auf, eine Hauptwelt zählt mehrfach, eine starke
@@ -1438,7 +1655,7 @@ mod tests {
             route_fuel: 0.25,
             ..near
         };
-        let pick = |worlds: &[TargetFacts]| choose_target(&data, worlds, &FLEET).unwrap().0;
+        let pick = |worlds: &[TargetFacts]| choose_target(&data, worlds, &FLEET, false).unwrap().0;
         assert_eq!(pick(&[distant, near]), PlanetId(1));
         assert_eq!(
             pick(&[
@@ -1468,7 +1685,7 @@ mod tests {
         assert_eq!(pick(&[near, held]), PlanetId(4));
         held.estimate = estimate(5.0, 10.0, 30.0);
         assert_eq!(pick(&[near, held]), PlanetId(1));
-        assert_eq!(choose_target(&data, &[far, guarded], &FLEET), None);
+        assert_eq!(choose_target(&data, &[far, guarded], &FLEET, false), None);
     }
 
     #[test]
@@ -1535,6 +1752,7 @@ mod tests {
         fuel_home: 0.02,
         relief_odds: f64::INFINITY,
         boldness: 0.0,
+        upkeep_share: 0.0,
         treasury_months: 24.0,
         troops_home: 0.0,
         berths_free: 0.0,
@@ -1619,17 +1837,30 @@ mod tests {
         let per_day = data.balance.military.fuel_per_day as f64;
         // Der Rückweg ist nicht mehr im Tank: heim zum Auftanken, solange der Feldzug
         // noch wiederkommen darf; sonst ist er zu Ende.
-        let dry = SiegeContext {
+        let mut drained = card.clone();
+        drained.fuel = CALM.fuel_home;
+        assert_eq!(
+            decide(&data, &drained, &CALM).withdraw,
+            Some(Withdraw::Refuel)
+        );
+        let spent = SiegeContext {
+            sorties_left: false,
+            ..CALM
+        };
+        assert_eq!(
+            decide(&data, &drained, &spent).withdraw,
+            Some(Withdraw::Hopeless)
+        );
+        // Kostet schon der Weg vom nächsten Hafen so viel, dass auch ein voller Tank über
+        // dem Ziel keine Zeit ließe, kehrt die Flotte nicht zum Auftanken heim, um
+        // wiederzukommen: Sie gibt auf.
+        let stranded = SiegeContext {
             fuel_home: card.fuel,
             ..CALM
         };
-        assert_eq!(decide(&data, &card, &dry).withdraw, Some(Withdraw::Refuel));
-        let spent = SiegeContext {
-            sorties_left: false,
-            ..dry
-        };
+        assert!(days_on_station(&data, card.fuel, stranded.fuel_home) <= 0.0);
         assert_eq!(
-            decide(&data, &card, &spent).withdraw,
+            decide(&data, &card, &stranded).withdraw,
             Some(Withdraw::Hopeless)
         );
         assert!((days_on_station(&data, 0.5, 0.25) - 0.2 / per_day).abs() < 1e-9);
@@ -1741,7 +1972,7 @@ mod tests {
         };
         let row = defense_row(&data, Exposure::Exposed);
         // Im Krieg das ganze Ausbauziel, begrenzt durch Technik und Aushebung.
-        let war = planned_defense(&data, row, caps, &colony, true, 1.0, 0.0, 0.0);
+        let war = planned_defense(&data, row, caps, &colony, true, 1.0, 0.0, 0.0, false);
         assert_eq!(
             (war.stations, war.guns, war.shield, war.bunkers),
             (
@@ -1759,7 +1990,7 @@ mod tests {
         );
         assert_eq!(war.depot_days, row.depot_days);
         // Im Frieden nur der Anteil defense_peace; das Depot bleibt.
-        let peace = planned_defense(&data, row, caps, &colony, false, 1.0, 0.0, 0.0);
+        let peace = planned_defense(&data, row, caps, &colony, false, 1.0, 0.0, 0.0, false);
         assert!(peace.regulars < war.regulars && peace.guns <= war.guns);
         assert_eq!(
             peace.regulars as f64,
@@ -1774,27 +2005,37 @@ mod tests {
             bunkers: 1,
             ..colony.clone()
         };
-        let kept = planned_defense(&data, row, caps, &built, false, 0.0, 0.0, 0.0);
+        let kept = planned_defense(&data, row, caps, &built, false, 0.0, 0.0, 0.0, false);
         assert_eq!((kept.guns, kept.bunkers), (2, 1));
         assert_eq!(kept.regulars, 0.0);
         // Was die Technik nicht hergibt, plant niemand.
-        let low = planned_defense(&data, row, [0, 0, 0, 0], &colony, true, 1.0, 0.0, 0.0);
+        let low = planned_defense(
+            &data,
+            row,
+            [0, 0, 0, 0],
+            &colony,
+            true,
+            1.0,
+            0.0,
+            0.0,
+            false,
+        );
         assert_eq!(
             (low.stations, low.guns, low.shield, low.bunkers),
             (0, 0, 0, 0)
         );
         // Truppen für den Feldzug kommen hinzu, bis zur Grenze der Aushebung; eine
         // besetzte Welt behält von ihrer Garnison, was sie ruhig hält.
-        let muster = planned_defense(&data, row, caps, &colony, true, 1.0, 5.0, 0.0);
+        let muster = planned_defense(&data, row, caps, &colony, true, 1.0, 5.0, 0.0, false);
         assert_eq!(muster.regulars, war.regulars + 5.0);
-        let capped = planned_defense(&data, row, caps, &colony, true, 1.0, 500.0, 0.0);
+        let capped = planned_defense(&data, row, caps, &colony, true, 1.0, 500.0, 0.0, false);
         assert_eq!(capped.regulars as f64, balance.regulars_cap * 8.0);
         let occupied = PlanetDefense {
             militia: 0.0,
             regulars: 12.0,
             ..Default::default()
         };
-        let held = planned_defense(&data, row, caps, &occupied, true, 1.0, 0.0, 7.0);
+        let held = planned_defense(&data, row, caps, &occupied, true, 1.0, 0.0, 7.0, false);
         assert_eq!(held.regulars, 7.0);
 
         // Der Etat: Passen alle Pläne nicht hinein, gilt die größte Stufe, die passt.
@@ -1977,6 +2218,281 @@ mod tests {
             ..full
         };
         assert_eq!(garrison_orders(&data, &below).0, Posture::Deep);
+    }
+
+    /// Die Lage einer gestellten Partie, wie die Führung sie liest.
+    fn situation(scene: &Scene) -> Situation<'_> {
+        let state = &scene.state;
+        Situation {
+            data: &scene.data,
+            galaxy: &state.galaxy,
+            polities: &state.polities,
+            economy: &state.economy,
+            fleets: &state.fleets,
+            battles: &state.battles,
+            diplomacy: &state.diplomacy,
+            research: &state.research,
+            finance: &state.finance,
+            logistics: &state.logistics,
+            sieges: &state.sieges,
+            seed: 9,
+            day: scene.day,
+        }
+    }
+
+    use crate::siege::orbit::testing::{FOE, ME};
+
+    #[test]
+    fn an_enemy_in_its_own_system_does_not_hold_back_a_campaign() {
+        let mut scene = Scene::new();
+        // Die Gemeinschaft 0 besitzt eine kleine Welt in einem System, das nach der
+        // Mehrheit seiner Bevölkerung dem Gegner gehört; dort liegt dessen Flotte.
+        let (system, planet) = scene
+            .state
+            .galaxy
+            .systems
+            .iter()
+            .filter(|system| scene.state.galaxy.system_owner(system.id) == Some(FOE))
+            .find_map(|system| {
+                let mut worlds: Vec<_> = scene.state.galaxy.planets_in(system.id).collect();
+                worlds.sort_by(|a, b| a.population.total_cmp(&b.population));
+                (worlds.len() >= 2).then(|| (system.id, worlds[0].id))
+            })
+            .expect("ein System des Gegners mit zwei Welten");
+        scene.state.galaxy.planet_mut(planet).owner = Some(ME);
+        scene.state.galaxy.rebuild_index();
+        assert_eq!(scene.state.galaxy.system_owner(system), Some(FOE));
+        assert!(scene.state.galaxy.owns_planet_in(ME, system));
+        scene.place(1, system);
+        let sit = situation(&scene);
+        let foes = foes_by_system(&sit, ME, &[FOE]);
+        assert!(foes.contains_key(&system));
+        assert_eq!(intruder_at_home(&sit, ME, &foes), None);
+        // Im eigenen System hält derselbe Gegner die Hauptflotte zurück.
+        let home = scene
+            .state
+            .galaxy
+            .planet(scene.state.polities.get(ME).capital.unwrap())
+            .system;
+        scene.place(1, home);
+        let sit = situation(&scene);
+        let foes = foes_by_system(&sit, ME, &[FOE]);
+        assert_eq!(intruder_at_home(&sit, ME, &foes), Some(home));
+    }
+
+    #[test]
+    fn a_long_search_widens_and_repeated_failure_bans_longer() {
+        let data = data();
+        let levers = &data.balance.military.ai.siege;
+        assert!(!wide_search(&data, None, 10_000));
+        assert!(!wide_search(&data, Some(100), 100 + levers.widen_days - 1));
+        assert!(wide_search(&data, Some(100), 100 + levers.widen_days));
+        // Die weitere Suche nimmt Welten bis reach_wide und ab odds_wide.
+        let near = colony(1);
+        let far = TargetFacts {
+            route_fuel: (levers.reach + levers.reach_wide) as f64 / 2.0,
+            odds: (levers.odds + levers.odds_wide) / 2.0,
+            ..near
+        };
+        assert_eq!(target_score(&data, &far, &FLEET, false), None);
+        assert!(target_score(&data, &far, &FLEET, true).is_some());
+        let beyond = TargetFacts {
+            route_fuel: levers.reach_wide as f64 + 0.01,
+            ..near
+        };
+        assert_eq!(target_score(&data, &beyond, &FLEET, true), None);
+        // Jedes weitere Scheitern am selben Ziel lässt es länger ruhen.
+        assert_eq!(retry_ban(&data, 0), levers.retry_days);
+        assert_eq!(retry_ban(&data, 2), 3 * levers.retry_days);
+    }
+
+    #[test]
+    fn an_expensive_fleet_storms_rather_than_waits() {
+        let (data, card) = card_of(6.0, 10.0, 18.0);
+        assert_eq!(decide(&data, &card, &CALM).course, Some(Course::Starve));
+        // Sold und Wartung der Flotte je Tag in Anteilen der Beute: Wo sie teuer ist,
+        // kostet jeder Tag Warten mehr als der Sturm.
+        let costly = SiegeContext {
+            upkeep_share: 0.05,
+            ..CALM
+        };
+        let decision = decide(&data, &card, &costly);
+        assert_eq!(decision.course, Some(Course::Storm));
+        assert!(decision.land);
+    }
+
+    #[test]
+    fn troops_land_under_area_fire_only_after_the_forecast_held_a_day() {
+        let (data, mut card) = card_of(6.0, 10.0, 18.0);
+        for (course, forecast) in &mut card.forecasts {
+            if *course != Course::Area {
+                forecast.falls = false;
+                forecast.limited_by = Some(Limit::Time);
+            }
+        }
+        let mut trial = Projection::new(&card.view, &data.balance.siege);
+        trial.siege.orders.fire = Fire::Area;
+        assert!(trial.storm_succeeds(&data.balance.siege), "die Probe trägt");
+        // Am ersten Tag des Beschusses: feuern, nicht landen.
+        let first = decide(&data, &card, &CALM);
+        assert_eq!(first.course, Some(Course::Area));
+        assert!(!first.land);
+        // Galt der Beschuss schon gestern, und die Probe trägt noch: landen.
+        card.view.siege.orders = first.orders;
+        card.days = card.days.max(2);
+        let second = decide(&data, &card, &CALM);
+        assert_eq!(second.course, Some(Course::Area));
+        assert!(second.land);
+    }
+
+    #[test]
+    fn a_shrunken_budget_follows_recent_revenue_and_may_dismantle_works() {
+        let data = data();
+        let levers = &data.balance.military.ai;
+        // Das lange Mittel, aber höchstens die letzten Monate.
+        let share = levers.siege.defense_share;
+        assert_eq!(defense_budget(&data, 1000.0, &[], false), share * 1000.0);
+        assert_eq!(
+            defense_budget(&data, 1000.0, &[400.0, 600.0], false),
+            share * 500.0
+        );
+        assert_eq!(
+            defense_budget(&data, 1000.0, &[2000.0], true),
+            share * 1000.0 * levers.war_factor
+        );
+        // Mit Abbau gilt auch für Anlagen, die stehen, nur noch der Plan.
+        let row = defense_row(&data, Exposure::Interior);
+        let built = PlanetDefense {
+            militia: 8.0,
+            guns: 2.0,
+            bunkers: 1,
+            ..Default::default()
+        };
+        let kept = planned_defense(
+            &data,
+            row,
+            [3, 5, 1, 1],
+            &built,
+            false,
+            0.0,
+            0.0,
+            0.0,
+            false,
+        );
+        assert_eq!((kept.guns, kept.bunkers), (2, 1));
+        let torn = planned_defense(&data, row, [3, 5, 1, 1], &built, false, 0.0, 0.0, 0.0, true);
+        assert_eq!((torn.guns, torn.bunkers), (0, 0));
+        assert!(plan_upkeep(&data, &torn) < plan_upkeep(&data, &kept));
+        assert_eq!(torn.depot_days, kept.depot_days);
+    }
+
+    /// Ein Feldzug der Gemeinschaft 0 mit ihrer Flotte, die über der Hauptwelt des
+    /// Gegners liegt.
+    fn campaign_against(scene: &Scene, target: PlanetId, stage: CampaignStage) -> AiState {
+        let mut ai = AiState::default();
+        ai.plan_mut(ME).campaign = Some(Campaign {
+            target,
+            staging: scene.state.polities.get(ME).capital.unwrap(),
+            fleet: FleetId(0),
+            stage,
+            started_day: 0,
+            stage_day: 0,
+            troops: 4.0,
+            sorties: 0,
+            wide: false,
+        });
+        ai
+    }
+
+    #[test]
+    fn a_campaign_that_ends_sends_its_fleet_to_the_nearest_port() {
+        let mut scene = Scene::new();
+        scene.day = 100;
+        // Die Welt ist kein Ziel mehr: Sie gehört einer dritten Gemeinschaft, mit der kein
+        // Krieg herrscht.
+        let neutral = scene.state.polities.get(PolityId(2)).capital.unwrap();
+        let mut ai = campaign_against(&scene, neutral, CampaignStage::Siege);
+        let sit = situation(&scene);
+        let mut queue = CommandQueue::default();
+        lead_sieges(&sit, &mut ai, &mut queue, None);
+        let plan = ai.plan(ME);
+        assert_eq!(plan.campaign, None);
+        assert_eq!(plan.campaign_end, 100);
+        let fleet = sit.fleets.get(FleetId(0)).unwrap();
+        let port = last_port(&sit, &bases(&sit, ME), fleet.system).expect("ein Hafen");
+        assert_ne!(port, fleet.system);
+        assert!(queue.pending.iter().any(|queued| queued.polity == ME
+            && queued.command
+                == crate::command::SimCommand::MoveFleet {
+                    fleet: FleetId(0),
+                    to: port
+                }));
+    }
+
+    #[test]
+    fn a_campaign_does_not_sail_for_a_target_it_can_no_longer_take() {
+        let mut scene = Scene::new();
+        scene.day = 100;
+        // Die Flotte liegt im eigenen Hafen, der dem Ziel am nächsten liegt, mit vollem
+        // Tank, und ist auf dem Marsch. Die Hauptwelt des Gegners ist inzwischen eine
+        // Festung: Schild, reiche Vorräte, viele Reguläre.
+        let target = scene.planet;
+        let defense = scene.state.sieges.defense_mut(target);
+        defense.shield = 1;
+        defense.depot = 400.0;
+        defense.regulars = 400.0;
+        scene.state.sieges.assign.clear();
+        let gate = {
+            let sit = situation(&scene);
+            last_port(&sit, &bases(&sit, ME), scene.system).expect("ein Hafen")
+        };
+        scene.place(0, gate);
+        // Die Flotte des Gegners steht fern: Am Ziel ist die Flotte jedem gewachsen.
+        let away = scene.state.polities.get(PolityId(2)).capital.unwrap();
+        let away = scene.state.galaxy.planet(away).system;
+        scene.place(1, away);
+        let mut ai = campaign_against(&scene, target, CampaignStage::March);
+        let sit = situation(&scene);
+        let fleet = sit.fleets.get(FleetId(0)).unwrap();
+        assert!(fleet.min_fuel() >= sit.data.balance.military.ai.siege.sail_fuel);
+        let foes = foes_by_system(&sit, ME, &[FOE]);
+        let own = own_values(sit.data, fleet);
+        assert!(
+            odds(sit.data, &own, &foes_around(&sit, &foes, scene.system), 1.0)
+                >= sit.data.balance.military.ai.siege.odds
+        );
+        let mut queue = CommandQueue::default();
+        lead_sieges(&sit, &mut ai, &mut queue, None);
+        assert!(!queue.pending.iter().any(|queued| queued.polity == ME
+            && queued.command
+                == crate::command::SimCommand::MoveFleet {
+                    fleet: FleetId(0),
+                    to: scene.system
+                }));
+        let plan = ai.plan(ME);
+        assert_eq!(plan.campaign, None);
+        assert!(plan.spurned.contains_key(&target));
+        assert_eq!(plan.failures.get(&target), Some(&1));
+    }
+
+    #[test]
+    fn a_muster_that_fails_does_not_ban_the_target() {
+        let mut scene = Scene::new();
+        let target = scene.planet;
+        scene.state.sieges.assign.clear();
+        let capital = scene.state.polities.get(ME).capital.unwrap();
+        let seat = scene.state.galaxy.planet(capital).system;
+        scene.place(0, seat);
+        // Keine Truppen am Sammelplatz, und die Frist ist um.
+        scene.state.sieges.defense_mut(capital).regulars = 0.0;
+        scene.day = 1000;
+        let mut ai = campaign_against(&scene, target, CampaignStage::Muster);
+        let sit = situation(&scene);
+        let mut queue = CommandQueue::default();
+        lead_sieges(&sit, &mut ai, &mut queue, None);
+        let plan = ai.plan(ME);
+        assert_eq!(plan.campaign, None);
+        assert!(!plan.spurned.contains_key(&target));
     }
 
     #[test]

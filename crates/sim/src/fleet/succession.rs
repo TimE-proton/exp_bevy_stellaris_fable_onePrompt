@@ -31,6 +31,8 @@ pub(crate) fn size_for_polities(fleets: &mut Fleets, battles: &mut Battles, coun
         // Werften hängen an Welten, nicht an Gemeinschaften.
         yards: _,
         tally,
+        // Die Folgen leerer Tanks hängen an Flotten, nicht an Gemeinschaften.
+        dry_streak: _,
     } = fleets;
     arrears.resize(count, 0.0);
     tally.resize(count, Default::default());

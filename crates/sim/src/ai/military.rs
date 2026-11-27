@@ -955,17 +955,22 @@ fn lead_at_war(
                     && way_clear(index)
             })
         };
+        // Ein Hafen für eine Flotte, die nicht in einem liegt: der nächste, zu dem der Weg
+        // an keinem Gegner vorbeiführt; gibt es keinen, der nächste, an dem keiner steht,
+        // und sonst der nächste überhaupt. Wer fern jedem Hafen liegen bleibt, fährt
+        // seinen Tank leer und liegt danach dort fest.
+        let shelter = || {
+            safe_base(false)
+                .or_else(|| nearest(&distance, |index| theatre.bases[index] && clear(index)))
+                .or_else(|| nearest(&distance, |index| theatre.bases[index]))
+                .unwrap_or(at)
+        };
         // Wohin eine Flotte geht, die Vorräte fassen oder instand gesetzt werden muss: zu
         // einer Werft, wenn der Tank bis dorthin reicht, sonst erst in den nächsten Hafen.
-        // Ist kein Hafen ohne Gegner erreichbar, wartet sie, wo sie ist, statt ihm in die
-        // Arme zu laufen.
         let refuge = || {
             let in_tank =
                 |base: &SystemId| distance[base.index()] * fuel_per_distance <= fleet.min_fuel();
-            safe_base(true)
-                .filter(in_tank)
-                .or_else(|| safe_base(false))
-                .unwrap_or(at)
+            safe_base(true).filter(in_tank).unwrap_or_else(shelter)
         };
         let mut operation = plan.operations.get(&fleet.id).copied();
 
@@ -1058,14 +1063,9 @@ fn lead_at_war(
                 plan.operations.remove(&fleet.id);
             } else {
                 hand.set_stance(fleet, Stance::Escort);
-                // Mit leerem Tank schleppt sich die Flotte nur: Der Weg, der heute frei
-                // ist, ist es nicht mehr, wenn sie ankommt. Wer eben erst weichen musste,
-                // bleibt deshalb liegen, statt denselben Weg gleich wieder zu versuchen.
-                let dry = fleet.min_fuel() < distance[refit.target.index()] * fuel_per_distance;
-                let stranded = dry && fleet.route.is_empty() && sit.day < plan.no_offensive_before;
-                if !stranded {
-                    hand.move_fleet(fleet, refit.target);
-                }
+                // Auch mit leerem Tank: Die Flotte schleppt sich nur, aber wer fern jedem
+                // Hafen liegen bleibt, kommt nie wieder zu Vorräten.
+                hand.move_fleet(fleet, refit.target);
                 continue;
             }
         }
@@ -1122,7 +1122,7 @@ fn lead_at_war(
                     let hold = if theatre.bases[at.index()] && clear(at.index()) {
                         at
                     } else {
-                        safe_base(false).unwrap_or(at)
+                        shelter()
                     };
                     hand.set_orders(fleet, fleet.formation, Doctrine::Defensive);
                     if fleet.route.is_empty() && hold == at {
@@ -1153,7 +1153,7 @@ fn lead_at_war(
             let to = match rally {
                 Some(system) if way_clear(system.index()) => system,
                 _ if theatre.bases[at.index()] => at,
-                _ => safe_base(false).unwrap_or(at),
+                _ => shelter(),
             };
             if !fuelling {
                 hand.move_fleet(fleet, to);
@@ -1312,7 +1312,7 @@ fn lead_at_war(
         } else if theatre.bases[at.index()] {
             at
         } else {
-            safe_base(false).unwrap_or(at)
+            shelter()
         };
         if !fuelling {
             hand.move_fleet(fleet, to);

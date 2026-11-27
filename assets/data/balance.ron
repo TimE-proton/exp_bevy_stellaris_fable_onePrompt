@@ -455,6 +455,12 @@
                 // (fuel_per_day). Eine ferne Welt lässt sich deshalb nicht aushungern.
                 odds: 1.1,
                 reach: 0.3,
+                // Findet die Gemeinschaft im Krieg ein Jahr lang kein Ziel, sucht sie
+                // weiter: bis reach_wide des Tanks (dann bleibt über dem Ziel kaum Zeit,
+                // es taugt nur für einen Sturm oder Beschuss) und ab odds_wide.
+                widen_days: 360,
+                reach_wide: 0.4,
+                odds_wide: 1.0,
                 // Zielwahl: Wert der Beute, bei einer Hauptwelt mal capital_bonus, geteilt
                 // durch Weg und Stärke der Verteidigung.
                 capital_bonus: 3.0,
@@ -481,6 +487,9 @@
                 // Wo der Tank reicht und kein Entsatz droht, wird ausgehungert; fern der
                 // eigenen Häfen, unter Zeitdruck oder gegen schwache Garnisonen gestürmt.
                 day_cost: 0.001,
+                // Dazu je Tag Sold und Wartung der Flotte im Verhältnis zum Wert der
+                // Beute, mal upkeep_weight: Eine Flotte über dem Ziel fehlt überall sonst.
+                upkeep_weight: 0.3,
                 loss_weight: 2.0,
                 prize_weight: 1.0,
                 hull_weight: 1.5,
@@ -490,9 +499,13 @@
                 // selbst so viel hält.
                 area_stake_max: 0.25,
                 // So oft kehrt ein Feldzug zum Auftanken oder Truppenholen heim; eine
-                // aufgegebene Belagerung wird retry_days lang nicht wieder versucht.
+                // aufgegebene Belagerung wird retry_days lang nicht wieder versucht, nach
+                // jedem weiteren Scheitern am selben Ziel ein Vielfaches davon. Truppen,
+                // die nach dem Ende eines Feldzugs an Bord sind, gehen land_after_days
+                // danach im nächsten eigenen Hafen an Land.
                 sorties: 3,
                 retry_days: 720,
+                land_after_days: 30,
                 // Geplündert wird, wenn die Kasse weniger als so viele Monate Flotte deckt.
                 sack_below_months: 3.0,
                 // Im Krieg hält die Hauptwelt Truppen für diesen Anteil der Plätze der
@@ -504,7 +517,11 @@
                 // Staatseinnahmen; reicht das nicht, kürzt die KI alle Pläne in Stufen.
                 // Bedroht ist eine Welt, wenn ein Kriegsgegner höchstens defense_jumps
                 // Sprünge entfernt liegt oder sie an einem Engpass an fremdes Gebiet grenzt.
+                // Der Etat bemisst sich an den Einnahmen der letzten drei Monate, wenn sie
+                // unter dem langen Mittel liegen. Trägt er schon nicht, was steht, plant die
+                // KI nach dismantle_after_months Monaten auch stehende Anlagen ab.
                 defense_share: 0.05,
+                dismantle_after_months: 6,
                 defense_jumps: 3,
                 // Ausbauziele im Krieg (Reguläre als Vielfaches der Miliz); im Frieden gilt
                 // von Anlagen und Regulären nur der Anteil defense_peace, was steht,

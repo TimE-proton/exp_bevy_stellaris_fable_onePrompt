@@ -426,9 +426,13 @@ pub struct RunSummary {
     /// ersten Tag einer Einschließung an auf.
     pub colonies: u32,
     pub colonies_without_stores: u32,
-    /// Flotten, die am Ende mit fast leerem Tank (unter 5 %) außerhalb jedes Systems
-    /// liegen, in dem ihre Gemeinschaft eine Welt hält.
-    pub fleets_dry_abroad: u32,
+    /// Über die ganze Partie: Flottentage mit leerem Tank fern jedem eigenen Hafen
+    /// (`FleetTally::dry_days`), und die längste solche Folge einer Flotte in Tagen.
+    pub dry_fleet_days: u32,
+    pub dry_longest: u32,
+    /// Flottentage mit leerem Tank einer Gemeinschaft ohne jeden Hafen
+    /// (`FleetTally::cut_off_days`): Dort kann keine Führung auftanken.
+    pub cut_off_days: u32,
 }
 
 impl RunSummary {
@@ -527,15 +531,14 @@ pub fn summarize(sim: &Headless) -> RunSummary {
             .iter()
             .filter(|planet| sieges.defense(**planet).depot < 1.0)
             .count() as u32,
-        fleets_dry_abroad: fleets
-            .list
+        dry_fleet_days: fleets.tally.iter().map(|tally| tally.dry_days).sum(),
+        cut_off_days: fleets.tally.iter().map(|tally| tally.cut_off_days).sum(),
+        dry_longest: fleets
+            .tally
             .iter()
-            .filter(|fleet| {
-                fleet.alive
-                    && fleet.min_fuel() < 0.05
-                    && !galaxy.owns_planet_in(fleet.owner, fleet.system)
-            })
-            .count() as u32,
+            .map(|tally| tally.dry_longest)
+            .max()
+            .unwrap_or(0),
         sieges: sieges.stats.clone(),
         seed: config.seed,
         days: sim.clock().day(),

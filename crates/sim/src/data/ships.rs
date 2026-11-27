@@ -591,6 +591,11 @@ pub struct SiegeAiBalance {
     /// Anteil des Tanks, den der Weg vom nächsten eigenen Hafen zum Ziel höchstens
     /// kosten darf.
     pub reach: f32,
+    /// Findet die Gemeinschaft im Krieg `widen_days` Tage lang kein Ziel, sucht sie
+    /// weiter: bis `reach_wide` des Tanks und ab dem Kräfteverhältnis `odds_wide`.
+    pub widen_days: u64,
+    pub reach_wide: f32,
+    pub odds_wide: f64,
     /// Faktor auf den Wert einer Hauptwelt bei der Zielwahl.
     pub capital_bonus: f64,
     /// Truppen für einen Sturm: dieses Vielfache der geschätzten Verteidiger an der
@@ -611,6 +616,10 @@ pub struct SiegeAiBalance {
     /// Kosten eines Wegs, in Anteilen der Beute: je Tag, je verlorenem Anteil der
     /// Truppe, je verlorenem Anteil der Beute, je verlorenem Rumpfanteil.
     pub day_cost: f64,
+    /// Dazu je Tag der Sold und die Wartung der belagernden Flotte, geteilt durch den
+    /// Wert der Beute, mal diesem Gewicht: Eine Flotte, die über dem Ziel liegt, fehlt
+    /// überall sonst.
+    pub upkeep_weight: f64,
     pub loss_weight: f64,
     pub prize_weight: f64,
     pub hull_weight: f64,
@@ -622,8 +631,12 @@ pub struct SiegeAiBalance {
     pub area_stake_max: f64,
     /// So oft kehrt ein Feldzug zum Auftanken oder Truppenholen heim und kommt wieder.
     pub sorties: u32,
-    /// Eine aufgegebene Belagerung wird so viele Tage lang nicht wieder versucht.
+    /// Eine aufgegebene Belagerung wird so viele Tage lang nicht wieder versucht, nach
+    /// jedem weiteren Scheitern am selben Ziel ein Vielfaches davon.
     pub retry_days: u64,
+    /// Truppen, die nach dem Ende eines Feldzugs noch an Bord sind, gehen so viele Tage
+    /// danach im nächsten eigenen Hafen an Land, auch im Krieg.
+    pub land_after_days: u64,
     /// Geplündert wird, wenn die Staatskasse weniger als so viele Monate Flottenkosten deckt.
     pub sack_below_months: f64,
     /// Anteil der Plätze der Hauptflotte, für den die Gemeinschaft im Krieg Truppen
@@ -634,6 +647,9 @@ pub struct SiegeAiBalance {
     /// Sold und Unterhalt der Verteidigung sollen höchstens diesen Anteil der
     /// Staatseinnahmen kosten.
     pub defense_share: f64,
+    /// Übersteigt schon der Unterhalt dessen, was steht, so viele Monate in Folge den
+    /// Etat, plant die KI auch Anlagen ab, die stehen.
+    pub dismantle_after_months: u32,
     /// Eine Welt gilt als bedroht, wenn ein Kriegsgegner oder eine fremde Grenze
     /// höchstens so viele Sprünge entfernt liegt.
     pub defense_jumps: u32,

@@ -65,8 +65,12 @@ darf beliebig oft stehen:
   festem Plan; den Verteidiger führt die KI.
   Der Sweep nennt dazu je Seed die Belagerungen nach Ausgang, die gefallenen Welten und
   die beendeten Gemeinschaften, dazu über alle Läufe die Feldzüge der KI, die mittlere
-  Dauer einer Belagerung, die verlorenen Verbände, die Kolonien ohne Vorräte und die
-  Flotten, die mit leerem Tank fern eigener Welten liegen.
+  Dauer einer Belagerung, die verlorenen Verbände, die Kolonien ohne Vorräte und, über
+  die ganze Laufzeit gezählt, die Flottentage mit leerem Tank fern jedem eigenen Hafen
+  mit der längsten solchen Folge einer Flotte (je Seed in den Spalten „Tanktage" und
+  „Folge"); Tage einer Gemeinschaft, die nirgends mehr einen Hafen hat, stehen für sich.
+  Gezählt werden alle Flotten, auch die des Angreifers, die das Drehbuch führt und die
+  dort nach dem Plan über fremden Welten liegen bleiben.
 - `--preset feldzug`: Das Drehbuch erklärt nur die Kriege. Die Gemeinschaften 0 bis 3
   erklären zu Beginn der Jahre 20, 25, 30 und 35 ihrem dann nächsten Nachbarn den Krieg
   und schließen je 15 Jahre später Frieden; Flotten, Feldzüge, Belagerungen und
@@ -644,7 +648,9 @@ für die Gemeinschaft des Spielers und nur, wenn sich etwas ändern soll.
   `rematch_days` lang nicht wieder auf; ging in dem Gefecht nichts verloren, ist die
   andere nur ausgewichen, und dann gilt `elusive_days`, auch wenn sie im eigenen Gebiet
   steht. Marschiert wird außerhalb eines Angriffs nur auf Wegen, an denen kein Gegner
-  steht; eine Flotte mit leerem Tank, die eben weichen musste, bleibt liegen.
+  steht. Gibt es keinen solchen Weg, läuft eine Flotte fern jedem Hafen trotzdem den
+  nächsten an (zuerst einen, an dem kein Gegner steht): Wer liegen bleibt, fährt seinen
+  Tank leer und liegt danach fest.
 - **Entsatz und Feldzüge.** Wird eine eigene Welt belagert, geht die Flotte dorthin
   zuerst, die Hauptwelt voran, und stellt sich dem Belagerer ab `siege.relief_odds`.
   Flotten, die belagern oder einen Feldzug gegen eine Welt führen
@@ -905,40 +911,57 @@ in `balance.ron` unter `military.ai.siege`.
   darin liegt, steht je Betrachter und Welt fest (`ai::estimate::world_estimate`).
   Geplant wird mit der oberen Grenze. Über die eigene Belagerung liest sie die Karte des
   Lesemodells mit den drei vorausgerechneten Wegen.
-- **Zielwahl.** Liegt die wertvollste Flotte im Hafen und steht kein Gegner im eigenen
-  Gebiet, sucht die Führung ein Ziel: Wert der Beute (eine Hauptwelt zählt
-  `capital_bonus`-fach), geteilt durch den Weg und durch die geschätzte Garnison,
-  gemessen an den Plätzen an Bord. In Frage kommt nur, was vom nächsten eigenen Hafen
-  höchstens `reach` des Tanks entfernt liegt, wo die Flotte allem gewachsen ist, was im
-  Umkreis eingreifen kann (`odds`), wessen Stationen sie in `station_days` niederkämpft
-  und was auf einem der drei Wege zu nehmen ist.
+- **Zielwahl.** Liegt die wertvollste Flotte im Hafen und steht kein Gegner in einem
+  System, das der Gemeinschaft gehört (nach der Mehrheit seiner Bevölkerung; eine eigene
+  Welt in fremdem Gebiet zählt nicht), sucht die Führung ein Ziel: Wert der Beute (eine
+  Hauptwelt zählt `capital_bonus`-fach), geteilt durch den Weg und durch die geschätzte
+  Garnison, gemessen an den Plätzen an Bord. In Frage kommt nur, was vom nächsten
+  eigenen Hafen höchstens `reach` des Tanks entfernt liegt, wo die Flotte allem
+  gewachsen ist, was im Umkreis eingreifen kann (`odds`), wessen Stationen sie in
+  `station_days` niederkämpft und was auf einem der drei Wege zu nehmen ist. Findet sie
+  `widen_days` lang nichts, sucht sie weiter: bis `reach_wide` des Tanks und ab
+  `odds_wide`. Ein Feldzug beginnt erst, wenn am Sammelplatz wenigstens die
+  Besatzungstruppe für das Ziel bereitsteht.
 - **Feldzug.** Eine Flotte, ein Ziel, drei Abschnitte. Sammeln: Die Flotte läuft die
   Hauptwelt an, fasst Treibstoff und Munition und schifft Truppen ein, für einen Sturm
   das `storm_ratio`-Fache der geschätzten Verteidiger, mindestens die Besatzungstruppe
   mit Aufschlag, mit `supply_days` Tagen Nachschub; `garrison_keep` der Stammgarnison
-  bleibt zu Hause. Marsch: über den eigenen Hafen, der dem Ziel am nächsten liegt; dort
-  wartet sie, bis der Tank `sail_fuel` erreicht. Belagerung: `BeginSiege`, danach jeden
-  Tag die Wahl des Wegs. Die Flotte eines Feldzugs gehört nicht der Grundhaltung der
+  bleibt zu Hause. Kommen Truppen, Treibstoff oder eine sichere Lage am Ziel in
+  `muster_days` nicht zusammen, endet der Feldzug, und das Ziel bleibt wählbar. Marsch:
+  über den eigenen Hafen, der dem Ziel am nächsten liegt; dort wartet sie, bis der Tank
+  `sail_fuel` erreicht. Bevor sie den Sammelplatz und diesen Hafen verlässt, prüft sie
+  das Ziel noch einmal wie bei der Wahl, mit den Häfen und der Schätzung von heute und
+  den Truppen an Bord: Ging unterwegs ein näherer Hafen verloren oder wurde die Welt zu
+  stark, gibt sie auf, statt loszufahren. Belagerung: `BeginSiege`, danach jeden Tag die
+  Wahl des Wegs. Die Flotte eines Feldzugs gehört nicht der Grundhaltung der
   Flotten (`AiState::is_reserved`); im Gefecht befiehlt die Grundhaltung auch ihr den
   Rückzug.
 - **Aushungern, stürmen, beschießen.** Unter den drei Wegen der Karte gilt der
   billigste, der die Welt nimmt, bevor der Rückweg nicht mehr im Tank ist, ohne die
   Flotte mehr als `hull_limit` ihres Rumpfs und die Truppe mehr als
   `siege.storm_loss_limit` zu kosten. Die Kosten zählen in Anteilen der Beute: Tage
-  (`day_cost`, mal 0,5 bis 1,5 nach dem Wagemut der Gemeinschaft, mal `haste`, wenn
-  Entsatz droht), verlorene Truppen, verlorene Beute, verlorener Rumpf. So wird
+  (`day_cost` und dazu Sold und Wartung der Flotte je Tag im Verhältnis zur Beute mal
+  `upkeep_weight`, beides mal 0,5 bis 1,5 nach dem Wagemut der Gemeinschaft und mal
+  `haste`, wenn Entsatz droht), verlorene Truppen, verlorene Beute, verlorener Rumpf. So wird
   ausgehungert, wo die Vorräte knapp sind, der Tank reicht und der Orbit sicher ist;
   gestürmt gegen schwache Garnisonen, fern der eigenen Häfen und unter Zeitdruck;
   beschossen, wo beides nicht geht und kein Schild schützt, nie aber, wo die
   Gemeinschaft selbst viel besitzt (`area_stake_max`). Gelandet wird, sobald der gewählte
-  Weg es vorsieht. Geplündert wird, wenn die Kasse weniger als `sack_below_months`
+  Weg es vorsieht; unter Flächenbeschuss erst, wenn der Beschuss schon seit dem Vortag
+  gilt und die Probe des Sturms dann noch trägt. Geplündert wird, wenn die Kasse weniger als `sack_below_months`
   Monate Flotte deckt.
 - **Aufheben.** Vor einem Entsatz, dem die Flotte nicht gewachsen ist; wenn der Rückweg
   sonst nicht mehr im Tank wäre (heim zum Auftanken, höchstens `sorties` Mal je
-  Feldzug); wenn die Welt nur mit mehr Truppen zu nehmen ist und zu Hause welche stehen
-  (holen und wiederkommen); und wenn kein Weg zum Ziel führt. Eine aufgegebene Welt wird
-  `retry_days` lang nicht wieder Ziel. Keine Flotte bleibt mit leerem Tank über einer
-  fremden Welt liegen.
+  Feldzug, und nur, wenn ein voller Tank vom nächsten Hafen aus über dem Ziel Zeit für
+  einen der Wege ließe); wenn die Welt nur mit mehr Truppen zu nehmen ist und zu Hause
+  welche stehen (holen und wiederkommen); und wenn kein Weg zum Ziel führt. Eine
+  aufgegebene Welt wird `retry_days` lang nicht wieder Ziel, nach jedem weiteren
+  Scheitern an ihr ein Vielfaches davon.
+- **Nach dem Feldzug.** Endet ein Feldzug (aufgegeben, die Welt gefallen, der
+  Sammelplatz verloren), läuft die Flotte den nächsten eigenen Hafen an, bevor die
+  Grundhaltung sie übernimmt. Truppen, die dann noch an Bord sind, gehen im Frieden
+  sofort und im Krieg `land_after_days` nach dem Ende des Feldzugs im nächsten eigenen
+  Hafen an Land, wenn bis dahin kein neuer Feldzug sie braucht.
 - **Verteidigungspläne, monatlich.** Jede Welt bekommt ein Ausbauziel nach ihrer Lage:
   Hauptwelt, bedrohte Welt (ein Kriegsgegner höchstens `defense_jumps` Sprünge entfernt,
   oder ein Engpass an fremdem Gebiet) oder Hinterland. Im Krieg gilt das ganze Ziel, im
@@ -946,8 +969,11 @@ in `balance.ron` unter `military.ai.siege`.
   stehen. Ein Depot hält jede Welt immer: Ohne Vorräte löste sich ihre Miliz vom ersten
   Tag einer Einschließung an auf. Die Hauptwelt hält im Krieg dazu die Truppen für den
   Feldzug bereit. Kosten Sold und Unterhalt aller Pläne mehr als `defense_share` der
-  Einnahmen auf lange Sicht, werden alle Pläne in Stufen gekürzt. Bezahlt wird wie beim
-  Spieler aus dem Anspruch „Verteidigung".
+  Einnahmen, werden alle Pläne in Stufen gekürzt. Es zählen die Einnahmen auf lange
+  Sicht, höchstens aber die der letzten drei Monate: Wer Gebiet verloren hat, nimmt
+  weniger ein. Übersteigt schon der Unterhalt dessen, was steht,
+  `dismantle_after_months` Monate in Folge den Etat, plant die KI auch stehende Anlagen
+  ab. Bezahlt wird wie beim Spieler aus dem Anspruch „Verteidigung".
 - **Belagerte Welten.** Die Geschütze schweigen unter `hold_fire_days` Tagen Vorrat,
   außer am Tag nach einer Landung. Mit Bunkern geht die Garnison in die Tiefe, wenn die
   gelandete Truppe ihr an der Oberfläche überlegen ist (`deep_ratio`). Entsatz: Eine
@@ -968,7 +994,12 @@ in `balance.ron` unter `military.ai.siege`.
   (`AiState::defense_hold`).
 
 Der Sweep `--preset feldzug` zeigt das in ganzen Partien; `crates/sim/tests/campaign.rs`
-prüft einen solchen Krieg Tag für Tag.
+prüft einen solchen Krieg Tag für Tag und urteilt über mehrere Seeds zusammen: dass
+Gemeinschaften enden, Truppen nach einem Feldzug an Land gehen, geschrumpfte
+Gemeinschaften ihre Verteidigung kürzen und keine Flotte lange mit leerem Tank fern
+jedem Hafen liegt. `crates/sim/tests/siege_ai.rs` prüft gestellte Lagen:
+Garnisonsbefehle, Entsatz und seinen Vorrang, den Rückzug einer belagernden Flotte und
+das Ausschiffen nach einem Feldzug.
 
 ## Die beiden Enden
 
