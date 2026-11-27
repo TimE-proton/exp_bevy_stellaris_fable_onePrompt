@@ -942,10 +942,18 @@ impl Projection {
         if self.toughness > 0.0 && self.hull_damage >= self.toughness {
             return Some(Limit::Fleet);
         }
+        let no_control = !self.orbit.control && !ashore;
         if self.fuel <= 0.0 {
-            return Some(Limit::Fuel);
+            // Liegt gar keine Flotte des Belagerers im Orbit (keine Standfestigkeit), zählt
+            // auch kein Tank: Der Grund ist dann der fehlende Orbit, nicht der Treibstoff.
+            let no_fleet = self.toughness <= 0.0;
+            return Some(if no_control && no_fleet {
+                Limit::NoControl
+            } else {
+                Limit::Fuel
+            });
         }
-        if !self.orbit.control && !ashore {
+        if no_control {
             return Some(Limit::NoControl);
         }
         if self.orbit.control && self.defense.stations > 0.0 && self.orbit.firepower <= 0.0 {
@@ -2061,6 +2069,28 @@ mod tests {
         let blind = forecast(&view, Course::Starve, &balance);
         assert_eq!(blind.limited_by, Some(Limit::NoControl));
         assert_eq!(blind.days, 1);
+        // Liegt keine Flotte des Belagerers mehr im Orbit, zählt kein Tank: Auch dann
+        // nennt jeder Weg den fehlenden Orbit, nicht den Treibstoff.
+        let mut view = build(plain.clone());
+        view.orbit = OrbitView {
+            control: false,
+            firepower: 0.0,
+            ammo: 0.0,
+            embarked: 0.0,
+            ..view.orbit
+        };
+        view.fuel = 0.0;
+        view.toughness = 0.0;
+        for course in Course::ALL {
+            let empty = forecast(&view, course, &balance);
+            assert!(!empty.falls, "{}", course.label());
+            assert_eq!(
+                empty.limited_by,
+                Some(Limit::NoControl),
+                "{}",
+                course.label()
+            );
+        }
         // Leere Tanks: Die Flotte kann nicht bleiben.
         let mut view = build(plain.clone());
         view.fuel = 9.5 * balance.station_fuel;
