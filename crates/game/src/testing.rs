@@ -452,9 +452,9 @@ pub fn save_of_new_game(data: &sim::GameData, seed: u64, name: &str) -> std::pat
     path
 }
 
-/// Stände einer Partie nach dem Drehbuch „Eroberung“ (Seed 3): Die erste Gemeinschaft
-/// belagert die Welten ihres Nachbarn, bis er endet. Gerechnet wird die Partie einmal für
-/// alle Tests, die sie brauchen.
+/// Stände einer Partie nach dem Drehbuch „Eroberung“ (Seed [`conquest::SEED`]): Die erste
+/// Gemeinschaft belagert die Welten ihres Nachbarn, bis er endet. Gerechnet wird die Partie
+/// einmal für alle Tests, die sie brauchen.
 pub mod conquest {
     use sim::GameData;
     use sim::harness::{Headless, WarScript, conquest_war};
@@ -463,15 +463,28 @@ pub mod conquest {
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
+    /// Seed der Partie. Seed 3 trug die Tests, bis auch die KI belagert und verteidigt;
+    /// seither ruht dort kein Bodenkrieg mehr, weil die Flotte des Belagerers nie vom
+    /// Orbit abzieht. Seed 30 hat wieder den ganzen Ablauf an einer Welt.
+    pub const SEED: u64 = 30;
     /// Tag, an dem das Drehbuch den Krieg erklärt.
     pub const WAR_DAY: u64 = 25 * sim::clock::DAYS_PER_YEAR;
-    /// Tage nach der Kriegserklärung: Beschuss einer Welt; der Tag vor der Landung auf
-    /// ihr; ihr Bodenkrieg kurz vor dem Fall; die Belagerung der letzten Welt des Nachbarn
-    /// kurz vor deren Fall.
-    pub const BOMBARDMENT: u64 = 100;
-    pub const LANDING: u64 = 354;
-    pub const GROUND: u64 = 364;
-    pub const LAST_WORLD: u64 = 1404;
+    /// Tage nach der Kriegserklärung, alle an der Welt Vesedor I außer dem letzten:
+    /// Beschuss seit einer Woche (Phase 3 vom Tag 180 an; die Garnison führt noch ihre
+    /// Grundbefehle, bei späteren Beschüssen hat die KI des Verteidigers schon das
+    /// Feuerverbot gegeben); der Tag vor der Landung auf ihr (Phase 2, gelandet wird am
+    /// Tag 654); ihr Bodenkrieg kurz vor dem Fall am Tag 671, während die Belagerung ruht
+    /// (die Flotte ist vom Tag 657 an abgezogen, die Truppe am Boden kämpft weiter, im
+    /// System läuft kein Gefecht); die Belagerung der letzten Welt des Nachbarn
+    /// (Ithanheim I, Bodenkrieg) am Tag vor ihrem Fall, mit dem der Nachbar endet.
+    ///
+    /// Gefunden mit einer Sonde, die die Partie Tag für Tag nachrechnete und die Karten
+    /// der Belagerungen (Welt, Belagerer, Phase, Orbitalhoheit, Flotten, Gefechte im
+    /// System) und das Ende von Gemeinschaften ausgab, über die Seeds 0 bis 38.
+    pub const BOMBARDMENT: u64 = 187;
+    pub const LANDING: u64 = 653;
+    pub const GROUND: u64 = 670;
+    pub const LAST_WORLD: u64 = 2160;
     const STOPS: [u64; 4] = [BOMBARDMENT, LANDING, GROUND, LAST_WORLD];
 
     fn states() -> &'static (GameData, Vec<SimState>) {
@@ -482,7 +495,7 @@ pub mod conquest {
             let mut sim = Headless::new(
                 data.clone(),
                 SimConfig {
-                    seed: 3,
+                    seed: SEED,
                     player: None,
                 },
             );

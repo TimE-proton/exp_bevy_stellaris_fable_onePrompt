@@ -21,27 +21,26 @@ use sim::siege::{Fire, Outcome, Posture, SiegeOrders, Sieges, defense_card};
 use sim::state::{SAVE_FORMAT, SaveGame, SimConfig, SimState};
 use std::sync::OnceLock;
 
-/// Tag, an dem das Drehbuch „Eroberung“ den Krieg erklärt.
-const WAR_DAY: u64 = 25 * sim::clock::DAYS_PER_YEAR;
+use crate::testing::conquest::{BOMBARDMENT, SEED, WAR_DAY};
 const ME: PolityId = PolityId(0);
 
 /// Eine Partie nach dem Drehbuch „Eroberung“, `days` Tage nach der Kriegserklärung.
 fn conquest(days: u64) -> (GameData, SimState) {
     let data = GameData::load_workspace().expect("Spieldaten");
     let script = WarScript::new(conquest_war());
-    let (sim, violation) = run_scripted(&data, 3, WAR_DAY + days, &script);
+    let (sim, violation) = run_scripted(&data, SEED, WAR_DAY + days, &script);
     assert_eq!(violation, None);
     let mut state = sim.state();
     state.galaxy.rebuild_index();
     (data, state)
 }
 
-/// Hundert Tage nach der Kriegserklärung belagert die erste Gemeinschaft eine Welt ihres
-/// Nachbarn, seit einer Woche, in der Phase „Beschuss“. Gerechnet wird die Partie einmal
-/// für alle Tests.
+/// Am Tag [`BOMBARDMENT`] nach der Kriegserklärung belagert die erste Gemeinschaft eine
+/// Welt ihres Nachbarn, seit einer Woche in der Phase „Beschuss“ (derselbe Halt wie in
+/// [`crate::testing::conquest`]). Gerechnet wird die Partie einmal für alle Tests.
 fn bombardment() -> &'static (GameData, SimState) {
     static GAME: OnceLock<(GameData, SimState)> = OnceLock::new();
-    GAME.get_or_init(|| conquest(100))
+    GAME.get_or_init(|| conquest(BOMBARDMENT))
 }
 
 /// Die Partie aus der Sicht einer Gemeinschaft oder eines Beobachters.
