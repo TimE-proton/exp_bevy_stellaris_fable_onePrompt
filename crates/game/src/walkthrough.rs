@@ -199,3 +199,120 @@ fn a_player_clicks_from_campaign_to_practice_and_back_again() {
         assert!(!game.world().contains_resource::<PracticeBattle>());
     }
 }
+
+/// Ein Spieler verfolgt eine Belagerung: von der Kopfleiste ins Fenster, auf die Karte,
+/// über die Marke am System zurück ins Fenster, in die Orbitansicht, dort mit der Kamera
+/// unterwegs, bis die Welt fällt, und über das Ergebnis zurück zur Karte.
+#[test]
+fn a_player_follows_a_siege_from_the_map_into_orbit_until_the_world_falls() {
+    use crate::battle_view::BattleCamera;
+    use crate::battle_view::orbit::hud::RESULT_TITLE;
+    use crate::battle_view::orbit::{BACK, TO_WINDOW, WATCH, WatchedSiege};
+    use crate::siege_markers::SiegeMarkers;
+    use crate::state::ViewState;
+    use crate::testing::conquest;
+    use crate::ui::{fleets, siege};
+    use bevy::input::ButtonState;
+    use sim::ids::PolityId;
+
+    let path = conquest::save_file(conquest::GROUND, Some(PolityId(0)), "rundgang_belagerung");
+    let mut game = TestGame::start(&format!("--load {}", path.display()));
+    game.frames(6);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(game.state(), AppState::InGame);
+    let view = |game: &TestGame| *game.resource::<State<ViewState>>().get();
+    let eye = |game: &mut TestGame| {
+        let world = game.world_mut();
+        world
+            .query_filtered::<&Transform, With<BattleCamera>>()
+            .single(world)
+            .expect("Schlachtkamera")
+            .translation
+    };
+
+    // Kopfleiste: Das Fenster nennt die eigene Belagerung; „Auf der Karte zeigen“ führt
+    // die Karte zu ihrem System.
+    game.click_on(&siege::toggle_label(1));
+    game.frames(3);
+    assert!(game.window_rect(siege::TITLE).is_some());
+    game.click_on(fleets::SHOW_ON_MAP);
+    game.frames(40);
+    let planet = game
+        .resource::<UiState>()
+        .siege
+        .chosen
+        .expect("gewählte Belagerung");
+    let system = game.resource::<Galaxy>().planet(planet).system;
+    assert_eq!(game.resource::<Selection>().system, Some(system));
+    game.click_on(&siege::toggle_label(1));
+    game.frames(10);
+    assert!(game.window_rect(siege::TITLE).is_none());
+
+    // Karte: Am System steht die Marke mit der Phase; ein Klick öffnet das Fenster wieder.
+    let marker = game.resource::<SiegeMarkers>().0[0].clone();
+    assert_eq!(marker.planet, planet);
+    assert_eq!(marker.phase_number, 4);
+    game.click_on(&format!("{}: {}", siege::TITLE, marker.planet_name));
+    game.frames(3);
+    assert!(game.window_rect(siege::TITLE).is_some());
+    assert_eq!(
+        game.resource::<Selection>().system,
+        Some(system),
+        "der Klick auf die Marke wählt auf der Karte nichts anderes"
+    );
+
+    // Orbitansicht: Die Kamera fliegt mit den Tasten der Schlachtansicht, „Übersicht“
+    // holt sie zurück.
+    game.click_on(WATCH);
+    game.frames(4);
+    assert_eq!(view(&game), ViewState::Siege);
+    let home = eye(&mut game);
+    game.key_event(KeyCode::KeyW, ButtonState::Pressed);
+    game.frames(20);
+    game.key_event(KeyCode::KeyW, ButtonState::Released);
+    game.frames(20);
+    let moved = eye(&mut game);
+    assert!(
+        moved.distance(home) > 50.0,
+        "W bewegt die Kamera: {home} → {moved}"
+    );
+    game.click_on("Übersicht");
+    game.frames(3);
+    assert!(
+        eye(&mut game).distance(home) < 1.0,
+        "zurück in der Übersicht"
+    );
+    // Hin und her zwischen Ansicht und Fenster.
+    game.click_on(TO_WINDOW);
+    game.frames(4);
+    assert_eq!(view(&game), ViewState::Galaxy);
+    assert!(game.window_rect(siege::TITLE).is_some());
+    game.click_on(WATCH);
+    game.frames(4);
+    assert_eq!(view(&game), ViewState::Siege);
+
+    // Die Zeit läuft, bis die Welt fällt: Das Ergebnis erscheint, die Partie hält an.
+    game.click_on("25×");
+    assert!(!game.resource::<SimSpeed>().paused);
+    for _ in 0..400 {
+        if game.resource::<WatchedSiege>().ended() {
+            break;
+        }
+        game.frames(1);
+    }
+    game.frames(3);
+    assert!(game.resource::<WatchedSiege>().ended(), "die Welt fällt");
+    assert!(game.resource::<SimSpeed>().paused);
+    assert!(game.window_rect(RESULT_TITLE).is_some());
+    assert_eq!(
+        game.resource::<Galaxy>().planet(planet).owner,
+        Some(PolityId(0))
+    );
+    // Zurück zur Karte: dieselbe Auswahl, keine Belagerung mehr, die Marke ist fort.
+    game.click_on(BACK);
+    game.frames(6);
+    assert_eq!(view(&game), ViewState::Galaxy);
+    assert_eq!(game.resource::<Selection>().system, Some(system));
+    assert!(game.resource::<SiegeMarkers>().0.is_empty());
+    assert!(game.world().get_resource::<WatchedSiege>().is_none());
+}

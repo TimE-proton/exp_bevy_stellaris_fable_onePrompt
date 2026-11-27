@@ -295,6 +295,39 @@ fn the_manual_names_what_the_siege_window_and_the_defence_panel_offer() {
     for works in Works::ALL {
         assert!(flowing.contains(works.label()), "{}", works.label());
     }
+    // Karte, Orbitansicht und das Ende einer Gemeinschaft.
+    {
+        use crate::battle_view::campaign::WATCH as WATCH_BATTLE;
+        use crate::battle_view::orbit;
+        use crate::endings;
+        use crate::ui::panels::ENDED;
+        for label in [
+            orbit::WATCH,
+            orbit::BACK,
+            orbit::TO_WINDOW,
+            orbit::hud::RESULT_TITLE,
+            orbit::hud::OVERVIEW,
+            orbit::hud::HEADING_NUMBERS,
+            orbit::hud::HEADING_EVENTS,
+            WATCH_BATTLE,
+            endings::TITLE_OTHER,
+            endings::TITLE_PLAYER,
+            endings::CONTINUE_AS_OBSERVER,
+            ENDED,
+            "3 Beschuss · ruht",
+        ] {
+            assert!(flowing.contains(&format!("„{label}“")), "„{label}“ fehlt");
+        }
+        for heading in [
+            "**So belagert man.**",
+            "**So verteidigt man.**",
+            "**Marken auf der Karte.**",
+            "**Orbitansicht.**",
+            "**Ende einer Gemeinschaft.**",
+        ] {
+            assert!(part.contains(heading), "{heading}");
+        }
+    }
     // Der Knopf der Kopfleiste und die Zeile des Haushalts stehen in ihren Abschnitten.
     assert!(section("## Bedienung").contains("Belagerung (mit der Zahl"));
     assert!(section("### Staat und Haushalt").contains("Verteidigung"));

@@ -452,6 +452,85 @@ pub fn save_of_new_game(data: &sim::GameData, seed: u64, name: &str) -> std::pat
     path
 }
 
+/// Stände einer Partie nach dem Drehbuch „Eroberung“ (Seed 3): Die erste Gemeinschaft
+/// belagert die Welten ihres Nachbarn, bis er endet. Gerechnet wird die Partie einmal für
+/// alle Tests, die sie brauchen.
+pub mod conquest {
+    use sim::GameData;
+    use sim::harness::{Headless, WarScript, conquest_war};
+    use sim::ids::PolityId;
+    use sim::state::{SAVE_FORMAT, SaveGame, SimConfig, SimState};
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// Tag, an dem das Drehbuch den Krieg erklärt.
+    pub const WAR_DAY: u64 = 25 * sim::clock::DAYS_PER_YEAR;
+    /// Tage nach der Kriegserklärung: Beschuss einer Welt; der Tag vor der Landung auf
+    /// ihr; ihr Bodenkrieg kurz vor dem Fall; die Belagerung der letzten Welt des Nachbarn
+    /// kurz vor deren Fall.
+    pub const BOMBARDMENT: u64 = 100;
+    pub const LANDING: u64 = 354;
+    pub const GROUND: u64 = 364;
+    pub const LAST_WORLD: u64 = 1404;
+    const STOPS: [u64; 4] = [BOMBARDMENT, LANDING, GROUND, LAST_WORLD];
+
+    fn states() -> &'static (GameData, Vec<SimState>) {
+        static GAME: OnceLock<(GameData, Vec<SimState>)> = OnceLock::new();
+        GAME.get_or_init(|| {
+            let data = GameData::load_workspace().expect("Spieldaten");
+            let script = WarScript::new(conquest_war());
+            let mut sim = Headless::new(
+                data.clone(),
+                SimConfig {
+                    seed: 3,
+                    player: None,
+                },
+            );
+            let states = STOPS
+                .iter()
+                .map(|days| {
+                    script.run_until(&mut sim, WAR_DAY + days, false);
+                    let mut state = sim.state();
+                    state.galaxy.rebuild_index();
+                    state
+                })
+                .collect();
+            (data, states)
+        })
+    }
+
+    /// Die Partie `days` Tage nach der Kriegserklärung (einer der Halte).
+    pub fn state(days: u64) -> (&'static GameData, &'static SimState) {
+        let (data, states) = states();
+        let index = STOPS
+            .iter()
+            .position(|stop| *stop == days)
+            .expect("ein Halt des Drehbuchs");
+        (data, &states[index])
+    }
+
+    /// Schreibt den Stand als Spielstand für diese Gemeinschaft (oder einen Beobachter),
+    /// den nur dieser Testlauf kennt.
+    pub fn save_file(days: u64, player: Option<PolityId>, name: &str) -> PathBuf {
+        let (data, state) = state(days);
+        let mut state = state.clone();
+        state.config = SimConfig {
+            player,
+            ..state.config
+        };
+        let path =
+            std::env::temp_dir().join(format!("konfluenz_test_{}_{name}.ron", std::process::id()));
+        SaveGame {
+            format: SAVE_FORMAT,
+            data_hash: data.hash,
+            state,
+        }
+        .write(&path)
+        .expect("Spielstand schreiben");
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

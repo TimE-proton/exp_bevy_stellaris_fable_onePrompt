@@ -26,8 +26,7 @@ pub enum ViewState {
     Galaxy,
     /// 3D-Schlachtansicht eines Gefechts der Partie.
     Battle,
-    /// Belagerungsansicht (ab Meilenstein 5).
-    #[allow(dead_code)]
+    /// Orbitansicht einer belagerten Welt.
     Siege,
 }
 

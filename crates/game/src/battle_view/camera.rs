@@ -47,8 +47,8 @@ const GLOW_HEIGHT: u32 = 512;
 /// kann (ohne Renderer, in den Systemtests).
 const SAFE_TEXTURE_SIZE: u32 = 2048;
 /// Grenzen der Fluggeschwindigkeit, als Vielfaches der Grundgeschwindigkeit.
-const FLY_SPEED_MIN: f32 = 0.04;
-const FLY_SPEED_MAX: f32 = 12.0;
+pub(super) const FLY_SPEED_MIN: f32 = 0.04;
+pub(super) const FLY_SPEED_MAX: f32 = 12.0;
 
 #[derive(Component)]
 pub struct BattleCamera;
@@ -684,7 +684,7 @@ pub(super) fn set_active(
 
 /// Die Steuerung der Engine führt Gier- und Nickwinkel selbst mit; nach einem Sprung
 /// müssen sie zur neuen Blickrichtung passen.
-fn sync_flight(flight: &mut FreeCameraState, transform: &Transform) {
+pub(super) fn sync_flight(flight: &mut FreeCameraState, transform: &Transform) {
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
     set_flight_angles(flight, yaw, pitch);
 }

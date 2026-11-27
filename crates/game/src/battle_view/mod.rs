@@ -14,6 +14,7 @@ mod effects;
 pub mod feed;
 mod hud;
 mod meshes;
+pub mod orbit;
 mod overlay;
 pub mod practice;
 mod scene;
@@ -73,6 +74,10 @@ pub enum BattleFeedSet {
     Practice,
     /// Gefechte der Partie.
     Campaign,
+    /// Belagerungen der Partie in der Orbitansicht.
+    Siege,
+    /// Was der Partie sonst nach jedem Takt zusieht (etwa das Ende einer Gemeinschaft).
+    Watchers,
 }
 
 /// Reihenfolge der Ansicht innerhalb eines Frames.
@@ -328,7 +333,12 @@ impl Plugin for BattleViewPlugin {
             )
             .configure_sets(
                 FixedUpdate,
-                (BattleFeedSet::Practice, BattleFeedSet::Campaign)
+                (
+                    BattleFeedSet::Practice,
+                    BattleFeedSet::Campaign,
+                    BattleFeedSet::Siege,
+                    BattleFeedSet::Watchers,
+                )
                     .chain()
                     .after(sim::SimRoot),
             )
@@ -346,6 +356,7 @@ impl Plugin for BattleViewPlugin {
         overlay::plugin(app);
         practice::plugin(app);
         campaign::plugin(app);
+        orbit::plugin(app);
     }
 }
 

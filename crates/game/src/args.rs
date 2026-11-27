@@ -21,7 +21,9 @@ Aufruf: game [Optionen]
                       zeichnete, nichts von Karte oder Gefecht in ihrem Sichtfeld lag oder
                       ein verlangtes Foto nicht entstand
   --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
-                      nummeriert sie (DATEI_1.png, DATEI_2.png, …)
+                      nummeriert sie (DATEI_1.png, DATEI_2.png, …). Zeigt ein geladener
+                      Spielstand eine Belagerung, sieht der Selbsttest (ab 200 Frames) sie
+                      sich in der Orbitansicht an und speichert davon DATEI_2.png
   --help              Diese Hilfe";
 
 #[derive(Resource, Clone, Debug, Default, PartialEq)]

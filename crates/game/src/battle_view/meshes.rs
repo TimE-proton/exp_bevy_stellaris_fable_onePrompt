@@ -1272,6 +1272,118 @@ pub fn star_field(count: usize, radius: f32, mut sample: impl FnMut() -> f32) ->
     mesh
 }
 
+// --- Belagerung -----------------------------------------------------------------------
+
+/// Kugel mit Radius 1 aus Breiten- und Längenkreisen, y zeigt zum Pol. `paint` färbt jeden
+/// Punkt der Oberfläche. Anders als die Rümpfe ist sie glatt: Die Normale jeder Ecke zeigt
+/// vom Mittelpunkt weg.
+pub fn globe(rows: usize, columns: usize, mut paint: impl FnMut(Vec3) -> Paint) -> MeshData {
+    let point = |row: usize, column: usize| {
+        let polar = std::f32::consts::PI * row as f32 / rows as f32;
+        let around = TAU * column as f32 / columns as f32;
+        Vec3::new(
+            polar.sin() * around.cos(),
+            polar.cos(),
+            polar.sin() * around.sin(),
+        )
+    };
+    let mut mesh = MeshData::default();
+    for row in 0..rows {
+        for column in 0..columns {
+            let a = point(row, column);
+            let b = point(row + 1, column);
+            let c = point(row + 1, column + 1);
+            let d = point(row, column + 1);
+            mesh.tri_painted([a, c, b], [paint(a), paint(c), paint(b)]);
+            mesh.tri_painted([a, d, c], [paint(a), paint(d), paint(c)]);
+        }
+    }
+    mesh.normals = mesh.positions.clone();
+    mesh
+}
+
+/// Orbitalstation, etwa zwei Einheiten breit: Kern mit Kuppel, Ausleger und zwei Tafeln
+/// in der Farbe der Gemeinschaft. Die Achse des Kerns ist y.
+pub fn station() -> MeshData {
+    let core = along(
+        &frustum(Vec3::X * -0.45, Vec3::X * 0.45, (0.3, 0.26), 10, HULL),
+        Vec3::Y,
+        Vec3::ZERO,
+    );
+    let top = along(&dome(0.26, 0.22, 10, TRIM), Vec3::Y, Vec3::Y * 0.45);
+    let keel = along(
+        &frustum(Vec3::ZERO, Vec3::X * 0.4, (0.16, 0.04), 8, PLATE),
+        Vec3::NEG_Y,
+        Vec3::Y * -0.45,
+    );
+    let boom = cuboid(
+        Vec3::new(-1.0, -0.05, -0.07),
+        Vec3::new(1.0, 0.05, 0.07),
+        PLATE,
+    );
+    let panel = cuboid(Vec3::new(0.5, -0.02, -0.5), Vec3::new(1.0, 0.02, 0.5), TRIM);
+    let other = cuboid(
+        Vec3::new(-1.0, -0.02, -0.5),
+        Vec3::new(-0.5, 0.02, 0.5),
+        TRIM,
+    );
+    let collar = MeshData::loft(
+        &[
+            ring(Vec3::X * -0.06, 12, 0.5, 0.5, 0.0),
+            ring(Vec3::X * 0.06, 12, 0.5, 0.5, 0.0),
+        ],
+        DARK,
+    );
+    core.with(&top)
+        .with(&keel)
+        .with(&boom)
+        .with(&panel)
+        .with(&other)
+        .with(&along(&collar, Vec3::Y, Vec3::ZERO))
+}
+
+/// Bodengeschütz: Sockel und Turm mit Zwillingsrohren, die nach oben (+y) zeigen. Fuß bei
+/// y = 0, etwa eine Einheit hoch.
+pub fn surface_gun() -> MeshData {
+    let base = along(
+        &frustum(Vec3::ZERO, Vec3::X * 0.3, (0.6, 0.42), 8, PLATE),
+        Vec3::Y,
+        Vec3::ZERO,
+    );
+    let house = along(&dome(0.4, 0.34, 8, TRIM), Vec3::Y, Vec3::Y * 0.3);
+    let tube = along(
+        &frustum(Vec3::ZERO, Vec3::X * 0.75, (0.075, 0.06), 6, DARK),
+        Vec3::new(0.25, 1.0, 0.0),
+        Vec3::new(0.0, 0.45, 0.16),
+    );
+    base.with(&house).with(&tube.both_sides())
+}
+
+/// Bunker: flache Kuppel in der Farbe der Gemeinschaft, Fuß bei y = 0.
+pub fn bunker() -> MeshData {
+    along(&dome(0.6, 0.3, 8, HULL), Vec3::Y, Vec3::ZERO)
+}
+
+/// Scheibe mit Radius 1 in der x-z-Ebene, Vorderseite nach +y: Fläche einer Zone auf der
+/// Oberfläche. In der Mitte schwächer als am Rand, damit der Boden zu sehen bleibt.
+pub fn zone_disc() -> MeshData {
+    let sides = 40;
+    let circle = |radius: f32| -> Vec<Vec3> {
+        (0..sides)
+            .map(|index| {
+                let angle = -TAU * index as f32 / sides as f32;
+                Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin())
+            })
+            .collect()
+    };
+    band(&[
+        (circle(0.0), 0.35),
+        (circle(0.8), 0.45),
+        (circle(0.93), 1.0),
+        (circle(1.0), 1.0),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

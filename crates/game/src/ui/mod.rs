@@ -16,11 +16,14 @@ pub use panels::{SimRefs, UiAction};
 
 use crate::battle_view::BattleViewShown;
 use crate::battle_view::campaign::{BattleMarkers, WatchBattle};
+use crate::battle_view::orbit::WatchSiege;
 use crate::battle_view::practice::{PracticeSetup, StartPractice};
+use crate::endings::{self, Endings};
 use crate::history::PriceHistory;
 use crate::map::{FocusSystem, Selection};
 use crate::pointer::UiCover;
 use crate::session::{Notice, SessionRequest, quicksave_path};
+use crate::siege_markers::SiegeMarkers;
 use crate::state::AppState;
 use crate::time_control::SimSpeed;
 use bevy::ecs::system::SystemParam;
@@ -32,6 +35,7 @@ use sim::clock::SimClock;
 use sim::command::{CommandQueue, CommandSource};
 use sim::diplomacy::Diplomacy;
 use sim::economy::Economy;
+use sim::endgame::{Endgame, PlayerFate};
 use sim::finance::Finance;
 use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
@@ -111,6 +115,9 @@ pub struct UiState {
     pub bond_amount: f32,
     /// Fenster „Belagerung“ und die Tafeln der Verteidigung.
     pub siege: siege::SiegeUi,
+    /// Was aus der Gemeinschaft des Spielers geworden ist; die Kopfleiste nennt es, wenn
+    /// er nur noch zusieht.
+    pub player_fate: PlayerFate,
 }
 
 impl UiState {
@@ -164,6 +171,7 @@ impl Default for UiState {
             reserve_target: 0.0,
             bond_amount: 20_000.0,
             siege: siege::SiegeUi::default(),
+            player_fate: PlayerFate::default(),
         }
     }
 }
@@ -198,6 +206,10 @@ pub struct PracticeParams<'w> {
     battle_view: Res<'w, BattleViewShown>,
     markers: Res<'w, BattleMarkers>,
     watch: MessageWriter<'w, WatchBattle>,
+    watch_siege: MessageWriter<'w, WatchSiege>,
+    siege_markers: Res<'w, SiegeMarkers>,
+    endings: ResMut<'w, Endings>,
+    endgame: Option<Res<'w, Endgame>>,
 }
 
 pub struct UiPlugin;
@@ -267,11 +279,17 @@ fn draw_ui(
     }
     let mut root = UiCover::root(ctx, "wurzel");
     let mut actions = Vec::new();
+    ui_state.player_fate = practice
+        .endgame
+        .as_ref()
+        .map_or(PlayerFate::Active, |endgame| endgame.player);
     match (app_state.get(), &sim) {
         (AppState::InGame, _) if practice.battle_view.0 => {
-            // In der Schlachtansicht zeichnet diese ihre eigenen Tafeln; von der Partie
-            // bleibt nur das Menü.
+            // In der Schlachtansicht und der Orbitansicht zeichnen diese ihre eigenen
+            // Tafeln; von der Partie bleiben das Menü und die Meldung vom Ende einer
+            // Gemeinschaft.
             panels::battle_menu(&mut root, &mut ui_state, &mut actions);
+            endings::window(root.ctx(), &mut practice.endings);
         }
         (AppState::InGame | AppState::GameOver, Some(sim)) => {
             let refs = SimRefs {
@@ -301,6 +319,13 @@ fn draw_ui(
                 &practice.markers.0,
                 &mut actions,
             );
+            panels::siege_markers(
+                root.ctx(),
+                root.available_rect_before_wrap(),
+                &practice.siege_markers.0,
+                &mut actions,
+            );
+            endings::window(root.ctx(), &mut practice.endings);
         }
         (AppState::MainMenu, _) => {
             // Der Aufstellungsdialog der Gefechtsübung tritt an die Stelle des Menüs.
@@ -360,6 +385,9 @@ fn draw_ui(
                 }
             }
             UiAction::ShowSiege(planet) => ui_state.siege.show(planet),
+            UiAction::WatchSiege(planet) => {
+                practice.watch_siege.write(WatchSiege(planet));
+            }
             UiAction::WatchBattle(battle) => {
                 practice.watch.write(WatchBattle(battle));
             }

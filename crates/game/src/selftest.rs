@@ -15,6 +15,7 @@
 
 use crate::args::{Args, numbered};
 use crate::battle_view::feed::BattleFeed;
+use crate::battle_view::orbit::{OrbitCensus, WatchSiege, WatchedSiege};
 use crate::battle_view::practice::{LINEUP_ROW_GAP, PracticeBattle};
 use crate::battle_view::{
     CameraRequest, EffectStats, PART_LABELS, SceneCensus, SelectedShip, ViewOptions, ViewTimings,
@@ -22,7 +23,8 @@ use crate::battle_view::{
 };
 use crate::map::{FocusSystem, MapCensus, Selection};
 use crate::session::SessionRequest;
-use crate::state::AppState;
+use crate::siege_markers::SiegeMarkers;
+use crate::state::{AppState, ViewState};
 use crate::time_control::{SPEEDS, SimSpeed};
 use crate::ui::format::decimal;
 use crate::ui::{LeftTab, UiState};
@@ -67,12 +69,40 @@ struct Selftest {
     camera_draws: bool,
     /// Frames, die am Ende schon auf das Foto gewartet wurde.
     waited: u32,
+    /// Der Abstecher in die Orbitansicht, wenn die Partie eine sichtbare Belagerung hat.
+    siege: SiegeVisit,
+    /// Foto der Orbitansicht.
+    siege_photo: Option<PathBuf>,
+    /// Was an der Orbitansicht nicht stimmte.
+    siege_problems: Vec<String>,
 }
+
+/// Stand des Abstechers in die Orbitansicht.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SiegeVisit {
+    /// Noch nicht versucht.
+    Pending,
+    /// Erbeten im Frame `asked`.
+    Watching { asked: u32, judged: bool },
+    /// Vorbei, oder es gab keine sichtbare Belagerung.
+    Done { seen: bool },
+}
+
+/// Ab so vielen Frames macht der Selbsttest den Abstecher in die Orbitansicht.
+const SIEGE_VISIT_MIN_FRAMES: u32 = 200;
+/// Frame, in dem er sie erbittet, und wie lange er danach bis zum Foto und bis zur
+/// Rückkehr wartet.
+const SIEGE_VISIT_START: u32 = 12;
+const SIEGE_VISIT_PHOTO: u32 = 50;
+const SIEGE_VISIT_LEAVE: u32 = 75;
 
 impl Selftest {
     /// Das verlangte Foto, solange es (noch) nicht vorliegt.
     fn missing_photo(&self) -> Option<&Path> {
-        self.photo.as_deref().filter(|path| !photo_written(path))
+        [self.photo.as_deref(), self.siege_photo.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|path| !photo_written(path))
     }
 
     /// Was am Ende gegen ein „OK“ spricht: eine Kartenkamera, die nicht zeichnet, eine
@@ -91,6 +121,7 @@ impl Selftest {
                 path.display()
             ));
         }
+        problems.extend(self.siege_problems.iter().cloned());
         problems
     }
 }
@@ -122,6 +153,9 @@ impl Plugin for SelftestPlugin {
             visible: None,
             camera_draws: false,
             waited: 0,
+            siege: SiegeVisit::Pending,
+            siege_photo: None,
+            siege_problems: Vec::new(),
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
         .add_systems(Update, drive.run_if(in_state(AppState::InGame)));
@@ -146,9 +180,11 @@ fn drive(
     census: MapCensus,
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
+    mut siege: SiegeVisitParams,
 ) {
     test.frame += 1;
     let total = test.total;
+    visit_siege(&mut commands, &args, &mut test, &mut siege);
     if test.frame == 5 {
         // Zeit laufen lassen, schnellste Stufe.
         speed.paused = false;
@@ -192,15 +228,99 @@ fn drive(
             .count();
         println!(
             "SELBSTTEST OK: {} Frames, Datum {}, Takt {}, {} von {} Planeten besiedelt, \
-             {} Kartenobjekte im Sichtfeld der Kamera",
+             {} Kartenobjekte im Sichtfeld der Kamera{}",
             test.frame,
             clock.date(),
             clock.tick,
             owned,
             galaxy.planets.len(),
             test.visible.unwrap_or(0),
+            if test.siege == (SiegeVisit::Done { seen: true }) {
+                ", Orbitansicht einer Belagerung gezeigt"
+            } else {
+                ""
+            },
         );
         exit.write(AppExit::Success);
+    }
+}
+
+/// Was der Abstecher in die Orbitansicht liest und auslöst.
+#[derive(bevy::ecs::system::SystemParam)]
+struct SiegeVisitParams<'w, 's> {
+    markers: Res<'w, SiegeMarkers>,
+    watched: Option<Res<'w, WatchedSiege>>,
+    view: Res<'w, State<ViewState>>,
+    next: ResMut<'w, NextState<ViewState>>,
+    watch: MessageWriter<'w, WatchSiege>,
+    census: OrbitCensus<'w, 's>,
+}
+
+/// Hat die Partie gleich zu Beginn eine Belagerung, die der Spieler sehen darf (ein
+/// geladener Spielstand), sieht der Selbsttest sie sich in der Orbitansicht an: hinein,
+/// einige Frames laufen lassen, festhalten, was die Kamera zeichnet, Foto, zurück zur
+/// Karte. Der Planet muss im Bild sein und, wenn Schiffe im Orbit stehen, ein Rumpf.
+fn visit_siege(
+    commands: &mut Commands,
+    args: &Args,
+    test: &mut Selftest,
+    siege: &mut SiegeVisitParams,
+) {
+    let frame = test.frame;
+    match test.siege {
+        SiegeVisit::Pending if frame >= SIEGE_VISIT_START => {
+            let wanted = test.total >= SIEGE_VISIT_MIN_FRAMES;
+            test.siege = match siege.markers.0.first() {
+                Some(marker) if wanted => {
+                    siege.watch.write(WatchSiege(marker.planet));
+                    SiegeVisit::Watching {
+                        asked: frame,
+                        judged: false,
+                    }
+                }
+                _ => SiegeVisit::Done { seen: false },
+            };
+        }
+        SiegeVisit::Watching { asked, judged } => {
+            if !judged && frame >= asked + SIEGE_VISIT_PHOTO {
+                test.siege = SiegeVisit::Watching {
+                    asked,
+                    judged: true,
+                };
+                if *siege.view.get() != ViewState::Siege || siege.watched.is_none() {
+                    test.siege_problems
+                        .push("die Orbitansicht der Belagerung öffnete sich nicht".to_string());
+                } else if !siege.census.camera_shows() {
+                    test.siege_problems.push(format!(
+                        "die Kamera der Orbitansicht zeichnet nicht ({CAMERA_SILENT})"
+                    ));
+                } else {
+                    if !siege.census.planet_visible() {
+                        test.siege_problems.push(
+                            "die Orbitansicht zeigt den Planeten nicht im Sichtfeld der Kamera"
+                                .to_string(),
+                        );
+                    }
+                    if siege.census.hulls() > 0 && siege.census.visible_hulls() == 0 {
+                        test.siege_problems.push(
+                            "von der Flotte des Belagerers liegt kein Rumpf im Sichtfeld der \
+                             Kamera"
+                                .to_string(),
+                        );
+                    }
+                }
+                if let Some(path) = args.screenshot.as_deref() {
+                    let path = numbered(path, 2);
+                    take_photo(commands, path.clone());
+                    test.siege_photo = Some(path);
+                }
+            }
+            if frame >= asked + SIEGE_VISIT_LEAVE {
+                siege.next.set(ViewState::Galaxy);
+                test.siege = SiegeVisit::Done { seen: true };
+            }
+        }
+        _ => {}
     }
 }
 

@@ -331,6 +331,65 @@ das Ausbauziel; „Plan festsetzen“ schickt es ab, „Verwerfen“ nimmt die �
 Darunter stehen Haltung und Feuerverbot der Garnison. Bezahlt wird aus der Zeile
 „Verteidigung“ des Haushalts, im Rang gleich nach der Flotte.
 
+**So belagert man.** (1) Krieg erklären (Liste der Gemeinschaften). (2) Über einer
+eigenen Welt mit regulären Verbänden Truppen an Bord nehmen: Fenster „Belagerung“, Reiter
+„Flotten und Truppen“, Flotte wählen, Stärke und Nachschubtage einstellen, „Einschiffen“.
+(3) Die Flotte im Fenster „Flotten“ in das System der fremden Welt schicken. (4) Dort
+„Belagern“. (5) Im Reiter „Belagerungen“ die Feuerstufe wählen und die Prognose lesen:
+Halten Stationen den Orbit, muss die Flotte sie erst niederkämpfen; ein Schild fängt den
+Beschuss ab, solange er Ladung hat. (6) Trägt die Prognose für „Sturm“, mit „Landen“
+Truppen absetzen und „Sturm“ ankreuzen; sonst aushungern und auf Treibstoff und Munition
+achten. (7) Fällt die Welt, wechselt sie den Besitzer; war es die letzte der
+Gemeinschaft, endet diese.
+
+**So verteidigt man.** Vor dem Krieg in der Tafel „Verteidigung“ der Welt den Plan
+setzen (Stationen gegen die Einschließung, Geschütze gegen Schiffe im niedrigen Orbit,
+Schild gegen Beschuss, Bunker, reguläre Verbände, Depot) und im Haushalt die Zeile
+„Verteidigung“ bedienen. Wird die Welt belagert, im Fenster „Belagerung“ die Haltung der
+Garnison wählen und, wenn Vorräte knapp sind, die Geschütze schweigen lassen. Entsatz
+bringt eine eigene Flotte: Greift sie die Belagerer an, ruht die Belagerung, solange das
+Gefecht dauert, und bricht, wenn der Belagerer den Orbit verliert.
+
+**Marken auf der Karte.** Um jedes System mit einer sichtbaren Belagerung liegt ein Ring
+aus fünf Abschnitten. So viele leuchten, wie Phasen erreicht sind, in der Farbe der
+Phase: hellblau Anmarsch, gelb Einschließung, orange Beschuss, rot Bodenkrieg, violett
+Untergrund. Ruht die Belagerung, ist der Ring grau und gestrichelt. Er liegt außerhalb
+des doppelten roten Rings eines gesperrten Systems, beides bleibt lesbar; aus der Nähe
+trägt auch die belagerte Welt einen Ring. Am System steht ein Knopf mit Nummer und Name
+der Phase („3 Beschuss“, bei einer ruhenden „3 Beschuss · ruht“): Der Schwebetext nennt
+Belagerer, Verteidiger, Lage und die Legende, ein Klick öffnet das Fenster „Belagerung“
+bei dieser Welt.
+
+**Orbitansicht.** „Ansehen“ neben dem Namen der Welt im Fenster „Belagerung“ zeigt die
+Belagerung in 3D, mit Kamera, Licht und Schiffsmodellen der Schlachtansicht: die Welt,
+die Flotten des Belagerers nach Schiffsklassen im Orbit (große Flotten im Maßstab, die
+Tafel nennt ihn), Orbitalstationen auf ihrer Bahn, Geschütze und Bunker am Boden und den
+Schild als Schale, so hell wie seine Ladung. Die Flotte rückt mit den Phasen näher an
+die Welt. Gezeigt wird die Belagerung der Simulation, Tag für Tag mit der Uhr der
+Partie; Pause und Geschwindigkeit gelten wie auf der Karte. Geschossen wird in der
+Szene nur, wo der Tagesbericht der Simulation Beschuss, Gegenfeuer oder Bodenkampf
+meldet: Feuer aus dem Orbit trifft den Schild oder die Oberfläche, Geschütze und
+Stationen schießen zurück, nach einer Landung gehen Boote von der Flotte zu Boden. Am
+Boden zeigen Scheiben die Zonen in der Farbe dessen, der sie hält; wo gekämpft wird,
+pulsiert ein Ring, und im Untergrund flackert es im ganzen Landegebiet. Die Tafel links
+nennt Phase, „Lage“ (Dauer, Fortschritt, Vorräte, Truppen, Flotte, Schild), die
+„Prognose“ und unter „Meldungen“, was sich geändert hat, seit die Ansicht offen ist
+(Phasenwechsel, Verluste, Landungen, genommene Zonen). Hält der Belagerer den Orbit
+nicht, sagt ein Hinweis, dass die Belagerung ruht, und „Gefecht ansehen“ führt in das
+laufende Gefecht. „Zur Karte“ verlässt die Ansicht, „Belagerungsfenster“ führt zurück
+zu den Befehlen, „Übersicht“ (Taste U) holt Welt und Flotte ins Bild. Fällt die Welt
+oder wird die Belagerung aufgehoben, hält die Partie an, und „Ausgang der Belagerung“
+nennt in den Worten der Chronik, was geschah.
+
+**Ende einer Gemeinschaft.** Verliert eine Gemeinschaft ihre letzte Welt oder geht sie
+in einer anderen auf, meldet es das Fenster „Eine Gemeinschaft endet“ mit dem Eintrag
+der Chronik. Die Karte zeigt ihre Welten in der Farbe der neuen Besitzer, die Liste der
+Gemeinschaften führt sie durchgestrichen als „beendet“. Trifft es die eigene
+Gemeinschaft, hält die Partie an, und „Die eigene Gemeinschaft hat geendet“ sagt, was
+geschah. Mit „Als Beobachter weiter“ läuft die Partie als Beobachterpartie weiter:
+Karte, Fenster und Chronik bleiben offen, Befehle sind gesperrt, und die Kopfleiste
+nennt den Grund. Die ausführlichen Abschlussbilder kommen mit Meilenstein 6.
+
 ### Gefechte der Partie ansehen
 
 Beginnt ein Gefecht mit eigenen Schiffen, meldet es ein Hinweis am oberen Rand und die
@@ -958,7 +1017,7 @@ beiden Spalten der CSV (`ending`, `ending_year`). Die Stellschrauben stehen in
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | fertig: Flotten und Werften, Staatshaushalt, Forschung, Gefechte der Partie in der 3D-Ansicht, militärische Führung der KI, Stilllegen von Schiffen |
-| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | Kern fertig: Tagesrechner, Belagerung in der Partie über Befehle, Eroberung über den gemeinsamen Besitzwechsel bis zum Ende einer Gemeinschaft, Verteidigung als Anspruch des Staatshaushalts, Lesemodell, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit. Offen: KI, Ansicht im Spiel |
+| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | Kern fertig: Tagesrechner, Belagerung in der Partie über Befehle, Eroberung über den gemeinsamen Besitzwechsel bis zum Ende einer Gemeinschaft, Verteidigung als Anspruch des Staatshaushalts, Lesemodell, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit. Im Spiel: Fenster „Belagerung“, Tafel der Verteidigung, Marken auf der Karte, Orbitansicht, Meldung vom Ende einer Gemeinschaft. Offen: KI |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 

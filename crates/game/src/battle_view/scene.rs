@@ -59,7 +59,7 @@ pub struct BattleAssets {
 }
 
 /// Leuchtende Farbe ohne Beleuchtung; Werte über 1 strahlen über (Bloom).
-fn glowing(color: LinearRgba) -> StandardMaterial {
+pub(super) fn glowing(color: LinearRgba) -> StandardMaterial {
     StandardMaterial {
         base_color: color.into(),
         unlit: true,
@@ -69,7 +69,7 @@ fn glowing(color: LinearRgba) -> StandardMaterial {
 
 /// Wie [`glowing`], aber addiert auf das, was dahinter liegt, und von beiden Seiten zu
 /// sehen.
-fn additive(color: LinearRgba) -> StandardMaterial {
+pub(super) fn additive(color: LinearRgba) -> StandardMaterial {
     StandardMaterial {
         alpha_mode: AlphaMode::Add,
         cull_mode: None,

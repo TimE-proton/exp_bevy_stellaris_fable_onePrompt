@@ -3,9 +3,11 @@
 use super::format::{decimal, percent, population};
 use super::{LeftTab, UiState, economy, finance, fleets, siege, tech};
 use crate::battle_view::campaign::{BattleMarker, WATCH, can_watch};
+use crate::endings;
 use crate::history::PriceHistory;
 use crate::map::Selection;
 use crate::session::{Notice, SessionRequest, quicksave_path};
+use crate::siege_markers::SiegeMarker;
 use crate::time_control::{SPEED_LABELS, SimSpeed};
 use bevy_egui::egui::{self, Align, Align2, Color32, Layout, RichText};
 use sim::chronicle::{Chronicle, ChronicleKind};
@@ -74,6 +76,8 @@ pub enum UiAction {
     WatchBattle(sim::ids::BattleId),
     /// Das Fenster „Belagerung“ bei der Belagerung dieser Welt öffnen.
     ShowSiege(PlanetId),
+    /// Die Belagerung dieser Welt in der Orbitansicht zeigen.
+    WatchSiege(PlanetId),
     Quit,
 }
 
@@ -305,11 +309,89 @@ fn battle_markers(
     }
 }
 
+/// An der Marke jeder sichtbaren Belagerung steht ein Knopf in der Farbe ihrer Phase: Er
+/// nennt Nummer und Name der Phase (und ob sie ruht), erklärt im Schwebetext die Marke und
+/// öffnet das Fenster „Belagerung“. Die Knöpfe liegen in der Ebene der Karte, unter allen
+/// Fenstern, über dem Knopf eines Gefechts im selben System.
+pub fn siege_markers(
+    ctx: &egui::Context,
+    free: egui::Rect,
+    markers: &[SiegeMarker],
+    actions: &mut Vec<UiAction>,
+) {
+    for marker in markers {
+        let pos = egui::pos2(
+            marker.at.x + 16.0,
+            marker.at.y - 34.0 - 22.0 * marker.row as f32,
+        );
+        if !free.shrink(8.0).contains(pos) {
+            continue;
+        }
+        egui::Area::new(egui::Id::new(("belagerungsmarke", marker.planet.0)))
+            .order(egui::Order::Background)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                let button = ui
+                    .small_button(RichText::new(marker.label()).color(color32(marker.color())))
+                    .on_hover_text(marker.tooltip());
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("{}: {}", siege::TITLE, marker.planet_name),
+                    )
+                });
+                if button.clicked() {
+                    actions.push(UiAction::ShowSiege(marker.planet));
+                }
+            });
+    }
+}
+
 /// Was von der Oberfläche der Partie bleibt, solange die Schlachtansicht gezeigt wird.
 pub fn battle_menu(root: &mut egui::Ui, state: &mut UiState, actions: &mut Vec<UiAction>) {
     if state.menu_open {
         pause_menu(root.ctx(), state, actions);
     }
+}
+
+/// Was der Spieler an der Zeitsteuerung geklickt hat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeClick {
+    Toggle,
+    Level(usize),
+}
+
+/// Pause und Geschwindigkeitsstufen, wie sie in der Kopfleiste der Partie und in der
+/// Orbitansicht stehen.
+pub fn time_controls(ui: &mut egui::Ui, speed: &SimSpeed) -> Option<TimeClick> {
+    let mut clicked = None;
+    let pause_label = if speed.paused {
+        "▶ Weiter"
+    } else {
+        "⏸ Pause"
+    };
+    if ui
+        .selectable_label(speed.paused, pause_label)
+        .on_hover_text("Leertaste")
+        .clicked()
+    {
+        clicked = Some(TimeClick::Toggle);
+    }
+    for (level, label) in SPEED_LABELS.iter().enumerate() {
+        let active = !speed.paused && speed.level == level;
+        if ui
+            .selectable_label(active, *label)
+            .on_hover_text(format!("Taste {}", level + 1))
+            .clicked()
+        {
+            clicked = Some(TimeClick::Level(level));
+        }
+    }
+    if speed.paused {
+        ui.label(RichText::new("PAUSIERT").color(ACCENT).strong());
+    }
+    clicked
 }
 
 fn top_bar(
@@ -319,6 +401,7 @@ fn top_bar(
     speed: &SimSpeed,
     actions: &mut Vec<UiAction>,
 ) {
+    let fate = state.player_fate;
     let left = |ui: &mut egui::Ui| {
         ui.add_space(4.0);
         match sim.config.player {
@@ -346,6 +429,11 @@ fn top_bar(
             }
             None => {
                 ui.label(RichText::new("Beobachter").strong());
+                // Wer seine Gemeinschaft verloren hat, liest hier, warum er nur zusieht.
+                if let Some(label) = endings::fate_label(fate) {
+                    ui.label(RichText::new(label).color(Color32::from_rgb(235, 110, 95)))
+                        .on_hover_text(endings::OUT_REASON);
+                }
             }
         }
         ui.separator();
@@ -354,30 +442,10 @@ fn top_bar(
                 .monospace()
                 .strong(),
         );
-        let pause_label = if speed.paused {
-            "▶ Weiter"
-        } else {
-            "⏸ Pause"
-        };
-        if ui
-            .selectable_label(speed.paused, pause_label)
-            .on_hover_text("Leertaste")
-            .clicked()
-        {
-            actions.push(UiAction::TogglePause);
-        }
-        for (level, label) in SPEED_LABELS.iter().enumerate() {
-            let active = !speed.paused && speed.level == level;
-            if ui
-                .selectable_label(active, *label)
-                .on_hover_text(format!("Taste {}", level + 1))
-                .clicked()
-            {
-                actions.push(UiAction::SetSpeed(level));
-            }
-        }
-        if speed.paused {
-            ui.label(RichText::new("PAUSIERT").color(ACCENT).strong());
+        match time_controls(ui, speed) {
+            Some(TimeClick::Toggle) => actions.push(UiAction::TogglePause),
+            Some(TimeClick::Level(level)) => actions.push(UiAction::SetSpeed(level)),
+            None => {}
         }
     };
     let right = |ui: &mut egui::Ui| {
@@ -782,6 +850,11 @@ fn planet_details(
     }
 }
 
+/// Was in der Liste der Gemeinschaften bei einer steht, die nicht mehr besteht.
+pub const ENDED: &str = "beendet";
+pub const ENDED_HINT: &str = "Diese Gemeinschaft besteht nicht mehr: Ihre letzte Welt ist \
+     gefallen, oder sie ist in einer anderen aufgegangen.";
+
 fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>) {
     ui.add_space(4.0);
     ui.label(RichText::new("Gemeinschaften").strong());
@@ -808,7 +881,12 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 if !polity.alive {
                     name = name.strikethrough();
                 }
-                if ui.link(name).on_hover_text(&polity.motto).clicked()
+                let hover = if polity.alive {
+                    polity.motto.clone()
+                } else {
+                    format!("{}\n\n{ENDED_HINT}", polity.motto)
+                };
+                if ui.link(name).on_hover_text(hover).clicked()
                     && let Some(capital) = polity.capital
                 {
                     let system = sim.galaxy.planet(capital).system;
@@ -818,7 +896,8 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                     }));
                     actions.push(UiAction::Focus(system));
                 }
-                let people = sim.galaxy.population_of(polity.id);
+                // Eine beendete Gemeinschaft hält nichts mehr: glatt null, kein „−0“.
+                let people = sim.galaxy.population_of(polity.id) + 0.0;
                 ui.label(sim.galaxy.planets_of(polity.id).count().to_string());
                 ui.label(population(people));
                 ui.label(percent((people / total.max(1.0)) as f32));
@@ -867,6 +946,10 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                                 target: polity.id,
                             }));
                         }
+                    }
+                    _ if !polity.alive => {
+                        ui.label(RichText::new(ENDED).color(MUTED).small())
+                            .on_hover_text(ENDED_HINT);
                     }
                     _ => {
                         ui.label("");
@@ -1011,6 +1094,8 @@ pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
                 ui.label("Gelbe Routen sind Brücken zwischen Clustern, Rauten markieren Engpässe.");
                 ui.label("Ringe um ein System: gelb = unruhige Welt, orange = autonom, rot doppelt = blockiert.");
                 ui.label("Dreiecke sind Flotten. Roter Ring = im Gefecht, gelber Bogen = sammelt sich nach einem Abzug.");
+                ui.label("Ring aus fünf Abschnitten um ein System = Belagerung; so viele leuchten wie die Phase,");
+                ui.label("grau gestrichelt = sie ruht. Der Knopf am System öffnet das Fenster „Belagerung“.");
                 ui.label("Reiter „Besitz“ zeigt, warum eine Welt zum Reich hält oder nicht.");
             }
         });

@@ -33,7 +33,7 @@ const PLANET_RADIUS: f32 = 1.9;
 const MIN_SCALE: f32 = 0.12;
 const MAX_SCALE: f32 = 3.0;
 /// Ab dieser Zoomstufe (Weltmaß je Pixel) werden Planeten ausgeblendet.
-const PLANET_LOD_SCALE: f32 = 1.1;
+pub(crate) const PLANET_LOD_SCALE: f32 = 1.1;
 
 /// Was der Spieler auf der Karte gewählt hat.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]

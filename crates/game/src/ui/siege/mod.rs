@@ -8,7 +8,7 @@
 //! die Auswahl oder die Lage ändert ([`Cache`]).
 
 pub(crate) mod defense;
-mod detail;
+pub(crate) mod detail;
 mod troops;
 
 use super::fleets::{WAITING, is_waiting, sentence};

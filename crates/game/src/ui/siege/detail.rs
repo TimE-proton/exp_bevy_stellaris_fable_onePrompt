@@ -5,6 +5,7 @@ use super::{
     BAD, CAPITULATE, Confirm, FORECAST, GOOD, LAND, LIFT, Role, SiegeUi, WARN, days_text,
     forecast_cost, forecast_text, gated, phase_text, polity_name, state_text, units,
 };
+use crate::battle_view::orbit::WATCH;
 use crate::map::Selection;
 use crate::ui::fleets::SHOW_ON_MAP;
 use crate::ui::format::{decimal, grouped, percent};
@@ -502,6 +503,17 @@ pub fn siege_detail(
                 planet: Some(card.planet),
             }));
             actions.push(UiAction::Focus(card.system));
+        }
+        if ui
+            .button(RichText::new(WATCH).color(ACCENT))
+            .on_hover_text(
+                "Zeigt die Belagerung in der Orbitansicht: die Welt, die Flotten im Orbit, \
+                 Schild, Beschuss, Landung und den Kampf am Boden. Sie läuft mit der Zeit \
+                 der Partie weiter.",
+            )
+            .clicked()
+        {
+            actions.push(UiAction::WatchSiege(card.planet));
         }
     });
     ui.horizontal_wrapped(|ui| {

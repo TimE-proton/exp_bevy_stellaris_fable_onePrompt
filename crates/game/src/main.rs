@@ -2,6 +2,7 @@
 
 mod args;
 mod battle_view;
+mod endings;
 mod history;
 mod map;
 mod pointer;
@@ -9,6 +10,7 @@ mod pointer;
 mod readme;
 mod selftest;
 mod session;
+mod siege_markers;
 mod state;
 #[cfg(test)]
 mod testing;
@@ -85,6 +87,8 @@ fn add_game(app: &mut App, data: sim::GameData, args: args::Args) {
             history::HistoryPlugin,
             battle_view::BattleViewPlugin,
             ui::UiPlugin,
+            siege_markers::SiegeMarkersPlugin,
+            endings::EndingsPlugin,
             selftest::SelftestPlugin,
         ));
 }
