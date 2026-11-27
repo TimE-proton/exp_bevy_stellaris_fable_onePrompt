@@ -290,11 +290,12 @@ fn main() -> ExitCode {
             }
             let share = |claim: Claim| 100.0 * paid[&claim] as f64 / revenue.max(1) as f64;
             println!(
-                "Haushalt der letzten zwölf Monate im Mittel: Einnahmen {:.0} je Monat; Schulden {:.1} %, Grundleistungen {:.1} %, Flotte {:.1} %, Beschaffung {:.1} %, Kontore {:.1} %, Forschung {:.1} %, Ausschüttung {:.1} %",
+                "Haushalt der letzten zwölf Monate im Mittel: Einnahmen {:.0} je Monat; Schulden {:.1} %, Grundleistungen {:.1} %, Flotte {:.1} %, Verteidigung {:.1} %, Beschaffung {:.1} %, Kontore {:.1} %, Forschung {:.1} %, Ausschüttung {:.1} %",
                 to_credits(revenue) / months.max(1) as f64,
                 share(Claim::DebtService),
                 share(Claim::Civil),
                 share(Claim::Fleet),
+                share(Claim::Defense),
                 share(Claim::Procurement),
                 share(Claim::Markets),
                 share(Claim::Research),
@@ -847,12 +848,13 @@ fn print_summary(summary: &RunSummary) {
                 100.0 * budget.line(claim).paid as f64 / budget.revenue.max(1) as f64
             };
             println!(
-                "  {:<24} Haushalt: Einnahmen {:>6.0} je Monat; Schulden {:.0} %, Grundleistungen {:.0} %, Flotte {:.0} %, Beschaffung {:.0} %, Kontore {:.0} %, Forschung {:.0} %, Ausschüttung {:.0} %",
+                "  {:<24} Haushalt: Einnahmen {:>6.0} je Monat; Schulden {:.0} %, Grundleistungen {:.0} %, Flotte {:.0} %, Verteidigung {:.1} %, Beschaffung {:.0} %, Kontore {:.0} %, Forschung {:.0} %, Ausschüttung {:.0} %",
                 "",
                 to_credits(budget.revenue) / polity.budget_months as f64,
                 share(Claim::DebtService),
                 share(Claim::Civil),
                 share(Claim::Fleet),
+                share(Claim::Defense),
                 share(Claim::Procurement),
                 share(Claim::Markets),
                 share(Claim::Research),

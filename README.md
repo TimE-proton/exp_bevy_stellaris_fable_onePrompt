@@ -57,6 +57,13 @@ darf beliebig oft stehen:
   Nachbarn den Krieg und schließt zu Beginn des Jahres 45 Frieden. Mit
   `grenzkrieg-angreifer-ruht` und `grenzkrieg-nachbar-ruht` erhalten die Flotten der einen
   Seite keine Befehle: der Vergleich einer geführten mit einer untätigen Flotte.
+- `--preset eroberung`: Gemeinschaft 0 hebt vom Jahr 20 an Truppen aus, erklärt zu Beginn
+  des Jahres 25 ihrem nächsten Nachbarn den Krieg, belagert zuerst dessen nächste Welt
+  und dann seinen Sitz und schließt zu Beginn des Jahres 45 Frieden, wenn er dann noch
+  besteht. Ihre Flotten führt das Drehbuch mit gewöhnlichen Befehlen; so zeigen Sweeps
+  Belagerungen, Eroberungen und das Ende einer Gemeinschaft, bevor die KI selbst belagert.
+  Der Sweep nennt dazu je Seed die Belagerungen nach Ausgang, die gefallenen Welten und
+  die beendeten Gemeinschaften.
 - `--ai WER:ART`: militärische Führung durch die KI für WER (Nummer ab 0 oder `alle`):
   `aktiv` (Vorgabe), `flotte-ruht` (rüstet, aber die Flotten bleiben, wo sie sind) oder
   `ruht` (keine Rüstung, keine Flottenbefehle; für Drehbücher, die alles selbst führen).
@@ -466,20 +473,22 @@ Alle Gewichte und Schwellen stehen in `assets/data/balance.ron` unter `finance`.
      einging, und hinzu kommt, was der übliche Satz auf dieselbe Lohnsumme gebracht
      hätte. Sie gehen an die Haushalte.
   3. **Flotte:** Sold der Besatzungen und Ersatzteile der Wartung.
-  4. **Beschaffung:** Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft
+  4. **Verteidigung:** die stehende Verteidigung der Welten: Sold der regulären Verbände,
+     Unterhalt der Anlagen, Depots, Aushebung und Ausbau (siehe „Belagerung").
+  5. **Beschaffung:** Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft
      wird, den ganzen Monat über; am Monatsersten wird der Voranschlag zurückgelegt.
      Ausgeben darf sie, was in der Kasse liegt und niemandem sonst bewilligt ist, auch
      die Rücklage und was im Monat hinzukommt (Anleihen, Verkäufe), nur nicht die
      laufenden Einnahmen des Monats: Sie gehören dem nächsten Abschluss.
-  5. **Kontore:** Einlagen in Kontore, deren Kasse leer ist, gegen neue Anteile.
-  6. **Forschung:** der eingestellte Anteil der Einnahmen.
-  7. **Rücklage:** Was übrig ist, füllt sie bis zu ihrem Ziel auf.
-  8. **Ausschüttung:** Erst vom Rest darüber geht ein Anteil (`handout_share`) an die
+  6. **Kontore:** Einlagen in Kontore, deren Kasse leer ist, gegen neue Anteile.
+  7. **Forschung:** der eingestellte Anteil der Einnahmen.
+  8. **Rücklage:** Was übrig ist, füllt sie bis zu ihrem Ziel auf.
+  9. **Ausschüttung:** Erst vom Rest darüber geht ein Anteil (`handout_share`) an die
      Haushalte.
 - **Kürzung.** Reicht das Geld nicht, wird von hinten gekürzt, mit den Folgen, die jeder
   Anspruch selbst hat: Ausgebliebener Sold wird zum Soldrückstand und drückt die Moral
   der Besatzungen, unbezahlte Forschung kommt langsamer voran, Werften, Nachschub und
-  Instandsetzung warten. Die Ansprüche 1 bis 5 greifen notfalls die Rücklage an, die
+  Instandsetzung warten, unbezahlte Reguläre gehen. Die Ansprüche 1 bis 6 greifen notfalls die Rücklage an, die
   Forschung nie: Sie lebt von dem, was der Monat nach ihnen übrig lässt, und von dem, was
   schon über der Rücklage lag. Die Wartung der Flotte ist zu den Preisen des
   Monatsersten bewilligt; werden die Ersatzteile im Monat teurer, kauft sie aus der
@@ -777,9 +786,9 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   Chronik, Befehlsprotokoll, Bilanzen beendeter Gefechte, aufgelöste Flotten und Zähler
   über die ganze Partie.
 
-Bisher ruft in einer Partie nur die Abspaltung diese Vorgänge auf. Die Eroberung einer
-gewöhnlichen Welt läuft noch über eine eigene Übergabe der Belagerung
-(`siege::conquest::hand_over`); Hauptwelten, Vereinigung und Unterstellung folgen.
+In einer Partie rufen die Abspaltung und die Eroberung diese Vorgänge auf: Jede eroberte
+Welt wechselt über `transfer_planet` den Besitzer, auch eine Hauptwelt und die letzte
+Welt einer Gemeinschaft. Vereinigung und Unterstellung folgen mit der Diplomatie.
 
 ## Belagerung
 
@@ -803,16 +812,23 @@ ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
   Frieden nicht selbst schließen.
 - **Orbit.** Belagern kann eine Flotte, die im System liegt, einsatzbereit ist und
   Treibstoff hat. Im Orbit verbraucht sie, was jede liegende Flotte verbraucht
-  (`military.fuel_per_day`). Trifft ein Entsatz ein, beginnt ein Gefecht und die
-  Belagerung ist aufgehoben; die Sperre des Systems hält nach der Regel der Flotten, bis
-  das Gefecht entschieden ist.
+  (`military.fuel_per_day`). Wer einen Planeten einschließt, sperrt sein System für
+  Handel und Nachschub, gleich mit welchem Auftrag seine Flotte dort liegt. Trifft ein
+  Entsatz ein, beginnt nach den Regeln der Flotten ein Gefecht, und die Belagerung ruht:
+  Niemand zehrt an Vorräten oder Garnison, die Sperre hält, solange die Flotte des
+  Belagerers kämpft. Hält er danach den Orbit, geht dieselbe Belagerung weiter; liegt
+  keine seiner Flotten mehr mit Treibstoff über dem Planeten, ist sie gebrochen und
+  aufgehoben.
 - **Eroberung.** Fällt eine gewöhnliche Welt (gestürmt, ausgehungert oder übergeben),
   wechselt sie am selben Tag den Besitzer. Die Anteile des alten Staates an ihren
   Betrieben gehen an den neuen; private Halter behalten ihre und zählen fortan als
   fremder Besitz. Die Region ist unruhig und besetzt. Ein Vorbesitz des Eroberers an den
   Betrieben schwächt die Miliz und mildert die Besatzung. Auf Befehl wird geplündert: Ein
   Teil der Kassen der Welt geht an die Staatskasse des Eroberers, Geld wird nur
-  verschoben. Die Eroberung einer Hauptwelt bleibt vorerst stehen, die Belagerung ruht.
+  verschoben. Der Besitzwechsel läuft über den gemeinsamen Pfad der Nachfolge: Fällt
+  eine Hauptwelt, zieht die Hauptwelt der Verlierer auf ihre bevölkerungsreichste
+  verbleibende Welt, und ein Teil ihrer Elite geht mit; fällt ihre letzte Welt, endet
+  ihre Gemeinschaft, und der Eroberer tritt ihr Erbe unter Zwang an.
 - **Folgen.**
   - Produktion: Bodenkrieg legt Werke still (`PlanetEconomy::disruption`); der
     Stillstand klingt nach den Kämpfen von selbst ab.
@@ -825,10 +841,27 @@ ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
 - **Monatsschritt.** Die Miliz einer Welt, die nicht belagert wird, folgt Bevölkerung und
   Zusammenhalt. Kriegsschäden und Besatzung klingen ab; die Regionen spiegeln sie für den
   Zusammenhalt. Eine Besatzung endet, wenn die Welt den Eroberer auf anderem Weg verlässt.
+- **Stehende Verteidigung.** Mit `SetDefensePlan` nennt der Besitzer je Welt sein Ziel:
+  Stufen der Orbitalstationen, Geschütze, des Schilds und der Bunker (begrenzt durch die
+  Technik), reguläre Verbände (höchstens ein Vielfaches der Miliz) und Tage im Depot.
+  Bezahlt wird aus dem Anspruch „Verteidigung" des Staatshaushalts (`siege::arms`): am
+  Monatsbeginn Sold und Unterhalt an den Staatsdienst, dann Aushebung (Güter und
+  Menschen) und je Anlage eine Stufe, ganz oder gar nicht; täglich ein Dreißigstel
+  dessen, was dem Depot fehlt. Was nicht bezahlt wird, verfällt: Bleibt der Sold aus,
+  geht je Monat ein Zwanzigstel der Regulären, Depots füllen sich nicht, Anlagen wachsen
+  nicht. Heimatwelten beginnen mit Geschützen, Regulären und Vorräten; ihr Plan nennt,
+  was steht.
+- **Lesemodell** (`siege::view`): je Belagerung eine Karte mit Planet, Parteien, Phase
+  (1 bis 5 mit Namen), Fortschritt, Vorräten, Anlagen, Truppen und den drei
+  vorausgerechneten Wegen; je Welt die Karte der Verteidigung mit Plan, Grenzen und
+  Kosten; und `command_block` nennt zu jedem Befehl der Belagerung den Grund, aus dem der
+  Kern ihn jetzt ablehnen würde.
+- **Chronik:** Beginn und Ende einer Blockade, Beginn einer Belagerung, jeder Wechsel
+  der Phase, Übergabe, Plünderung, Verlust der Hauptwelt und Ende einer Gemeinschaft.
 - **KI.** Die militärische Führung lässt Flotten in Ruhe, die einen Planeten belagern
-  (`AiState::reserved`). Selbst beginnt die KI noch keine Belagerung, und Beschaffung,
-  Aushebung, Ausbau und Sold der stehenden Verteidigung fehlen noch: Nur Heimatwelten
-  haben von Beginn an Geschütze, Reguläre und Vorräte.
+  (`AiState::reserved`). Selbst beginnt die KI noch keine Belagerung und stellt keine
+  Verteidigungspläne auf; das Drehbuch `eroberung` führt Belagerungen in ganzen Partien
+  vor.
 
 Die Stellschrauben stehen in `assets/data/balance.ron` unter `siege`; die Tests in
 `crates/sim/tests/siege.rs` spielen ganze Feldzüge über Befehle.
@@ -861,7 +894,7 @@ beiden Spalten der CSV (`ending`, `ending_year`). Die Stellschrauben stehen in
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | fertig: Flotten und Werften, Staatshaushalt, Forschung, Gefechte der Partie in der 3D-Ansicht, militärische Führung der KI, Stilllegen von Schiffen |
-| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | Kern fertig: Tagesrechner, Belagerung in der Partie über Befehle, Eroberung gewöhnlicher Welten, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit. Offen: Hauptwelten, Beschaffung der Verteidigung, KI, Ansicht im Spiel |
+| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | Kern fertig: Tagesrechner, Belagerung in der Partie über Befehle, Eroberung über den gemeinsamen Besitzwechsel bis zum Ende einer Gemeinschaft, Verteidigung als Anspruch des Staatshaushalts, Lesemodell, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit. Offen: KI, Ansicht im Spiel |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
