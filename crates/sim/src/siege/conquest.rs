@@ -237,6 +237,7 @@ fn conquer(
     if liberated {
         defense.occupation = 0.0;
         defense.occupied_from = None;
+        defense.occupied_by = None;
     } else {
         let mercy = if conquest.outcome == Outcome::Capitulated {
             balance.capitulation_mercy
@@ -245,6 +246,7 @@ fn conquer(
         };
         defense.occupation = (1.0 - stake).clamp(balance.occupation_min, 1.0) * mercy;
         defense.occupied_from = Some(old);
+        defense.occupied_by = Some(to);
     }
     // Anlagen und Vorräte gehen über, wie sie stehen; der Plan nennt genau das.
     defense.plan = DefensePlan {
@@ -387,6 +389,72 @@ mod tests {
                 supply: 0.0,
             },
         );
+    }
+
+    /// Lässt den Belagerer vorab den Anteil `share` an jedem Betrieb der Welt halten: Von
+    /// jedem Halter geht dieser Teil seiner Anteile an den Staat des Belagerers.
+    fn give_stake(scene: &mut Scene, share: f64) {
+        let state = &mut scene.state;
+        let capitals: Vec<_> = state.polities.list.iter().map(|p| p.capital).collect();
+        let local: Vec<(IssuerId, Vec<HolderId>)> = crate::finance::issuers_of_region(
+            &state.finance,
+            &state.galaxy,
+            &state.logistics,
+            &capitals,
+            scene.planet,
+        )
+        .map(|(id, issuer)| (id, issuer.holdings.keys().copied().collect()))
+        .collect();
+        for (id, holders) in local {
+            for holder in holders {
+                crate::finance::shares::move_holdings(
+                    &mut state.finance,
+                    &[id],
+                    holder,
+                    HolderId::State(ME),
+                    share,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_prior_stake_thins_the_militia_and_eases_the_conquest() {
+        let balance = Scene::colony().data.balance.siege.clone();
+        // Zwillinge: dieselbe Kolonie, einmal gehören dem Belagerer vorab 60 % ihrer
+        // Betriebe.
+        let run = |stake: f64| {
+            let mut scene = Scene::colony();
+            if stake > 0.0 {
+                give_stake(&mut scene, stake);
+            }
+            let population = scene.state.galaxy.planet(scene.planet).population;
+            let needed = occupation_force(population, &balance);
+            embark(&mut scene, FleetId(0), needed + 2.0);
+            scene.day();
+            let siege = scene.siege();
+            let (held, militia) = (siege.stake(), siege.garrison_start);
+            until_it_falls(&mut scene, ME);
+            let region = scene.state.finance.region(scene.planet);
+            let occupation = scene.state.sieges.defense(scene.planet).occupation;
+            (held, militia, region.cohesion, occupation)
+        };
+        let (none, militia, cohesion, occupation) = run(0.0);
+        let (held, thinned, eased, lighter) = run(0.6);
+        assert_eq!(none, 0.0);
+        assert!((held - 0.6).abs() < 0.02, "Vorbesitz {held}");
+        // Wer an den Betrieben beteiligt ist, dem stellt sich weniger Miliz entgegen.
+        assert!(militia > 1.0);
+        assert!(
+            (thinned / militia - (1.0 - held)).abs() < 1e-6,
+            "{thinned} zu {militia}"
+        );
+        // Die eroberte Welt hält besser zusammen, und die Besatzung lastet leichter.
+        assert!(
+            eased >= cohesion + 15.0,
+            "Zusammenhalt {eased} gegen {cohesion}"
+        );
+        assert!((lighter / occupation - (1.0 - held)).abs() < 1e-6);
     }
 
     #[test]

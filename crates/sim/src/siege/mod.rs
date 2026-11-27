@@ -14,12 +14,13 @@
 //!
 //! In der Partie führt [`day`] den Lebenslauf der Datensätze und wendet an, was der
 //! Tagesrechner bewirkt; [`conquest`] macht aus einem Urteil den Besitzwechsel, [`orders`]
-//! prüft die Befehle. Allein [`orbit`] liest Flotten, Schiffe und Forschung und übersetzt
+//! prüft die Befehle, [`month`] führt die Bücher des Monats. Allein [`orbit`] liest Flotten, Schiffe und Forschung und übersetzt
 //! sie in die einfachen Daten, mit denen alles Übrige rechnet. Datensätze enden nur über
 //! [`close`].
 
 pub mod conquest;
 pub mod day;
+pub mod month;
 pub mod orbit;
 pub mod orders;
 mod plugin;
@@ -27,6 +28,7 @@ pub mod step;
 
 pub use conquest::{HandOverTerms, hand_over, mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
+pub use month::{run_month, stakes_in};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
 pub use orders::{
     armament_allowance, begin_siege, capitulate, embark_troops, land_troops, lift_siege,
@@ -38,6 +40,7 @@ pub use step::{
     militia_strength, resolve, stations_after_duel, trace,
 };
 
+use crate::ai::AiState;
 use crate::data::{GameData, SiegeBalance};
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money};
@@ -47,7 +50,7 @@ use crate::ids::{FleetId, PlanetId, PolityId};
 use crate::polity::Polities;
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Feuerstufe der Flotte im Orbit, aufsteigend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -284,6 +287,10 @@ pub struct PlanetDefense {
     /// Besatzung 0..1 und wem die Welt genommen wurde.
     pub occupation: f64,
     pub occupied_from: Option<PolityId>,
+    /// Wer die Welt erobert hat und besetzt hält. Wechselt sie danach auf anderem Weg
+    /// den Besitzer, endet die Besatzung.
+    #[serde(default)]
+    pub occupied_by: Option<PolityId>,
 }
 
 /// Stehende Befehle des Belagerers. Was nicht wirken kann, steht in
@@ -741,6 +748,10 @@ pub struct Sieges {
     /// (Verursacher, Geschädigter) → vernichtetes oder geplündertes Vermögen in Credits.
     pub grievances: BTreeMap<(PolityId, PolityId), f64>,
     pub stats: SiegeStats,
+    /// Flotten, die die Belagerung bei der Flotten-KI für sich beansprucht hat
+    /// ([`reserve_besiegers`]): genau die, die sie wieder freigibt.
+    #[serde(default)]
+    pub held: BTreeSet<FleetId>,
 }
 
 impl Sieges {
@@ -880,6 +891,27 @@ impl Sieges {
         }
         None
     }
+}
+
+/// Hält der Flotten-KI die Flotten fern, die einen Planeten belagern: Jede zugeordnete
+/// Flotte steht in [`AiState::reserved`], bis ihre Zuordnung endet. Freigegeben wird nur,
+/// was die Belagerung selbst eingetragen hat. Läuft nach den Befehlen eines Takts und
+/// nach dem Aufräumen der Zuordnungen.
+pub fn reserve_besiegers(sieges: &mut Sieges, ai: &mut AiState) {
+    if sieges.held.is_empty() && sieges.assign.is_empty() {
+        return;
+    }
+    let wanted: BTreeSet<FleetId> = sieges.assign.keys().copied().collect();
+    if wanted == sieges.held {
+        return;
+    }
+    for fleet in sieges.held.difference(&wanted) {
+        ai.reserved.remove(fleet);
+    }
+    for fleet in wanted.difference(&sieges.held) {
+        ai.reserved.insert(*fleet);
+    }
+    sieges.held = wanted;
 }
 
 /// Schließt die Belagerung eines Planeten: die eine Stelle, an der ein Datensatz endet.
@@ -1413,11 +1445,12 @@ mod tests {
         );
     }
 
-    /// Was die Belagerung in eine Region schreibt, kommt beim nächsten Monatsabschluss im
-    /// Zusammenhalt an.
+    /// Was die Belagerung über eine Welt weiß, schreibt ihr Monatsschritt in die Region,
+    /// und beim nächsten Monatsabschluss kommt es im Zusammenhalt an.
     #[test]
     fn region_mirrors_reach_the_cohesion_factors() {
         let data = data();
+        let balance = data.balance.siege.clone();
         let config = SimConfig {
             seed: 4,
             player: None,
@@ -1426,18 +1459,21 @@ mod tests {
         let mut twin = Headless::new(data, config);
         let home = sim.polities().list[0].capital.unwrap();
         {
-            let mut finance = sim.world_mut().resource_mut::<Finance>();
-            let region = &mut finance.regions[home.index()];
-            region.occupation = 0.8;
-            region.garrison_cover = 0.5;
-            region.war_damage = 0.3;
+            let mut sieges = sim.world_mut().resource_mut::<Sieges>();
+            let defense = sieges.defense_mut(home);
+            defense.occupation = 0.8;
+            defense.occupied_from = Some(PolityId(1));
+            defense.occupied_by = Some(PolityId(0));
+            defense.scar = 0.3;
+            defense.scar_by = Some(PolityId(0));
         }
         sim.run_days(31);
         twin.run_days(31);
         let factors = &sim.world().resource::<Finance>().region(home).factors;
-        assert_eq!(factors.occupation, 0.8);
-        assert_eq!(factors.garrison_cover, 0.5);
-        assert_eq!(factors.war_damage, 0.3);
+        // Der Monatsschritt des ersten Tages hat einmal abklingen lassen und gespiegelt.
+        assert!((factors.occupation - 0.8 * (1.0 - balance.occupation_decay)).abs() < 1e-12);
+        assert!((factors.war_damage - 0.3 * (1.0 - balance.scar_decay)).abs() < 1e-12);
+        assert!(factors.garrison_cover > 0.0 && factors.garrison_cover < 1.0);
         let untouched = &twin.world().resource::<Finance>().region(home).factors;
         assert_eq!(untouched.occupation, 0.0);
         assert!(

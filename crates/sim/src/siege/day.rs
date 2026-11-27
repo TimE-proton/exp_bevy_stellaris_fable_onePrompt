@@ -7,6 +7,7 @@
 use super::step::{DayEffects, form, resolve, stations_after_duel};
 use super::{
     Blocked, BlockedSet, Conquest, Orbit, Outcome, PlanetFacts, Siege, SiegeReport, Sieges, close,
+    stakes_in,
 };
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
@@ -14,7 +15,7 @@ use crate::data::{GameData, Sector};
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, procure};
 use crate::finance::shares::seat_of_issuer;
-use crate::finance::{Finance, book_value, ownership_of_region};
+use crate::finance::{Finance, book_value};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, IssuerId, PlanetId, PolityId, SystemId};
 use crate::logistics::Logistics;
@@ -266,15 +267,7 @@ fn open(
     tick: u64,
 ) {
     let day = tick / TICKS_PER_DAY;
-    let capitals: Vec<Option<PlanetId>> = polities.list.iter().map(|p| p.capital).collect();
-    // Fremde Gemeinschaften mit ihrem Anteil am Wert der Betriebe; der Rest liegt beim
-    // Besitzer und seinen Regionen.
-    let mut stakes = ownership_of_region(finance, galaxy, logistics, &capitals, planet).foreign;
-    for stake in stakes.values_mut() {
-        *stake = stake.clamp(0.0, 1.0);
-    }
-    let foreign: f64 = stakes.values().sum();
-    stakes.insert(defender, (1.0 - foreign).clamp(0.0, 1.0));
+    let stakes = stakes_in(galaxy, polities, finance, logistics, planet, defender);
     let facts = planet_facts(data, galaxy, economy, finance, planet, day, 0.0);
     let prize_start = prize(data, galaxy, economy, logistics, planet);
     let siege = form(

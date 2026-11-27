@@ -361,6 +361,8 @@ pub(crate) fn apply_commands(
             });
         }
     }
+    // Flotten, die jetzt belagern, lässt die Flotten-KI schon in diesem Takt in Ruhe.
+    siege::reserve_besiegers(&mut ctx.sieges, &mut ctx.ai);
 }
 
 fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> Result<(), String> {

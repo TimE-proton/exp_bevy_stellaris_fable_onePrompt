@@ -114,6 +114,15 @@ Forschung je Gemeinschaft und Jahrzehnt: Einnahmen, Etat, Punkte, Stufen je Zwei
 `--seeds 0..8` die Übersicht über viele Partien.
 
 ```bash
+cargo headless siege --reference
+```
+
+Der Tagesrechner der Belagerung ohne Partie: die drei Wege (aushungern, stürmen,
+beschießen) für drei Bezugswelten im Vergleich. Ohne `--reference` der Verlauf Tag für
+Tag; Bevölkerung, Verteidigung, Flotte und Befehle lassen sich über Optionen stellen
+(`cargo headless siege --help`).
+
+```bash
 cargo headless hash --seed 7 --days 3600
 ```
 
@@ -768,8 +777,61 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
   Chronik, Befehlsprotokoll, Bilanzen beendeter Gefechte, aufgelöste Flotten und Zähler
   über die ganze Partie.
 
-Bisher ruft in einer Partie nur die Abspaltung diese Vorgänge auf; Eroberung, Vereinigung
-und Unterstellung folgen mit Belagerung und Diplomatie.
+Bisher ruft in einer Partie nur die Abspaltung diese Vorgänge auf. Die Eroberung einer
+gewöhnlichen Welt läuft noch über eine eigene Übergabe der Belagerung
+(`siege::conquest::hand_over`); Hauptwelten, Vereinigung und Unterstellung folgen.
+
+## Belagerung
+
+Der Kampf um einen Planeten zwischen einer Flotte im Orbit und der Verteidigung am Boden
+(`crates/sim/src/siege/`). Je Planet steht dauerhaft eine Handvoll Verteidigungswerte
+(Stationen, Geschütze, Schild, Bunker, reguläre Verbände, Miliz, Vorräte); eine
+Belagerung legt darüber genau einen Datensatz. Der Tagesrechner ist eine reine Funktion
+ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
+
+- **Fünf Phasen**, abgeleitet aus dem Zustand und nie gespeichert: Anmarsch (Stationen
+  halten den Orbit und das System offen), Einschließung (die Garnison zehrt von ihren
+  Vorräten, der Markt vor Ort streckt sie), Beschuss (gezielt oder flächig), Bodenkrieg
+  (gelandete Truppen kämpfen Zone um Zone) und Untergrund (die Oberfläche ist verloren,
+  Reguläre halten die Bunker).
+- **Drei Wege:** aushungern (langsam, die Beute bleibt heil), stürmen (Wochen, kostet
+  Truppen), beschießen (schnell, kostet Beute, Zusammenhalt und eigene Kriegsmüdigkeit).
+  Unter feindlichem Orbit wird die Garnison nicht versorgt, also endet jede Belagerung.
+- **Befehle:** `BeginSiege`, `SetSiegeOrders` (Feuerstufe, Sturm, Schwerpunkt,
+  Plünderung), `LiftSiege`, `EmbarkTroops`, `LandTroops` für den Belagerer;
+  `SetGarrisonOrders` und `Capitulate` für den Verteidiger. Wer belagert wird, kann den
+  Frieden nicht selbst schließen.
+- **Orbit.** Belagern kann eine Flotte, die im System liegt, einsatzbereit ist und
+  Treibstoff hat. Im Orbit verbraucht sie, was jede liegende Flotte verbraucht
+  (`military.fuel_per_day`). Trifft ein Entsatz ein, beginnt ein Gefecht und die
+  Belagerung ist aufgehoben; die Sperre des Systems hält nach der Regel der Flotten, bis
+  das Gefecht entschieden ist.
+- **Eroberung.** Fällt eine gewöhnliche Welt (gestürmt, ausgehungert oder übergeben),
+  wechselt sie am selben Tag den Besitzer. Die Anteile des alten Staates an ihren
+  Betrieben gehen an den neuen; private Halter behalten ihre und zählen fortan als
+  fremder Besitz. Die Region ist unruhig und besetzt. Ein Vorbesitz des Eroberers an den
+  Betrieben schwächt die Miliz und mildert die Besatzung. Auf Befehl wird geplündert: Ein
+  Teil der Kassen der Welt geht an die Staatskasse des Eroberers, Geld wird nur
+  verschoben. Die Eroberung einer Hauptwelt bleibt vorerst stehen, die Belagerung ruht.
+- **Folgen.**
+  - Produktion: Bodenkrieg legt Werke still (`PlanetEconomy::disruption`); der
+    Stillstand klingt nach den Kämpfen von selbst ab.
+  - Kurse: Betriebe mit Sitz auf einer belagerten Welt tragen einen Risikoabschlag;
+    Beschuss, Eroberung und Plünderung drücken die Stimmung.
+  - Zusammenhalt: „Besatzung" und „Kriegsschäden" sind eigene Posten. Eine Garnison
+    fängt die Besatzung teilweise auf.
+  - Kriegsmüdigkeit: eigene Verluste, Opfer des Beschusses, jeder volle Monat einer
+    Belagerung, und der Fall einer Welt (er entlastet den Sieger).
+- **Monatsschritt.** Die Miliz einer Welt, die nicht belagert wird, folgt Bevölkerung und
+  Zusammenhalt. Kriegsschäden und Besatzung klingen ab; die Regionen spiegeln sie für den
+  Zusammenhalt. Eine Besatzung endet, wenn die Welt den Eroberer auf anderem Weg verlässt.
+- **KI.** Die militärische Führung lässt Flotten in Ruhe, die einen Planeten belagern
+  (`AiState::reserved`). Selbst beginnt die KI noch keine Belagerung, und Beschaffung,
+  Aushebung, Ausbau und Sold der stehenden Verteidigung fehlen noch: Nur Heimatwelten
+  haben von Beginn an Geschütze, Reguläre und Vorräte.
+
+Die Stellschrauben stehen in `assets/data/balance.ron` unter `siege`; die Tests in
+`crates/sim/tests/siege.rs` spielen ganze Feldzüge über Befehle.
 
 ## Die beiden Enden
 
@@ -799,7 +861,7 @@ beiden Spalten der CSV (`ending`, `ending_year`). Die Stellschrauben stehen in
 | 2 | Wirtschaft: Produktion, lokale Preise, Frachter, Warenflüsse | fertig |
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | fertig: Flotten und Werften, Staatshaushalt, Forschung, Gefechte der Partie in der 3D-Ansicht, militärische Führung der KI, Stilllegen von Schiffen |
-| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | offen |
+| 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | Kern fertig: Tagesrechner, Belagerung in der Partie über Befehle, Eroberung gewöhnlicher Welten, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit. Offen: Hauptwelten, Beschaffung der Verteidigung, KI, Ansicht im Spiel |
 | 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
