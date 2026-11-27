@@ -232,7 +232,7 @@ durch Gefechte gegen sie; was Gefechte an Einblick bringen, verblasst ohne neue 
 Vormonats, Schulden und Zins, darunter der **Haushalt**: der letzte abgeschlossene Monat
 und die Summe der bis zu zwölf letzten Monate. Die Tafel nennt die laufenden Einnahmen,
 dann jeden Anspruch in seiner Rangfolge (Schuldendienst, Grundleistungen, Flotte,
-Beschaffung, Kontore, Forschung) mit dem Verlangten, dem Bezahlten und dem, was offen
+Verteidigung, Beschaffung, Kontore, Forschung) mit dem Verlangten, dem Bezahlten und dem, was offen
 blieb (rot), den Rest der Einnahmen, und was in Rücklage und Ausschüttung ging. Offen
 bleibt ein Anspruch, wenn das Geld fehlte oder der Markt die Ware nicht hergab. Unter der
 Tafel steht ihr Zeitraum: Ein Haushaltsmonat reicht von einem Monatsabschluss zum nächsten

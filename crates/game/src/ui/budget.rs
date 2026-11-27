@@ -247,6 +247,7 @@ mod tests {
         };
         set(Claim::Civil, 5_000_000, 5_000_000);
         set(Claim::Fleet, 4_000_000, 3_000_000);
+        set(Claim::Defense, 800_000, 500_000);
         set(Claim::Research, 3_000_000, 0);
         set(Claim::Reserve, 2_000_000, 0);
         let rows = budget_rows(&month, &month);
@@ -258,12 +259,13 @@ mod tests {
                 "1. Schuldendienst",
                 "2. Grundleistungen",
                 "3. Flotte",
-                "4. Beschaffung",
-                "5. Kontore",
-                "6. Forschung",
+                "4. Verteidigung",
+                "5. Beschaffung",
+                "6. Kontore",
+                "7. Forschung",
                 "Rest der Einnahmen",
-                "7. Rücklage",
-                "8. Ausschüttung"
+                "8. Rücklage",
+                "9. Ausschüttung"
             ]
         );
         assert_eq!(rows[0].cells[1], "10.000");
@@ -271,12 +273,14 @@ mod tests {
         assert_eq!(fleet.cells[..3], ["4.000", "3.000", "1.000"]);
         assert_eq!(fleet.short, [true, true]);
         assert_eq!(rows[2].cells[2], "", "voll bezahlt: nichts offen");
-        assert_eq!(rows[6].cells[2], "3.000");
+        // Die Verteidigung steht im Rang gleich nach der Flotte.
+        assert_eq!(rows[4].cells[..3], ["800", "500", "300"]);
+        assert_eq!(rows[7].cells[2], "3.000");
         // Der Rest ist, was der Kern dafür nennt.
-        assert_eq!(rows[7].cells[1], "2.000");
+        assert_eq!(rows[8].cells[1], "1.500");
         // Was der Rücklage fehlt, ist kein unbezahlter Anspruch.
-        assert_eq!(rows[8].cells[..3], ["2.000", "0", ""]);
-        assert_eq!(rows[8].short, [false, false]);
+        assert_eq!(rows[9].cells[..3], ["2.000", "0", ""]);
+        assert_eq!(rows[9].short, [false, false]);
     }
 
     /// Alle Texte, die in der Zeile des Textes `label` rechts von ihm stehen, von links
