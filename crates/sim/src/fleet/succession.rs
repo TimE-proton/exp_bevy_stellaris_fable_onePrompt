@@ -104,9 +104,10 @@ pub(crate) fn cancel_orders_at(
 /// Schiffe, Ort, Marschweg, Auftrag, stehende Befehle und Sammelfrist und bekommt die
 /// nächste Nummer in der Zählung der neuen Gemeinschaft. Steht sie im Gefecht, kämpft ihre
 /// Partei fortan für `into`; gegen wen, sagt danach [`sync_hostility`]. Vorher werden die
-/// Bücher der Partei geschlossen ([`close_books`]): Was `from` in dem Gefecht schon verloren
-/// hat, bleibt der Verlust von `from`; die Erbin beginnt bei null und trägt nur, was die
-/// Flotte unter ihr verliert. Gibt die Zahl der übergebenen Flotten zurück.
+/// Bücher aller Parteien von `from` geschlossen ([`write_off`], [`close_sides`]): Was
+/// `from` in einem Gefecht schon verloren hat, bleibt der Verlust von `from`; die Erbin
+/// beginnt bei null und trägt nur, was die Flotte unter ihr verliert. Gibt die Zahl der
+/// übergebenen Flotten zurück.
 pub(crate) fn pass_fleets(
     fleets: &mut Fleets,
     battles: &mut Battles,
@@ -118,12 +119,13 @@ pub(crate) fn pass_fleets(
 ) -> usize {
     for index in 0..fleets.list.len() {
         if fleets.list[index].owner == from && fleets.list[index].alive {
-            close_books(fleets, battles, data, index, tick);
+            write_off(fleets, battles, data, index);
         }
     }
     // Wer dabei sein letztes Schiff abschreiben musste, besteht nicht mehr und geht nicht
     // über.
     fleets.refresh(data);
+    close_sides(fleets, battles, from, false, tick);
     let short = &polities.get(into).short;
     // Nummeriert wird wie bei jeder neuen Flotte: fortlaufend, aufgelöste zählen mit.
     let mut number = fleets
@@ -200,62 +202,36 @@ pub(crate) fn dissolve_fleets(
         if fleets.list[index].owner != from || !fleets.list[index].alive {
             continue;
         }
-        if let Some((place, side)) = close_books(fleets, battles, data, index, tick) {
-            let battle = &mut battles.active[place];
-            for ship in &mut battle.ships {
-                if ship.side as usize == side && ship.status.in_play() {
-                    ship.status = ShipStatus::Escaped;
-                    ship.target = None;
-                    battle.combatants[side].escaped[ship.class.index()] += 1;
-                }
-            }
-            battle.shots.retain(|shot| shot.side as usize != side);
-            battles.departed.push(Departed {
-                battle: battle.id,
-                side: side as u16,
-                fleet: battle.combatants[side].fleet,
-                tick,
-                cause: Departure::Dissolved,
-                destination: None,
-            });
-        }
+        write_off(fleets, battles, data, index);
         fleets.list[index].ships.clear();
         dissolved += 1;
     }
     // Eine Flotte ohne Schiffe besteht nicht mehr: weder im Gefecht noch auf dem Marsch.
     fleets.refresh(data);
+    close_sides(fleets, battles, from, true, tick);
     let before = fleets.orders.len();
     fleets.orders.retain(|order| order.polity != from);
     relabel_combatants(battles, from, into);
     (dissolved, before - fleets.orders.len())
 }
 
-/// Schließt die Bücher der Partei, als die eine Flotte in einem laufenden Gefecht steht,
-/// bevor die Flotte übergeht oder aufgelöst wird. Gibt Stelle des Gefechts und der Partei
-/// zurück; `None`, wenn die Flotte in keinem Gefecht steht.
-///
-/// - Schiffe, die der Rechner schon zerstört hat, verlassen die Flotte und zählen als
-///   verloren bei der Gemeinschaft, für die die Partei bis jetzt kämpft (sonst täte das
-///   erst der nächste Morgen, unter dem Namen der Erbin).
-/// - Der Bauwert, den die Partei bisher verloren hat, liegt ab sofort als Trümmer im
-///   System und steht nicht mehr in ihrer Bilanz: Kriegsmüdigkeit und Kursschock am Ende
-///   des Gefechts treffen die Erbin dafür nicht.
-fn close_books(
-    fleets: &mut Fleets,
-    battles: &mut Battles,
-    data: &GameData,
-    fleet: usize,
-    tick: u64,
-) -> Option<(usize, usize)> {
+/// Schreibt aus einer Flotte, die in einem laufenden Gefecht steht, die Schiffe ab, die der
+/// Rechner schon zerstört hat, und zählt sie als verloren bei der Gemeinschaft, für die
+/// ihre Partei bis jetzt kämpft. Sonst täte das erst der nächste Morgen, unter dem Namen
+/// der Erbin.
+fn write_off(fleets: &mut Fleets, battles: &mut Battles, data: &GameData, fleet: usize) {
     let id = fleets.list[fleet].id;
-    let (place, side) = battles
+    let Some((place, side)) = battles
         .active
         .iter()
         .enumerate()
         .find_map(|(place, battle)| {
             side_of_fleet(&battles.departed, battle, id).map(|side| (place, side))
-        })?;
-    let battle = &mut battles.active[place];
+        })
+    else {
+        return;
+    };
+    let battle = &battles.active[place];
     let results = battle.results(data);
     let destroyed: BTreeSet<ShipId> = battle
         .ships
@@ -264,13 +240,79 @@ fn close_books(
         .filter_map(|ship| ship.source)
         .collect();
     let lost = write_back(&results, side, &mut fleets.list[fleet], Some(&destroyed));
-    let combatant = &mut battle.combatants[side];
-    let owner = combatant.owner;
-    let wreckage = std::mem::take(&mut combatant.lost_value);
-    let system = battle.system;
+    let owner = battle.combatants[side].owner;
     count_lost(&mut battles.ships_lost, owner, lost);
-    add_debris(battles, system, wreckage, tick);
-    Some((place, side))
+}
+
+/// Schließt die Bücher aller Parteien, die in laufenden Gefechten für `from` stehen, bevor
+/// sie der Erbin zugerechnet werden.
+///
+/// - Der Bauwert, den eine Partei bisher verloren hat, liegt ab sofort als Trümmer im
+///   System und steht nicht mehr in ihrer Bilanz: Kriegsmüdigkeit und Kursschock am Ende
+///   des Gefechts treffen die Erbin dafür nicht.
+/// - Eine Partei, deren Flotte lebt und weiterkämpft (friedlicher Weg), bleibt auf dem
+///   Feld; ebenso bleibt stehen, wer ohne Gegner ausgeschieden ist und dessen Flotte
+///   übergeht.
+/// - Jede andere Partei ist erledigt ([`Departure::Dissolved`]): mit `all` alle, sonst die,
+///   deren Flotte nicht mehr besteht oder das Feld schon geräumt hat. Was von ihr noch auf
+///   dem Feld steht, verlässt es, ihre Geschosse verfallen. Ging ihre Flotte in dem
+///   Gefecht ganz verloren, zählt das jetzt, bei `from`.
+fn close_sides(fleets: &Fleets, battles: &mut Battles, from: PolityId, all: bool, tick: u64) {
+    let mut wreckage: Vec<(SystemId, f32)> = Vec::new();
+    for battle in &mut battles.active {
+        for side in 0..battle.combatants.len() {
+            if battle.combatants[side].owner != from {
+                continue;
+            }
+            let combatant = &mut battle.combatants[side];
+            wreckage.push((battle.system, std::mem::take(&mut combatant.lost_value)));
+            let fleet = combatant.fleet;
+            let fights_on = fleet
+                .and_then(|id| fleets.get(id))
+                .is_some_and(|fleet| fleet.alive && fleet.battle == Some(battle.id));
+            let entry = battles
+                .departed
+                .iter()
+                .position(|entry| entry.battle == battle.id && entry.side as usize == side);
+            let stands = match entry {
+                None => fights_on,
+                Some(entry) => battles.departed[entry].cause == Departure::NoOpponent,
+            };
+            if stands && !all {
+                continue;
+            }
+            for ship in &mut battle.ships {
+                if ship.side as usize == side && ship.status.in_play() {
+                    ship.status = ShipStatus::Escaped;
+                    ship.target = None;
+                    combatant.escaped[ship.class.index()] += 1;
+                }
+            }
+            battle.shots.retain(|shot| shot.side as usize != side);
+            let ships = |counts: &[u32; 6]| counts.iter().sum::<u32>() - counts[0];
+            if ships(&combatant.initial) > 0 && ships(&combatant.lost) >= ships(&combatant.initial)
+            {
+                if battles.fleets_lost.len() <= from.index() {
+                    battles.fleets_lost.resize(from.index() + 1, 0);
+                }
+                battles.fleets_lost[from.index()] += 1;
+            }
+            match entry {
+                Some(entry) => battles.departed[entry].cause = Departure::Dissolved,
+                None => battles.departed.push(Departed {
+                    battle: battle.id,
+                    side: side as u16,
+                    fleet,
+                    tick,
+                    cause: Departure::Dissolved,
+                    destination: None,
+                }),
+            }
+        }
+    }
+    for (system, amount) in wreckage {
+        add_debris(battles, system, amount, tick);
+    }
 }
 
 /// Legt Trümmer in ein System: ein Feld je System, aufsteigend nach System.

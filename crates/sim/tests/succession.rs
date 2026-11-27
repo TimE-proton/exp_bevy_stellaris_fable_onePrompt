@@ -7,18 +7,18 @@
 //! bis zum Eingriff bitgleich.
 
 use sim::GameData;
-use sim::ai::MilitaryMode;
+use sim::ai::{AiState, MilitaryMode, MilitaryPlan};
 use sim::chronicle::{Chronicle, ChronicleKind};
 use sim::clock::{DAYS_PER_MONTH, DAYS_PER_YEAR, TICKS_PER_DAY};
 use sim::command::{CommandOutcome, SimCommand};
 use sim::data::ShipClass;
 use sim::diplomacy::Diplomacy;
-use sim::economy::{Economy, Money};
+use sim::economy::{Claim, Economy, Money};
 use sim::endgame::{Endgame, Ending, Path, PlayerFate};
 use sim::finance::{
     Finance, Secession, Stage, apply_secession, ownership_of_region, polity_of_issuer,
 };
-use sim::fleet::{BattleOutcome, Battles, Fleets};
+use sim::fleet::{BattleOutcome, Battles, Departure, Fleets};
 use sim::galaxy::Galaxy;
 use sim::harness::{Headless, check_invariants};
 use sim::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId};
@@ -2174,4 +2174,267 @@ fn determinism() {
         battles(&first).reports.last().map(|report| report.outcome),
         Some(BattleOutcome::CalledOff)
     );
+}
+
+// --- 9. Nähte zu Haushalt, Staatsdienst, Waffenruhe und militärischer Führung ----------------
+
+/// Eine Partie mit tätiger KI nach gut einem Jahr, in der die zweite Gemeinschaft alles
+/// hat, was an ihr hängen kann: Flotte, Bauauftrag, eröffneten Haushalt mit offener
+/// Bewilligung, Geld im Staatsdienst, eine Waffenruhe, einen Krieg, einen Plan ihrer
+/// militärischen Führung und eine vorgemerkte Flotte.
+fn entangled(seed: u64) -> (Headless, PolityId, PolityId) {
+    let (heir, from, foe, enemy) = (PolityId(0), PolityId(1), PolityId(2), PolityId(3));
+    let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
+    sim.run_days(13 * DAYS_PER_MONTH + 4);
+    for order in [
+        SimCommand::DeclareWar { target: foe },
+        SimCommand::MakePeace { target: foe },
+        SimCommand::DeclareWar { target: enemy },
+        SimCommand::BuildClass {
+            planet: capital(&sim, from),
+            class: ShipClass::Corvette,
+        },
+    ] {
+        assert_eq!(command(&mut sim, from, order), CommandOutcome::Applied);
+    }
+    // Ein paar Tage Krieg: Die Führung der KI plant.
+    sim.run_days(3);
+    let fleet = fleets(&sim).of(from).next().expect("eine Flotte").id;
+    {
+        let world = sim.world_mut();
+        let mut ai = world.resource_mut::<AiState>();
+        ai.modes.insert(from, MilitaryMode::Active);
+        ai.reserved.insert(fleet);
+        // Eine offene Bewilligung, falls der Monat sie schon verbraucht hat.
+        let mut economy = world.resource_mut::<Economy>();
+        *economy.budgets[from.index()]
+            .grants
+            .entry(Claim::Research)
+            .or_default() += 1;
+    }
+    let economy = economy(&sim);
+    assert!(economy.budgets[from.index()].opened);
+    assert!(economy.staff_money(from) > 0, "Geld im Staatsdienst");
+    assert!(treasury(&sim, from) > 0);
+    assert!(
+        diplomacy(&sim)
+            .truces
+            .keys()
+            .any(|(a, b)| *a == from || *b == from)
+    );
+    assert!(diplomacy(&sim).at_war(from, enemy));
+    assert!(fleets(&sim).orders.iter().any(|order| order.polity == from));
+    let ai = sim.world().resource::<AiState>();
+    assert_ne!(
+        ai.plan(from),
+        MilitaryPlan::default(),
+        "die Führung hat geplant"
+    );
+    (sim, from, heir)
+}
+
+#[test]
+fn the_end_of_a_community_leaves_nothing_of_it_in_budget_staff_truces_or_plans() {
+    let (base, from, heir) = entangled(21);
+    for path in [Path::Joined, Path::Forced] {
+        let mut sim = twin(&base);
+        let before = Before::of(&sim);
+        let (purse, cash) = (economy(&sim).staff_money(from), treasury(&sim, from));
+        let (heir_purse, heir_cash) = (economy(&sim).staff_money(heir), treasury(&sim, heir));
+        let offensives = sim.world().resource::<AiState>().plan(from).offensives;
+        let tick = sim.clock().tick;
+        sim.succession(|succession| succession.absorb(from, heir, path, tick))
+            .unwrap();
+        before.assert_conserved(&sim, "Ende mit Haushalt und Staatsdienst");
+
+        // Kasse und Staatsdienst sind bei der Erbin, der Haushalt ist geschlossen.
+        let economy = economy(&sim);
+        assert_eq!((economy.staff_money(from), treasury(&sim, from)), (0, 0));
+        assert_eq!(economy.staff_money(heir), heir_purse + purse);
+        assert_eq!(treasury(&sim, heir), heir_cash + cash);
+        let budget = &economy.budgets[from.index()];
+        assert!(budget.grants.is_empty() && !budget.opened && budget.history.is_empty());
+        for claim in [Claim::Fleet, Claim::Procurement, Claim::Research] {
+            assert_eq!(
+                economy.allowance(from, claim),
+                0,
+                "{claim:?} gibt nichts mehr aus"
+            );
+        }
+        assert_eq!(economy.wage_bill_running[from.index()], 0);
+        assert_eq!(economy.wage_tax_running[from.index()], 0);
+        // Weder Krieg noch Waffenruhe, weder Flotte noch Auftrag.
+        let diplomacy = diplomacy(&sim);
+        assert!(diplomacy.wars.iter().all(|(a, b)| *a != from && *b != from));
+        assert!(
+            diplomacy
+                .truces
+                .keys()
+                .all(|(a, b)| *a != from && *b != from)
+        );
+        assert_eq!(fleets(&sim).of(from).count(), 0);
+        assert!(fleets(&sim).orders.iter().all(|order| order.polity != from));
+        // Die Führung der KI plant für sie nicht mehr; der Zähler der Angriffe bleibt.
+        let ai = sim.world().resource::<AiState>();
+        assert!(!ai.modes.contains_key(&from));
+        assert_eq!(
+            ai.plan(from),
+            MilitaryPlan {
+                offensives,
+                ..MilitaryPlan::default()
+            }
+        );
+        assert!(ai.reserved.iter().all(|fleet| {
+            fleets(&sim)
+                .get(*fleet)
+                .is_some_and(|fleet| fleet.owner != from)
+        }));
+
+        // Speichern und Laden stellt den Zustand genau her, und die Partie läuft weiter,
+        // über zwei Haushaltsabschlüsse, ohne dass für die Beendete noch etwas geschieht.
+        let text = sim.save().to_ron().unwrap();
+        let mut loaded = Headless::from_save(data().clone(), SaveGame::from_ron(&text).unwrap());
+        assert_eq!(loaded.hash(), sim.hash());
+        sim.run_days(2 * DAYS_PER_MONTH + 3);
+        loaded.run_days(2 * DAYS_PER_MONTH + 3);
+        assert_eq!(loaded.hash(), sim.hash());
+        assert_sound(&sim, "zwei Monate nach dem Ende");
+        let economy = self::economy(&sim);
+        assert_eq!((economy.staff_money(from), treasury(&sim, from)), (0, 0));
+        let budget = &economy.budgets[from.index()];
+        assert!(budget.grants.values().all(|grant| *grant == 0));
+        assert_eq!(budget.year().spending(), 0);
+        let rejected = rejection(&mut sim, from, SimCommand::SetTaxRate { rate: 0.2 });
+        assert!(rejected.contains("besteht nicht mehr"), "{rejected}");
+    }
+}
+
+#[test]
+fn shares_are_only_given_to_receivers_that_exist() {
+    let (giver, ended, heir) = (PolityId(3), PolityId(1), PolityId(2));
+    let mut sim = observer(16);
+    sim.run_days(2 * DAYS_PER_YEAR + 3);
+    let tick = sim.clock().tick;
+    sim.succession(|succession| succession.absorb(ended, heir, Path::Forced, tick))
+        .unwrap();
+    let state = HolderId::State(giver);
+    let issuer = *finance(&sim)
+        .issuers
+        .iter()
+        .find(|(_, issuer)| issuer.held_by(state) >= 10)
+        .expect("der Staat hält Anteile")
+        .0;
+    let unknown = PlanetId(sim.galaxy().planets.len() as u32);
+    for to in [
+        HolderId::State(ended),
+        HolderId::State(PolityId(99)),
+        HolderId::Public(unknown),
+        HolderId::Elite(unknown),
+    ] {
+        let reason = rejection(
+            &mut sim,
+            giver,
+            SimCommand::DistributeShares {
+                issuer,
+                shares: 10,
+                to,
+            },
+        );
+        assert!(reason.contains("Empfänger"), "{to:?}: {reason}");
+    }
+    assert_eq!(
+        command(
+            &mut sim,
+            giver,
+            SimCommand::DistributeShares {
+                issuer,
+                shares: 10,
+                to: HolderId::State(heir),
+            }
+        ),
+        CommandOutcome::Applied
+    );
+    assert_sound(&sim, "nach der Übertragung");
+}
+
+/// Endet eine Gemeinschaft, deren Flotte im Gefecht schon verloren hat, trägt die Erbin
+/// diese Verluste nicht: weder als Kriegsmüdigkeit noch als verlorene Schiffe oder Flotte,
+/// auf dem friedlichen Weg so wenig wie auf dem erzwungenen.
+#[test]
+fn losses_before_the_end_are_not_charged_to_the_heir() {
+    let (ended, heir) = (PolityId(3), PolityId(2));
+    let mut base = embattled(14);
+    let system = base.galaxy().planet(capital(&base, ended)).system;
+    let side_of = |sim: &Headless, owner: PolityId| {
+        battles(sim).in_system(system).and_then(|battle| {
+            battle
+                .combatants
+                .iter()
+                .position(|side| side.owner == owner)
+        })
+    };
+    // Bis die Verteidigerin etwas verloren hat.
+    for _ in 0..40 * TICKS_PER_DAY {
+        let lost = side_of(&base, ended)
+            .map(|side| battles(&base).in_system(system).unwrap().combatants[side].lost_value);
+        if lost.is_none_or(|lost| lost > 0.0) {
+            break;
+        }
+        base.tick();
+    }
+    let side = side_of(&base, ended).expect("das Gefecht läuft noch");
+    let lost_before = battles(&base).in_system(system).unwrap().combatants[side].lost_value;
+    assert!(lost_before > 0.0, "die Verteidigerin hat etwas verloren");
+    let id = battles(&base).in_system(system).unwrap().id;
+
+    for path in [Path::Joined, Path::Forced] {
+        let mut sim = twin(&base);
+        let weary = finance(&sim).polities[heir.index()].war_weariness;
+        let (ships, fleets_lost) = (
+            battles(&sim).ships_lost_by(heir),
+            battles(&sim).fleets_lost_by(heir),
+        );
+        let debris = battles(&sim).debris_in(system);
+        let tick = sim.clock().tick;
+        sim.succession(|succession| succession.absorb(ended, heir, path, tick))
+            .unwrap();
+        assert_sound(&sim, "Ende im Gefecht");
+        // Die Bücher der Partei sind geschlossen: Der bisherige Verlust liegt als Trümmer
+        // im System, die Partei steht unter dem Namen der Erbin bei null.
+        let battle = battles(&sim).get(id).expect("das Gefecht steht noch");
+        assert_eq!(battle.combatants[side].owner, heir);
+        assert_eq!(battle.combatants[side].lost_value, 0.0);
+        assert!((battles(&sim).debris_in(system) - debris - lost_before).abs() < 0.5);
+        let departed: Vec<Departure> = battles(&sim)
+            .departed
+            .iter()
+            .filter(|entry| entry.battle == id && entry.side as usize == side)
+            .map(|entry| entry.cause)
+            .collect();
+        match path {
+            Path::Forced => assert_eq!(departed, [Departure::Dissolved]),
+            _ => assert!(
+                departed.is_empty(),
+                "die Flotte kämpft für die Erbin weiter"
+            ),
+        }
+        if path == Path::Forced {
+            // Was der Rechner einer aufgelösten Partei am Ende noch abschreibt (Bordjäger
+            // ohne Träger), belastet die Erbin ebenso wenig.
+            sim.world_mut().resource_mut::<Battles>().active[0].combatants[side].lost_value = 300.0;
+        }
+        // Die Erbin liegt mit niemandem im Krieg: Das Gefecht wird eingestellt.
+        sim.run_days(2);
+        assert!(battles(&sim).get(id).is_none());
+        let report = battles(&sim).report(id).expect("eine Bilanz");
+        assert_eq!(report.sides[side].owner, heir);
+        assert_eq!(
+            report.sides[side].left_early.is_some(),
+            path == Path::Forced
+        );
+        assert!(finance(&sim).polities[heir.index()].war_weariness <= weary);
+        assert_eq!(battles(&sim).ships_lost_by(heir), ships);
+        assert_eq!(battles(&sim).fleets_lost_by(heir), fleets_lost);
+        assert_sound(&sim, "nach dem Gefecht");
+    }
 }

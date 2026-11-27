@@ -714,6 +714,83 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 - **Werften.** Ein fertiges Schiff bleibt im Dock, solange feindliche Flotten im System
   stehen und keine eigene, einsatzbereite es aufnehmen kann.
 
+## Besitzwechsel, Nachfolge und Unterstellung
+
+- **Eine Stelle für jeden Wechsel.** Eine Welt wechselt nur über `sim::polity::succession`
+  von einer Gemeinschaft zu einer anderen; dort entstehen nach Spielbeginn neue
+  Gemeinschaften, und dort enden sie. Abspaltung, Übertritt, Eroberung und Vereinigung
+  benutzen dieselben vier Vorgänge: gründen (`spawn`), übertragen (`transfer_planet`),
+  beenden (`absorb`), unterstellen (`subordinate`). Jeder prüft zuerst und ändert dann;
+  Geld, Anteile und Menschen bleiben dabei erhalten.
+- **Übertragung einer Welt.** Mit der Welt gehen ihre Bevölkerung, ihre Betriebe und die
+  Halter, die dort sitzen. Ein Teil der Anteile des alten Staates an ihren Betrieben geht
+  an einen Empfänger, den der Anlass nennt; ihre Kurse geben nach; die Region beginnt mit
+  dem Zusammenhalt und der Stufe, die der Anlass vorgibt. Bauaufträge des alten Besitzers
+  bei ihrer Werft verfallen ohne Erstattung.
+- **Fällt die Hauptwelt**, wird die bevölkerungsreichste verbleibende Welt Hauptwelt. Die
+  Handelshäuser ziehen mit, ebenso ein Teil der alten Elite samt Besitz und Geld.
+- **Ende einer Gemeinschaft.** Verliert eine Gemeinschaft ihre letzte Welt oder geht sie in
+  einer anderen auf, endet sie, und eine Erbin tritt an ihre Stelle. Ihre Welten behalten
+  Stufe und Zusammenhalt. Staatskasse, das Geld ihres Staatsdienstes, staatliche Anteile,
+  Anleihen, Handelshäuser samt Frachtern und das Wissen gehen über; was die Erbin sich
+  danach selbst schuldete, ist getilgt. Ihr Haushalt ist geschlossen, ihre Kriege und
+  Waffenruhen enden, und die KI plant für sie nicht mehr. Auf friedlichem Weg gehen auch
+  Flotten und Bauaufträge über; tritt sie bei, bleibt ihre Hauptwelt als Sitz kenntlich.
+  Unter Zwang werden Flotten und Aufträge aufgelöst, auch mitten im Gefecht.
+- **Ende im Gefecht.** Steht eine Flotte der Beendeten im Gefecht, werden die Bücher ihrer
+  Partei geschlossen: Was sie bis dahin verloren hat, bleibt der Verlust der Beendeten und
+  liegt als Trümmer im System. Eine übernommene Flotte kämpft für die Erbin weiter, sofern
+  diese mit dem Gegner im Krieg liegt; die Erbin trägt nur, was die Flotte unter ihr
+  verliert. Eine aufgelöste Flotte scheidet aus und belastet niemanden.
+- **Unterstellung.** Eine Gemeinschaft kann einer anderen unterstehen. Sie behält Welten,
+  Staatskasse und Flotten, teilt aber die Kriege ihres Oberhaupts und kann selbst weder
+  Krieg erklären noch Frieden schließen. Oberhaupt und Unterstellte bilden einen Verbund:
+  In ihm herrscht nie Krieg, und Ketten gibt es nicht. Kriege bestehen nur zwischen freien
+  Gemeinschaften.
+- **Neue Gemeinschaften.** Ein Freistaat übernimmt Steuersatz, Kultur und Technik des
+  Reichs, das er verlässt, und beginnt ohne Staatskasse, Schulden, Flotte und Handelshaus;
+  sein Haushalt wird am nächsten Monatsersten eröffnet. In einer Partie entstehen höchstens
+  `endgame.max_free_states` Gemeinschaften durch Abspaltung; danach bleibt eine abtrünnige
+  Region autonom.
+- **Wege.** Jede Welt trägt, wie sie zu ihrer heutigen Gemeinschaft kam: eigen, beigetreten
+  oder genommen, dazu ihre Bevölkerung und den kulturellen Abstand beider Gemeinschaften in
+  diesem Augenblick. Eine genommene Welt bleibt genommen, durch jede spätere Vereinigung
+  hindurch; erst wenn sie eine neue Gemeinschaft gründet, ist sie wieder eigen.
+- **Kultur.** Jede Gemeinschaft hat drei Züge aus ihrer Vorlage (`polities.ron`):
+  Offenheit, Gemeinsinn, Wehrhaftigkeit. Aus dem Abstand zweier Kulturen ergibt sich ihre
+  Nähe.
+- **Gespielte Gemeinschaft.** Endet die Gemeinschaft des Spielers oder wird sie
+  unterstellt, ist er ausgeschieden; die Partie läuft ohne ihn weiter.
+- **Prüfung.** Die harten Invarianten (`sim::harness::check_invariants`) prüfen zuerst die
+  Regeln der Nachfolge: Alle Listen je Gemeinschaft sind gleich lang, jede lebende
+  Gemeinschaft besitzt ihre Hauptwelt, ein Oberhaupt lebt und ist frei, und nichts im
+  Zustand nennt eine Gemeinschaft, die geendet hat. Geschichte ist davon ausgenommen:
+  Chronik, Befehlsprotokoll, Bilanzen beendeter Gefechte, aufgelöste Flotten und Zähler
+  über die ganze Partie.
+
+Bisher ruft in einer Partie nur die Abspaltung diese Vorgänge auf; Eroberung, Vereinigung
+und Unterstellung folgen mit Belagerung und Diplomatie.
+
+## Die beiden Enden
+
+Einmal im Monat wird gezählt. Souverän ist eine freie Gemeinschaft, deren Verbund
+mindestens `endgame.sovereign_min_share` aller Menschen hält; kleinere freie
+Gemeinschaften zählen nicht.
+
+- **Metamorphose.** Es bleibt genau ein souveräner Verbund, und in ihm sind mehr Menschen
+  beigetreten, als genommen wurden. Gezählt wird die Bevölkerung jeder Welt in dem
+  Augenblick, in dem sie wechselte.
+- **Auslöschung.** Es bleibt genau einer, aber die Genommenen überwiegen oder halten die
+  Waage. Oder es bleibt keiner. Oder die Bevölkerung der Galaxie liegt
+  `endgame.collapse_months` Monate in Folge unter `endgame.collapse_share` ihres
+  Höchststands: Dann endet die Partie ohne Überlebende.
+
+Jede Partie endet höchstens einmal. Mit dem Ausgang steht die Simulation still: Die Uhr
+rückt nicht mehr vor, und die Prüfsumme ändert sich nicht mehr. `cargo headless run` nennt
+Ende, Jahr und Überlebende; `cargo sweep` listet die Enden und schreibt sie in die letzten
+beiden Spalten der CSV (`ending`, `ending_year`). Die Stellschrauben stehen in
+`assets/data/balance.ron` unter `endgame`.
+
 ## Stand
 
 | Meilenstein | Inhalt | Stand |
