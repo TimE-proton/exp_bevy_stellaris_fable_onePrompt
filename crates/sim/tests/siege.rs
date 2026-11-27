@@ -18,7 +18,9 @@ use sim::diplomacy::Diplomacy;
 use sim::economy::Economy;
 use sim::finance::{Finance, Stage, issuers_of_region, ownership_of_region};
 use sim::fleet::{Battles, Fleet, Fleets, Stance};
-use sim::harness::{Headless, check_invariants};
+use sim::harness::{
+    Headless, WarScript, check_invariants, conquest_war, nearest_neighbour, summarize,
+};
 use sim::ids::{FleetId, HolderId, IssuerId, PlanetId, PolityId, ShipId, SystemId};
 use sim::logistics::Logistics;
 use sim::siege::{
@@ -747,7 +749,7 @@ fn a_fleet_with_empty_tanks_loses_the_orbit() {
 // --- Entsatz ------------------------------------------------------------------------
 
 #[test]
-fn a_relief_fleet_lifts_the_siege() {
+fn a_relief_fleet_rests_the_siege_and_breaks_it_if_it_wins() {
     let mut campaign = Campaign::against_a_colony();
     let (attacker, defender, planet) = (campaign.attacker, campaign.defender, campaign.planet);
     campaign.begin();
@@ -762,7 +764,8 @@ fn a_relief_fleet_lifts_the_siege() {
     assert!(campaign.blockaded());
     println!("{}", campaign.report());
 
-    // Am 50. Tag bricht die Flotte des Verteidigers zum Entsatz auf.
+    // Am 50. Tag bricht die Flotte des Verteidigers zum Entsatz auf. Mit ihrem Eintreffen
+    // beginnt nach den Regeln der Flotten das Gefecht.
     let relief = fleet_of(&campaign.sim, defender);
     applied(
         &mut campaign.sim,
@@ -773,47 +776,40 @@ fn a_relief_fleet_lifts_the_siege() {
         },
     );
     let mut days = 0;
-    while campaign.siege().is_some() {
+    while !(fleet(&campaign.sim, relief).in_battle
+        && fleet(&campaign.sim, campaign.fleet).in_battle)
+    {
         campaign.day();
         days += 1;
         assert!(days < 120, "der Entsatz kommt nie an");
     }
-    println!("{}", campaign.report());
-    // Mit dem Eintreffen des Entsatzes beginnt das Gefecht, und die Belagerung ist
-    // aufgehoben: Der Planet bleibt beim Verteidiger, die übrige Miliz steht als Miliz
-    // der Welt. Die Sperre des Systems hält nach der Regel der Flottenebene, solange die
-    // Blockadeflotte auf dem Feld kämpft: Der Entsatz muss sie schlagen. (Dass der
-    // Besitzer danach Vorräte gegen Bezahlung auffüllt, kommt erst mit der Beschaffung
-    // der stehenden Verteidigung.)
-    assert!(
-        fleet(&campaign.sim, relief).in_battle && fleet(&campaign.sim, campaign.fleet).in_battle
-    );
-    assert_eq!(owner(&campaign.sim, planet), Some(defender));
-    assert!(!finance(&campaign.sim).region(planet).besieged);
-    assert!(campaign.blockaded());
-    let stats = &sieges(&campaign.sim).stats;
-    assert_eq!((stats.begun, stats.lifted, stats.conquests()), (1, 1, 0));
-    assert_eq!(stats.days, campaign.sim.clock().day() - start);
-    assert!(campaign.defense().militia > 0.0 && campaign.defense().militia <= militia);
-    let told = campaign
-        .sim
-        .world()
-        .resource::<sim::chronicle::Chronicle>()
-        .entries
-        .iter()
-        .any(|entry| entry.text.contains("aufgehoben"));
-    assert!(told, "die Chronik nennt das Ende der Belagerung");
-    // Solange gekämpft wird, entsteht keine neue Belagerung; die Flotte bleibt zugeordnet.
     campaign.day();
-    assert!(campaign.siege().is_none());
+    println!("{}", campaign.report());
+    // Solange gekämpft wird, ruht die Belagerung: Sie besteht weiter, die Miliz bleibt in
+    // ihren Zonen, niemand zehrt an Vorräten oder Garnison, und die Sperre des Systems
+    // hält, solange die Flotte des Belagerers auf dem Feld kämpft.
+    let resting = campaign.siege().expect("die Belagerung ruht nur");
+    assert_eq!(resting.started_day, start);
+    assert!(finance(&campaign.sim).region(planet).besieged);
+    assert!(campaign.blockaded());
+    let cards = campaign.sim.siege_cards();
+    assert_eq!(cards.len(), 1);
+    assert!(
+        !cards[0].control,
+        "das Lesemodell nennt den umstrittenen Orbit"
+    );
+    let held = campaign.defense().militia;
+    assert!(held > 0.0 && held <= militia);
+    campaign.day();
+    assert_eq!(campaign.defense().militia, held);
+    assert_eq!(sieges(&campaign.sim).stats.begun, 1);
     assert_eq!(
         sieges(&campaign.sim).assign.get(&campaign.fleet),
         Some(&planet)
     );
 
-    // Das Gefecht läuft zu Ende. Für jeden Ausgang gilt: Hält der Belagerer danach
-    // einsatzbereit das System, beginnt die Belagerung von vorn; sonst ist seine
-    // Zuordnung gefallen, und was er an Truppen noch trägt, hat Platz an Bord.
+    // Das Gefecht läuft zu Ende. Hält der Belagerer danach das System, geht dieselbe
+    // Belagerung weiter; räumt er es, ist sie gebrochen und aufgehoben.
     let mut days = 0;
     while !campaign.sim.world().resource::<Battles>().active.is_empty() {
         campaign.day();
@@ -824,25 +820,31 @@ fn a_relief_fleet_lifts_the_siege() {
     campaign.day();
     println!("{}", campaign.report());
     let besieger = fleet(&campaign.sim, campaign.fleet);
-    let holds = besieger.alive
-        && besieger.is_docked()
-        && besieger.system == campaign.system
-        && besieger.is_ready()
-        && !fleets(&campaign.sim)
-            .docked_in(campaign.system)
-            .any(|fleet| fleet.owner == defender && !fleet.is_regrouping());
+    let stays = besieger.alive && besieger.is_docked() && besieger.system == campaign.system;
     let state = sieges(&campaign.sim);
-    if holds {
-        assert_eq!(
-            state.siege(planet).map(|siege| siege.attacker),
-            Some(attacker)
-        );
-        assert_eq!(state.stats.begun, 2);
+    assert_eq!(
+        state.stats.begun, 1,
+        "kein Neubeginn: Die Garnison füllt sich nicht auf"
+    );
+    if stays && besieger.min_fuel() > 0.0 {
+        let siege = state.siege(planet).expect("die Belagerung geht weiter");
+        assert_eq!((siege.attacker, siege.started_day), (attacker, start));
+        assert_eq!(state.stats.lifted, 0);
     } else {
         assert!(state.siege(planet).is_none());
-        assert_eq!(state.stats.begun, 1);
-        let gone = !besieger.alive || besieger.system != campaign.system || !besieger.is_docked();
-        assert_eq!(state.assign.contains_key(&campaign.fleet), !gone);
+        assert_eq!((state.stats.lifted, state.stats.conquests()), (1, 0));
+        assert!(!finance(&campaign.sim).region(planet).besieged);
+        assert!(campaign.defense().militia > 0.0 && campaign.defense().militia <= militia);
+        let told = campaign
+            .sim
+            .world()
+            .resource::<sim::chronicle::Chronicle>()
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.text.contains("Die Belagerung") && entry.text.contains("aufgehoben")
+            });
+        assert!(told, "die Chronik nennt das Ende der Belagerung");
     }
     assert_eq!(owner(&campaign.sim, planet), Some(defender));
     if !besieger.alive {
@@ -1555,6 +1557,7 @@ fn local_market_value(sim: &Headless, planet: PlanetId) -> f64 {
         &capitals,
         planet,
     )
+    .filter(|(id, _)| matches!(id, IssuerId::Firm { .. }))
     .map(|(_, issuer)| issuer.market_value())
     .sum()
 }
@@ -1670,6 +1673,8 @@ fn bombardment_weighs_on_the_conquered_world_for_a_year() {
         kept.war_damage,
     );
     assert!(hit.cohesion < kept.cohesion);
+    // Gemessen an den Firmen der Welt: Das Kontor ihres Systems lebt seit der Eroberung
+    // auch von den Einkäufen der Garnison und den Einlagen des neuen Staates.
     assert!(local_market_value(&bombed.sim, planet) < local_market_value(&spared.sim, planet));
     assert!(weariness(&bombed) > weariness(&spared));
     // Die Bücher des Monats: Schäden und Besatzung klingen ab, sind aber nicht vergessen,
@@ -1799,31 +1804,52 @@ fn a_siege_runs_through_all_five_phases_to_the_hand_over() {
     );
     campaign.begin();
     let mut seen: Vec<Phase> = Vec::new();
-    let note = |campaign: &Campaign, seen: &mut Vec<Phase>| {
+    // In jeder Phase wird einmal gespeichert und geladen: Der geladene Stand trägt dieselbe
+    // Prüfsumme und läuft am nächsten Tag genauso weiter wie die Partie selbst.
+    let mut resumed: Option<Headless> = None;
+    let mut reloads = 0;
+    let mut note = |campaign: &Campaign, seen: &mut Vec<Phase>, resumed: &mut Option<Headless>| {
         if let Some(siege) = campaign.siege() {
             let phase = siege.phase(campaign.defense());
             if seen.last() != Some(&phase) {
                 println!("{}", campaign.report());
                 seen.push(phase);
+                let text = campaign.sim.save().to_ron().unwrap();
+                let twin = Headless::from_save(data().clone(), SaveGame::from_ron(&text).unwrap());
+                assert_eq!(twin.hash(), campaign.sim.hash(), "{}", phase.label());
+                *resumed = Some(twin);
+                reloads += 1;
             }
         }
     };
+    let day = |campaign: &mut Campaign, resumed: &mut Option<Headless>| {
+        campaign.day();
+        if let Some(mut twin) = resumed.take() {
+            twin.run_days(1);
+            assert_eq!(
+                twin.hash(),
+                campaign.sim.hash(),
+                "Tag {}: der geladene Stand läuft anders weiter",
+                campaign.sim.clock().day()
+            );
+        }
+    };
     // Anmarsch: Die Flotte kämpft die Station nieder; das System bleibt offen.
-    campaign.day();
-    note(&campaign, &mut seen);
+    day(&mut campaign, &mut resumed);
+    note(&campaign, &mut seen, &mut resumed);
     assert_eq!(seen, [Phase::Approach]);
     assert!(!campaign.blockaded());
     let mut days = 0;
     while campaign.defense().stations > 0.0 {
-        campaign.day();
+        day(&mut campaign, &mut resumed);
         days += 1;
         assert!(days < 60, "die Station fällt nie");
     }
     // Einschließung: Die Garnison zehrt von ihren Vorräten.
-    note(&campaign, &mut seen);
+    note(&campaign, &mut seen, &mut resumed);
     let stores = campaign.defense().depot;
     for _ in 0..3 {
-        campaign.day();
+        day(&mut campaign, &mut resumed);
     }
     assert!(campaign.defense().depot < stores);
     assert!(campaign.blockaded());
@@ -1832,9 +1858,9 @@ fn a_siege_runs_through_all_five_phases_to_the_hand_over() {
         fire: Fire::Precise,
         ..Default::default()
     });
-    note(&campaign, &mut seen);
+    note(&campaign, &mut seen, &mut resumed);
     for _ in 0..5 {
-        campaign.day();
+        day(&mut campaign, &mut resumed);
     }
     assert!(campaign.siege().unwrap().report.fire_damage > 0.0);
     // Bodenkrieg: Landung und Sturm mit Stützfeuer.
@@ -1845,16 +1871,17 @@ fn a_siege_runs_through_all_five_phases_to_the_hand_over() {
         sack: false,
     });
     campaign.land(troops);
-    note(&campaign, &mut seen);
+    note(&campaign, &mut seen, &mut resumed);
     // Untergrund, sobald die Oberfläche verloren ist, und zuletzt die Übergabe.
     let mut days = 0;
     while owner(&campaign.sim, planet) == Some(defender) {
-        campaign.day();
-        note(&campaign, &mut seen);
+        day(&mut campaign, &mut resumed);
+        note(&campaign, &mut seen, &mut resumed);
         days += 1;
         assert!(days < 200, "die Belagerung endet nie");
     }
     println!("{}", campaign.report());
+    assert_eq!(reloads, 5, "in jeder Phase einmal gespeichert und geladen");
     assert_eq!(
         seen,
         [
@@ -1886,7 +1913,7 @@ fn a_siege_runs_through_all_five_phases_to_the_hand_over() {
     assert_eq!(money_drift(campaign.sim.world()), Some(0));
     // Ein Monat danach: Die Partie läuft weiter.
     for _ in 0..30 {
-        campaign.day();
+        day(&mut campaign, &mut resumed);
     }
 }
 
@@ -2161,5 +2188,88 @@ fn sieges_in_many_wars_keep_every_invariant() {
     assert!(
         lifted > 0,
         "in keiner Partie wurde eine Belagerung aufgehoben"
+    );
+}
+
+// --- Eroberungszug nach Drehbuch ---------------------------------------------------------
+
+#[test]
+fn the_conquest_script_takes_worlds_and_ends_a_community() {
+    // Das Drehbuch „Eroberung" in zwei ganzen Partien: Gemeinschaft 0 hebt Truppen aus,
+    // erklärt im Jahr 25 dem nächsten Nachbarn den Krieg und belagert erst dessen nächste
+    // Welt, dann seinen Sitz. Die Flotten des Nachbarn führt die KI.
+    let script = WarScript::new(conquest_war());
+    let attacker = PolityId(0);
+    let war = 25 * DAYS_PER_YEAR;
+    let mut ended = 0;
+    for seed in [2, 3] {
+        let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
+        script.run_until(&mut sim, war, false);
+        assert_eq!(check_invariants(sim.world()), Ok(()), "Seed {seed}");
+        let enemy = nearest_neighbour(sim.galaxy(), sim.polities(), attacker).unwrap();
+        let worlds = sim.galaxy().planets_of(enemy).count();
+        assert!(worlds > 1, "Seed {seed}: der Nachbar hält Kolonien");
+        // Fünf Jahre Krieg, Tag für Tag: Kein Tag schafft oder vernichtet Geld, auch nicht
+        // der einer Übergabe, einer Plünderung oder des Endes einer Gemeinschaft.
+        let mut seats_fallen = 0;
+        let mut seat = sim.polities().get(enemy).capital;
+        for day in war + 1..=war + 5 * DAYS_PER_YEAR {
+            script.run_until(&mut sim, day, false);
+            assert_eq!(money_drift(sim.world()), Some(0), "Seed {seed}, Tag {day}");
+            if day % 30 == 0 {
+                assert_eq!(
+                    check_invariants(sim.world()),
+                    Ok(()),
+                    "Seed {seed}, Tag {day}"
+                );
+            }
+            let now = sim.polities().get(enemy).capital;
+            if now != seat {
+                seats_fallen += 1;
+                assert_eq!(
+                    check_invariants(sim.world()),
+                    Ok(()),
+                    "Seed {seed}, Tag {day}"
+                );
+                seat = now;
+            }
+        }
+        let stats = sieges(&sim).stats.clone();
+        println!("Seed {seed}: {stats:?}, {seats_fallen} Hauptwelten gefallen");
+        // Eine Welt ist gefallen, und jede gefallene steht beim Eroberer.
+        assert!(stats.fallen >= 1, "Seed {seed}: {stats:?}");
+        assert_eq!(stats.fallen, stats.conquests(), "Seed {seed}");
+        let taken = sim
+            .galaxy()
+            .planets_of(attacker)
+            .filter(|planet| sieges(&sim).defense(planet.id).occupied_from == Some(enemy))
+            .count();
+        assert!(taken >= 1, "Seed {seed}");
+        assert_eq!(
+            summarize(&sim).sieges,
+            stats,
+            "die Kennzahlen stehen im Bericht"
+        );
+        let foe = sim.polities().get(enemy);
+        if !foe.alive {
+            // Der Sitz ist gefallen, und mit der letzten Welt hat die Gemeinschaft geendet.
+            ended += 1;
+            assert!(seats_fallen >= 1, "Seed {seed}");
+            assert_eq!(stats.ended, 1, "Seed {seed}");
+            assert_eq!(foe.capital, None);
+            assert_eq!(sim.galaxy().planets_of(enemy).count(), 0);
+            assert_eq!(fleets(&sim).of(enemy).count(), 0);
+            assert!(!sim.world().resource::<Diplomacy>().is_at_war(attacker));
+            let state = sieges(&sim);
+            assert!(state.active.is_empty() && state.pending.is_empty());
+            assert!(sim.siege_cards().is_empty());
+        }
+        // Ein Jahr danach: Die Partie läuft weiter.
+        script.run_until(&mut sim, war + 6 * DAYS_PER_YEAR, false);
+        assert_eq!(check_invariants(sim.world()), Ok(()), "Seed {seed}");
+    }
+    assert!(
+        ended >= 1,
+        "in mindestens einer Partie endet die Gemeinschaft des Nachbarn"
     );
 }

@@ -337,6 +337,40 @@ fn main() -> ExitCode {
                 "Befehle der KI: {applied} angenommen, {rejected} abgelehnt ({:.2} %)",
                 100.0 * rejected as f64 / (applied + rejected).max(1) as f64
             );
+            let sieges = |f: fn(&sim::siege::SiegeStats) -> u32| -> u32 {
+                runs.iter().map(|run| f(&run.sieges)).sum()
+            };
+            if sieges(|s| s.begun) > 0 {
+                println!(
+                    "Belagerungen über alle Läufe: {} begonnen; {} erstürmt, {} ausgehungert, {} übergeben, {} aufgehoben; {} Welten gefallen, {} Gemeinschaften beendet; längste {} Tage",
+                    sieges(|s| s.begun),
+                    sieges(|s| s.stormed),
+                    sieges(|s| s.starved),
+                    sieges(|s| s.capitulated),
+                    sieges(|s| s.lifted),
+                    sieges(|s| s.fallen),
+                    sieges(|s| s.ended),
+                    runs.iter().map(|run| run.sieges.longest).max().unwrap_or(0)
+                );
+                println!(
+                    "  Seed  begonnen  erstürmt  ausgehungert  übergeben  aufgehoben  gefallen  beendet  längste"
+                );
+                for run in &runs {
+                    let s = &run.sieges;
+                    println!(
+                        "  {:>4}  {:>8}  {:>8}  {:>12}  {:>9}  {:>10}  {:>8}  {:>7}  {:>7}",
+                        run.seed,
+                        s.begun,
+                        s.stormed,
+                        s.starved,
+                        s.capitulated,
+                        s.lifted,
+                        s.fallen,
+                        s.ended,
+                        s.longest
+                    );
+                }
+            }
             let endings: Vec<String> = runs
                 .iter()
                 .filter_map(|run| ending_text(run).map(|text| format!("Seed {}: {text}", run.seed)))
@@ -362,12 +396,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won,ending,ending_year\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won,ending,ending_year,defense_paid,sieges_begun,sieges_stormed,sieges_starved,sieges_capitulated,sieges_lifted,worlds_fallen,communities_ended\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -414,7 +448,15 @@ fn main() -> ExitCode {
                             run.outcome
                                 .map_or("", |outcome| outcome.ending.label()),
                             run.outcome
-                                .map_or(String::new(), |outcome| outcome.year().to_string())
+                                .map_or(String::new(), |outcome| outcome.year().to_string()),
+                            to_credits(polity.budget.line(Claim::Defense).paid),
+                            run.sieges.begun,
+                            run.sieges.stormed,
+                            run.sieges.starved,
+                            run.sieges.capitulated,
+                            run.sieges.lifted,
+                            run.sieges.fallen,
+                            run.sieges.ended
                         ));
                     }
                 }

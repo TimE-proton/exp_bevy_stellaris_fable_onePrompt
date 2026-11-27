@@ -417,6 +417,10 @@ pub struct RunSummary {
     pub ai_rejected: u64,
     /// Ausgang der Partie, wenn sie in der Laufzeit geendet hat: Ende, Überlebende, Tag.
     pub outcome: Option<Outcome>,
+    /// Belagerungen der Partie: begonnen, je Ausgang, gefallene Welten
+    /// (`SiegeStats::fallen`) und Gemeinschaften, die mit ihrer letzten Welt endeten
+    /// (`SiegeStats::ended`).
+    pub sieges: crate::siege::SiegeStats,
 }
 
 impl RunSummary {
@@ -496,6 +500,7 @@ pub fn summarize(sim: &Headless) -> RunSummary {
         weighted / f64::max(weight, 1e-9)
     };
     RunSummary {
+        sieges: sim.world().resource::<crate::siege::Sieges>().stats.clone(),
         seed: config.seed,
         days: sim.clock().day(),
         hash: sim.hash(),
@@ -611,6 +616,15 @@ pub enum ScriptedAct {
     /// `factor`-fachen der Startflotte und bestellt zu jedem Monatsbeginn nach, was fehlt.
     /// Faktor 0 beendet das Programm. Ohne `who` gilt es für jede lebende Gemeinschaft.
     Navy { who: Option<PolityId>, factor: f32 },
+    /// Verteidigungsplan: Die Hauptwelt von `who` soll so viele reguläre Verbände halten
+    /// (der Rest ihres Plans bleibt); ausgehoben wird aus dem Anspruch „Verteidigung".
+    Garrison { who: PolityId, regulars: f32 },
+    /// Ein Eroberungszug: A erklärt seinem nächsten Nachbarn den Krieg, und von diesem
+    /// Tag an führt das Drehbuch die Flotten von A (die KI rüstet weiter, gibt ihnen aber
+    /// keine Befehle): Sie schiffen zu Hause Truppen ein, belagern zuerst die nächste
+    /// Welt des Gegners, die nicht sein Sitz ist, und dann seinen Sitz, bis er endet oder
+    /// Frieden herrscht. Siehe [`WarScript::conduct`].
+    Conquest { a: PolityId },
 }
 
 impl ScriptedAct {
@@ -619,9 +633,11 @@ impl ScriptedAct {
         match self {
             ScriptedAct::Mode { .. } | ScriptedAct::NeighbourMode { .. } => 0,
             ScriptedAct::Peace { .. } | ScriptedAct::PeaceWithAll { .. } => 1,
-            ScriptedAct::War { .. } | ScriptedAct::BorderWar { .. } => 2,
+            ScriptedAct::War { .. }
+            | ScriptedAct::BorderWar { .. }
+            | ScriptedAct::Conquest { .. } => 2,
             ScriptedAct::Order { .. } => 3,
-            ScriptedAct::Navy { .. } => 4,
+            ScriptedAct::Navy { .. } | ScriptedAct::Garrison { .. } => 4,
         }
     }
 }
@@ -709,6 +725,30 @@ impl WarScript {
             ScriptedAct::BorderWar { a } => {
                 if let Some(b) = nearest_neighbour(sim.galaxy(), sim.polities(), *a) {
                     Self::open_war(sim, *a, b);
+                }
+            }
+            ScriptedAct::Garrison { who, regulars } => {
+                let home = sim
+                    .polities()
+                    .list
+                    .get(who.index())
+                    .and_then(|polity| polity.capital);
+                if let Some(planet) = home {
+                    let mut plan = sim
+                        .world()
+                        .resource::<crate::siege::Sieges>()
+                        .defense(planet)
+                        .plan
+                        .clone();
+                    plan.regulars = *regulars;
+                    sim.issue(*who, SimCommand::SetDefensePlan { planet, plan });
+                }
+            }
+            ScriptedAct::Conquest { a } => {
+                if let Some(b) = nearest_neighbour(sim.galaxy(), sim.polities(), *a) {
+                    // Die Flotten führt von nun an das Drehbuch; gerüstet wird weiter.
+                    sim.set_military_mode(Some(*a), MilitaryMode::PassiveFleet);
+                    sim.issue(*a, SimCommand::DeclareWar { target: b });
                 }
             }
             ScriptedAct::PeaceWithAll { a } => {
@@ -844,6 +884,153 @@ impl WarScript {
         }
     }
 
+    /// Führt den Eroberungszug von `a` einen Tag weiter, mit gewöhnlichen Befehlen:
+    ///
+    /// - Ziel ist die Welt des Gegners, die dem eigenen Sitz am nächsten liegt und nicht
+    ///   sein Sitz ist, solange `a` ihm noch keine Welt genommen hat; danach sein Sitz.
+    /// - Jede Flotte schifft zu Hause ein, was an Regulären bereitsteht und an Bord
+    ///   passt, fährt mit vollen Tanks im Blockadeauftrag zum Ziel und belagert es. Mit
+    ///   fast leeren Tanks kehrt sie heim und kommt wieder.
+    /// - In den ersten zehn Tagen einer Belagerung wird gezielt gefeuert, danach
+    ///   geschwiegen. Gelandet und gestürmt wird, sobald die Truppen an Bord der
+    ///   Garnison an der Oberfläche anderthalbfach überlegen sind; sonst wartet die
+    ///   Besatzungstruppe an Bord, bis die Welt ausgehungert ist.
+    pub fn conduct(sim: &mut Headless, a: PolityId) {
+        use crate::siege::{Fire, SiegeOrders, Sieges};
+        let mut commands: Vec<SimCommand> = Vec::new();
+        {
+            let world = sim.world();
+            let (data, galaxy, polities) =
+                (world.resource::<GameData>(), sim.galaxy(), sim.polities());
+            let diplomacy = world.resource::<crate::diplomacy::Diplomacy>();
+            let (fleets, sieges) = (world.resource::<Fleets>(), world.resource::<Sieges>());
+            let balance = &data.balance.siege;
+            let Some(own) = polities.list.get(a.index()).filter(|polity| polity.alive) else {
+                return;
+            };
+            let Some(home) = own.capital else { return };
+            let home_system = galaxy.planet(home).system;
+            let Some(enemy) = diplomacy.enemies_of(a).min() else {
+                return;
+            };
+            let seat = polities.get(enemy).capital;
+            let hops = galaxy.hops_from(home_system);
+            let taken = galaxy
+                .planets_of(a)
+                .any(|planet| sieges.defense(planet.id).occupied_from == Some(enemy));
+            let outlying = galaxy
+                .planets_of(enemy)
+                .filter(|planet| Some(planet.id) != seat)
+                .min_by_key(|planet| (hops[planet.system.index()], planet.id))
+                .map(|planet| planet.id);
+            let Some(target) = outlying.filter(|_| !taken).or(seat) else {
+                return;
+            };
+            let world_of = galaxy.planet(target);
+            let mut home_left = sieges.defense(home).regulars;
+            for fleet in fleets.of(a) {
+                if !fleet.is_docked() || fleet.in_battle || fleet.is_regrouping() {
+                    continue;
+                }
+                let aboard = sieges
+                    .embarked
+                    .get(&fleet.id)
+                    .map_or(0.0, |force| force.troops);
+                let assigned = sieges.assign.get(&fleet.id) == Some(&target);
+                // Mit fast leeren Tanks geht es heim, von wo auch immer: Ohne Treibstoff
+                // hält niemand einen Orbit.
+                let dry = fleet.min_fuel() < 0.1;
+                if fleet.system == world_of.system && !dry {
+                    if !assigned {
+                        commands.push(SimCommand::BeginSiege {
+                            fleet: fleet.id,
+                            planet: target,
+                        });
+                    }
+                    continue;
+                }
+                if fleet.system == home_system {
+                    // Einschiffen, was da ist und an Bord passt; mit vollen Tanks los.
+                    let berths: f64 = fleet
+                        .ships
+                        .iter()
+                        .map(|ship| {
+                            data.hulls[data.designs[ship.design as usize].hull_id as usize].segments
+                                as f64
+                        })
+                        .sum::<f64>()
+                        * balance.berth_per_segment;
+                    let strength = (berths - aboard).min(home_left).floor();
+                    if strength >= 1.0 {
+                        home_left -= strength;
+                        commands.push(SimCommand::EmbarkTroops {
+                            fleet: fleet.id,
+                            planet: home,
+                            strength,
+                            supply_days: 60,
+                        });
+                    }
+                    if fleet.min_fuel() >= 0.9 {
+                        commands.push(SimCommand::SetStance {
+                            fleet: fleet.id,
+                            stance: Stance::Blockade,
+                        });
+                        commands.push(SimCommand::MoveFleet {
+                            fleet: fleet.id,
+                            to: world_of.system,
+                        });
+                    }
+                    continue;
+                }
+                let to = if dry { home_system } else { world_of.system };
+                commands.push(SimCommand::MoveFleet {
+                    fleet: fleet.id,
+                    to,
+                });
+            }
+            // Die laufende Belagerung des Ziels.
+            if let Some(siege) = sieges.siege(target).filter(|siege| siege.attacker == a) {
+                let defense = sieges.defense(target);
+                let age = sim.clock().day().saturating_sub(siege.started_day);
+                let fire = if age < 10 { Fire::Precise } else { Fire::Hold };
+                let orders = SiegeOrders {
+                    fire,
+                    assault: true,
+                    focus: 0,
+                    sack: false,
+                };
+                if siege.orders != orders {
+                    commands.push(SimCommand::SetSiegeOrders {
+                        planet: target,
+                        orders,
+                    });
+                }
+                let surface = siege.zone_militia() + siege.reserve(defense);
+                let aboard: Vec<(FleetId, f64)> = sieges
+                    .assign
+                    .iter()
+                    .filter(|(_, planet)| **planet == target)
+                    .filter_map(|(fleet, _)| Some((*fleet, sieges.embarked.get(fleet)?.troops)))
+                    .filter(|(_, troops)| *troops > 0.0)
+                    .collect();
+                let total: f64 = aboard.iter().map(|(_, troops)| troops).sum();
+                let pending = sieges.pending.iter().any(|due| due.planet == target);
+                if defense.stations <= 0.0 && !pending && total >= 1.5 * surface && total > 0.0 {
+                    for (fleet, strength) in aboard {
+                        commands.push(SimCommand::LandTroops {
+                            fleet,
+                            planet: target,
+                            strength,
+                        });
+                    }
+                }
+            }
+        }
+        for command in commands {
+            sim.issue(a, command);
+        }
+    }
+
     /// Das Flottenprogramm jeder Gemeinschaft am Tag `day`: der Faktor der letzten
     /// Angabe, die bis dahin für sie galt.
     fn programmes(&self, sim: &Headless, day: u64) -> Vec<(PolityId, f32)> {
@@ -945,10 +1132,27 @@ impl WarScript {
                 at += DAYS_PER_MONTH;
             }
         }
+        // Ein Eroberungszug wird vom Tag seiner Kriegserklärung an täglich geführt.
+        let conquests: Vec<(u64, PolityId)> = self
+            .events
+            .iter()
+            .filter_map(|event| match event.act {
+                ScriptedAct::Conquest { a } => Some((event.day, a)),
+                _ => None,
+            })
+            .collect();
+        if let Some(first) = conquests.iter().map(|(from, _)| *from).min() {
+            stops.extend(first.max(now)..day);
+        }
         for stop in stops {
             advance(sim, stop);
             for event in self.events.iter().filter(|event| event.day == stop) {
                 Self::issue(sim, event);
+            }
+            for (from, a) in &conquests {
+                if stop > *from {
+                    Self::conduct(sim, *a);
+                }
             }
             if stop.is_multiple_of(DAYS_PER_MONTH) {
                 for (polity, factor) in self.programmes(sim, stop) {
@@ -994,6 +1198,40 @@ pub fn border_war() -> Vec<ScriptedEvent> {
         ScriptedEvent {
             day: 45 * year,
             act: ScriptedAct::PeaceWithAll { a: PolityId(0) },
+        },
+    ]
+}
+
+/// Das Drehbuch „Eroberung“ für Sweeps: Die erste Gemeinschaft rüstet ihre Heimatwelt
+/// vom Jahr 20 an mit Truppen auf, erklärt zu Beginn des Jahres 25 ihrem nächsten
+/// Nachbarn den Krieg, belagert zuerst dessen nächste Welt und dann seinen Sitz
+/// ([`WarScript::conduct`]) und schließt zu Beginn des Jahres 45 Frieden, wenn der Gegner
+/// dann noch besteht. Verlorene Schiffe werden nachgebaut.
+pub fn conquest_war() -> Vec<ScriptedEvent> {
+    let year = crate::clock::DAYS_PER_YEAR;
+    let a = PolityId(0);
+    vec![
+        ScriptedEvent {
+            day: 20 * year,
+            act: ScriptedAct::Garrison {
+                who: a,
+                regulars: 25.0,
+            },
+        },
+        ScriptedEvent {
+            day: 25 * year,
+            act: ScriptedAct::Navy {
+                who: Some(a),
+                factor: 1.0,
+            },
+        },
+        ScriptedEvent {
+            day: 25 * year,
+            act: ScriptedAct::Conquest { a },
+        },
+        ScriptedEvent {
+            day: 45 * year,
+            act: ScriptedAct::PeaceWithAll { a },
         },
     ]
 }
@@ -1073,6 +1311,23 @@ impl Headless {
         self.world()
             .get_resource::<Endgame>()
             .and_then(|endgame| endgame.outcome)
+    }
+
+    /// Zustand der Belagerungen und der stehenden Verteidigung.
+    pub fn sieges(&self) -> &crate::siege::Sieges {
+        self.world().resource::<crate::siege::Sieges>()
+    }
+
+    /// Alle laufenden Belagerungen als Lesemodell, wie eine Oberfläche sie zeigt.
+    pub fn siege_cards(&self) -> Vec<crate::siege::SiegeCard> {
+        let refs = crate::siege::SiegeRefs::of_world(self.world());
+        crate::siege::siege_cards(&refs, self.clock().day())
+    }
+
+    /// Der Grund, aus dem der Kern einen Befehl der Belagerung jetzt ablehnen würde.
+    pub fn command_block(&self, polity: PolityId, command: &SimCommand) -> Option<String> {
+        let refs = crate::siege::SiegeRefs::of_world(self.world());
+        crate::siege::command_block(&refs, polity, command, self.clock().tick)
     }
 
     /// Besitzwechsel, Gründung und Ende einer Gemeinschaft direkt auf der Welt, für Tests
@@ -1364,7 +1619,8 @@ mod tests {
         let start = 25 * DAYS_PER_YEAR;
         let script = WarScript::new(border_war());
         let mut fought = 0;
-        for seed in 0..4 {
+        // Vier Partien, in denen es in diesen Jahren zu Gefechten kommt.
+        for seed in [1, 13, 18, 21] {
             let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
             script.run_until(&mut sim, start + 1, false);
             let count = play_watching_battles(&mut sim, 6 * DAYS_PER_YEAR, seed);
