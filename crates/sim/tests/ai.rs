@@ -310,9 +310,11 @@ fn border_war(from: u64, to: u64) -> WarScript {
 #[test]
 fn the_ai_fights_a_war_it_did_not_choose_and_returns_to_peace() {
     // Zwei Partien, in denen die Nachbarn nah genug liegen, dass sie einander erreichen,
-    // und in denen eine Seite der anderen überlegen genug ist, um anzugreifen.
+    // und in denen eine Seite der anderen überlegen genug ist, um anzugreifen, ohne sie
+    // in den zwölf Jahren zu beenden (neu gewählt, seit die KI belagert und erobert: In
+    // Seed 37 endete der Gegner vor dem Frieden).
     let mut battles = 0;
-    for seed in [21, 37] {
+    for seed in [21, 31] {
         let script = border_war(20, 32);
         let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
         script.run_until(&mut sim, 20 * DAYS_PER_YEAR, false);
@@ -587,13 +589,15 @@ fn wars_led_by_the_ai_do_not_repeat_the_same_empty_battle_or_sortie() {
 fn after_laying_up_ships_the_ai_does_not_order_new_ones_for_years() {
     // Eine Partie, in der nach dem Grenzkrieg eine Gemeinschaft ihre Flotte nicht mehr
     // trägt und Schiffe stilllegt. Monat für Monat: Nach einer Stilllegung kommt im
-    // Frieden layup_quiet_months lang kein neuer Auftrag hinzu.
+    // Frieden layup_quiet_months lang kein neuer Auftrag hinzu. (Neu gewählt, seit die KI
+    // belagert und die Verteidigung ihrer Welten bezahlt: In Seed 20 legte niemand mehr
+    // still.)
     let quiet = data().balance.military.ai.layup_quiet_months as u64;
     let script = border_war(25, 45);
     let mut sim = Headless::new(
         data().clone(),
         SimConfig {
-            seed: 20,
+            seed: 5,
             player: None,
         },
     );
