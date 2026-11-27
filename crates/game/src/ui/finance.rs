@@ -431,6 +431,8 @@ pub fn treasury_window(
         ui.separator();
         super::budget::budget_section(ui, sim, player);
         ui.separator();
+        super::siege::defense::defense_overview(ui, sim, player, &mut state.siege, actions);
+        ui.separator();
 
         ui.label(RichText::new("Steuern").color(ACCENT));
         if (state.tax_percent - (tax * 100.0) as f32).abs() > 20.0 || state.tax_percent == 0.0 {

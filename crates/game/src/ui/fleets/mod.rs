@@ -40,7 +40,7 @@ const REGROUP: Color32 = Color32::from_rgb(240, 190, 80);
 pub(super) const WARN: Color32 = REGROUP;
 
 /// Macht aus dem Grund, den der Kern nennt, einen Satz für die Oberfläche.
-pub(super) fn sentence(reason: String) -> String {
+pub(crate) fn sentence(reason: String) -> String {
     let mut chars = reason.chars();
     let mut text: String = match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -57,7 +57,7 @@ pub const WAITING: &str =
     "Der Befehl ist vorgemerkt; er gilt, sobald die Zeit weiterläuft (Leertaste).";
 
 /// Befehle des Spielers, die auf den nächsten Takt warten (die Zeit steht).
-pub(super) fn waiting<'a>(sim: &'a SimRefs) -> impl Iterator<Item = &'a SimCommand> {
+pub(crate) fn waiting<'a>(sim: &'a SimRefs) -> impl Iterator<Item = &'a SimCommand> {
     let player = sim.config.player;
     sim.pending
         .iter()
@@ -66,7 +66,7 @@ pub(super) fn waiting<'a>(sim: &'a SimRefs) -> impl Iterator<Item = &'a SimComma
 }
 
 /// Wartet genau dieser Befehl schon? Ihn noch einmal zu geben, lehnte der Kern ab.
-pub(super) fn is_waiting(sim: &SimRefs, command: &SimCommand) -> bool {
+pub(crate) fn is_waiting(sim: &SimRefs, command: &SimCommand) -> bool {
     waiting(sim).any(|entry| entry == command)
 }
 
@@ -170,7 +170,7 @@ pub(super) fn dry_run_once<T>(
 /// Ein Knopf, der gesperrt ist, wenn der Kern den Befehl ablehnen würde; der Grund steht
 /// im Schwebetext. `name` ist die Beschriftung für Vorleseprogramme, wo mehrere Knöpfe
 /// gleich heißen. Liefert, ob geklickt wurde.
-pub(super) fn gated_button(
+pub(crate) fn gated_button(
     ui: &mut egui::Ui,
     text: impl Into<egui::WidgetText>,
     name: Option<String>,
@@ -287,7 +287,7 @@ pub fn ships_by_class(data: &GameData, fleet: &Fleet) -> String {
 }
 
 /// Wo die Flotte steht; mit einer Route das zuletzt verlassene System und ihr Ziel.
-pub(super) fn location(sim: &SimRefs, fleet: &Fleet) -> String {
+pub(crate) fn location(sim: &SimRefs, fleet: &Fleet) -> String {
     let here = &sim.galaxy.system(fleet.system).name;
     match fleet.route.last() {
         Some(target) => format!("{} nach {}", here, sim.galaxy.system(*target).name),

@@ -330,6 +330,14 @@ impl TestGame {
         })
     }
 
+    /// Mitte des Ankreuzfelds mit genau dieser Beschriftung; `None`, wenn es keines gibt
+    /// oder es gesperrt ist.
+    pub fn checkbox(&mut self, label: &str) -> Option<Vec2> {
+        self.element(|node| {
+            node.role() == Role::CheckBox && node.label() == Some(label) && !node.is_disabled()
+        })
+    }
+
     /// Mitte des ersten Textes mit genau diesem Wortlaut, wie er zuletzt gezeichnet wurde.
     /// Auch Zeilen einer Liste, die gerade aus dem sichtbaren Teil gerollt sind, haben ihren
     /// Ort: An ihm lässt sich ablesen, wie weit die Liste gerollt ist.

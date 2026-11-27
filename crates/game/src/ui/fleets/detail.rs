@@ -360,6 +360,7 @@ pub fn fleet_detail(
     });
     ui.horizontal_wrapped(|ui| standing_orders(ui, fleet, actions));
     reorganize(ui, sim, player, fleet, state, actions);
+    crate::ui::siege::fleet_entry(ui, sim, fleet, &mut state.siege, actions);
     ship_table(ui, sim, fleet, state);
     let arrears = sim.fleets.arrears_of(player);
     ui.label(

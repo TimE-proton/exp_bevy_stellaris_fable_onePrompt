@@ -1,7 +1,7 @@
 //! Die einzelnen Fenster und Leisten.
 
 use super::format::{decimal, percent, population};
-use super::{LeftTab, UiState, economy, finance, fleets, tech};
+use super::{LeftTab, UiState, economy, finance, fleets, siege, tech};
 use crate::battle_view::campaign::{BattleMarker, WATCH, can_watch};
 use crate::history::PriceHistory;
 use crate::map::Selection;
@@ -20,6 +20,7 @@ use sim::galaxy::Galaxy;
 use sim::ids::{BattleId, PlanetId, PolityId, SystemId};
 use sim::logistics::Logistics;
 use sim::polity::{Polities, can_claim};
+use sim::siege::{SiegeCard, Sieges};
 use sim::state::SimConfig;
 use sim::tech::Research;
 
@@ -38,6 +39,7 @@ pub struct SimRefs<'a> {
     pub battles: &'a Battles,
     pub research: &'a Research,
     pub diplomacy: &'a Diplomacy,
+    pub sieges: &'a Sieges,
     pub history: &'a PriceHistory,
     /// Befehle, die auf den nächsten Takt warten (die Zeit steht). Nur zum Lesen: Was
     /// schon vorgemerkt ist, bietet die Oberfläche nicht an, als wäre nichts geschehen.
@@ -70,6 +72,8 @@ pub enum UiAction {
     Command(SimCommand),
     /// Ein laufendes Gefecht der Partie in der Schlachtansicht zeigen.
     WatchBattle(sim::ids::BattleId),
+    /// Das Fenster „Belagerung“ bei der Belagerung dieser Welt öffnen.
+    ShowSiege(PlanetId),
     Quit,
 }
 
@@ -218,13 +222,17 @@ pub fn in_game(
     markers: &[BattleMarker],
     actions: &mut Vec<UiAction>,
 ) {
+    // Karten der Belagerungen und Probeläufe gelten für einen Tag und eine Lage.
+    state.siege.cache.refresh(sim);
     let bar =
         egui::Panel::top("kopfleiste").show(root, |ui| top_bar(ui, sim, state, speed, actions));
     egui::Panel::bottom("chronik")
         .resizable(true)
         .default_size(118.0)
         .size_range(60.0..=320.0)
-        .show(root, |ui| chronicle(ui, sim, actions));
+        .show(root, |ui| {
+            chronicle(ui, sim, state.siege.cache.cards(), actions)
+        });
     egui::Panel::left("auswahl")
         .resizable(true)
         .default_size(430.0)
@@ -244,6 +252,7 @@ pub fn in_game(
     economy::flows_window(&ctx, area, sim, &mut state.flows_open, None);
     fleets::fleets_window(&ctx, area, sim, state, selection, actions);
     tech::tech_window(&ctx, area, sim, state, actions);
+    siege::siege_window(&ctx, area, sim, &mut state.siege, actions);
     finance::exchange_window(&ctx, area, sim, state, actions);
     finance::treasury_window(&ctx, area, sim, state, actions);
     if state.menu_open {
@@ -380,6 +389,14 @@ fn top_bar(
         }
         ui.separator();
         ui.toggle_value(&mut state.fleets_open, fleets::TITLE);
+        ui.toggle_value(
+            &mut state.siege.open,
+            siege::toggle_label(siege::concerning(sim)),
+        )
+        .on_hover_text(
+            "Belagerungen, Truppen und Landungen. Die Zahl nennt die Belagerungen, an denen \
+             die eigene Gemeinschaft beteiligt ist.",
+        );
         ui.toggle_value(&mut state.tech_open, tech::TITLE);
         ui.toggle_value(&mut state.treasury_open, "Staat");
         ui.toggle_value(&mut state.exchange_open, "Börse");
@@ -416,7 +433,7 @@ fn battle_of_entry(sim: &SimRefs, entry: &sim::chronicle::ChronicleEntry) -> Opt
         .then_some(battle.id)
 }
 
-fn chronicle(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>) {
+fn chronicle(ui: &mut egui::Ui, sim: &SimRefs, sieges: &[SiegeCard], actions: &mut Vec<UiAction>) {
     ui.label(RichText::new("Chronik").strong());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -438,6 +455,14 @@ fn chronicle(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>) {
                         && watch_button(ui, "Chronik")
                     {
                         actions.push(UiAction::WatchBattle(battle));
+                    }
+                    if let Some(planet) = siege::siege_of_entry(sim, sieges, entry)
+                        && ui
+                            .small_button(RichText::new(siege::SHOW_SIEGE).color(ACCENT))
+                            .on_hover_text("Öffnet das Fenster „Belagerung“ bei dieser Welt.")
+                            .clicked()
+                    {
+                        actions.push(UiAction::ShowSiege(planet));
                     }
                 });
             }
@@ -497,7 +522,7 @@ fn left_panel(
                     });
             }
         }
-        _ => selection_panel(ui, sim, selection, actions),
+        _ => selection_panel(ui, sim, state, selection, actions),
     }
 }
 
@@ -529,6 +554,7 @@ fn planet_picker(
 fn selection_panel(
     ui: &mut egui::Ui,
     sim: &SimRefs,
+    state: &mut UiState,
     selection: &Selection,
     actions: &mut Vec<UiAction>,
 ) {
@@ -633,7 +659,30 @@ fn selection_panel(
         });
     if let Some(planet_id) = planet_id {
         ui.separator();
-        planet_details(ui, sim, planet_id, actions);
+        // Mit der Tafel der Verteidigung wird die Welt länger als die Tafel hoch ist.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                planet_details(ui, sim, planet_id, actions);
+                if sim.config.player.is_some()
+                    && sim.galaxy.planet(planet_id).owner == sim.config.player
+                {
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(
+                        RichText::new(siege::defense::HEADING).color(ACCENT),
+                    )
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        siege::defense::defense_editor(
+                            ui,
+                            sim,
+                            planet_id,
+                            &mut state.siege,
+                            actions,
+                        );
+                    });
+                }
+            });
     }
 }
 
@@ -1030,6 +1079,7 @@ mod tests {
                 fleets: &self.state.fleets,
                 battles: &self.state.battles,
                 pending: &[],
+                sieges: &self.state.sieges,
                 research: &self.state.research,
                 diplomacy: &self.state.diplomacy,
                 history,

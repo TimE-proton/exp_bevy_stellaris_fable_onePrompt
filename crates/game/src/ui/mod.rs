@@ -7,6 +7,7 @@ mod finance;
 pub(crate) mod fleets;
 pub(crate) mod format;
 pub(crate) mod panels;
+pub(crate) mod siege;
 pub(crate) mod tech;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -36,6 +37,7 @@ use sim::fleet::{Battles, Fleets};
 use sim::galaxy::Galaxy;
 use sim::logistics::Logistics;
 use sim::polity::Polities;
+use sim::siege::Sieges;
 use sim::state::SimConfig;
 use sim::tech::Research;
 
@@ -107,6 +109,8 @@ pub struct UiState {
     pub tax_percent: f32,
     pub reserve_target: f32,
     pub bond_amount: f32,
+    /// Fenster „Belagerung“ und die Tafeln der Verteidigung.
+    pub siege: siege::SiegeUi,
 }
 
 impl UiState {
@@ -126,6 +130,7 @@ impl UiState {
         self.split_ships = fresh.split_ships;
         self.yard_chosen = fresh.yard_chosen;
         self.design_chosen = fresh.design_chosen;
+        self.siege.forget_game();
     }
 }
 
@@ -158,6 +163,7 @@ impl Default for UiState {
             tax_percent: 0.0,
             reserve_target: 0.0,
             bond_amount: 20_000.0,
+            siege: siege::SiegeUi::default(),
         }
     }
 }
@@ -181,6 +187,7 @@ pub struct SimParams<'w> {
     battles: Res<'w, Battles>,
     research: Res<'w, Research>,
     diplomacy: Res<'w, Diplomacy>,
+    sieges: Res<'w, Sieges>,
 }
 
 /// Was nur das Hauptmenü und die Schlachtansicht brauchen.
@@ -281,6 +288,7 @@ fn draw_ui(
                 battles: &sim.battles,
                 research: &sim.research,
                 diplomacy: &sim.diplomacy,
+                sieges: &sim.sieges,
                 history: &history,
                 pending: queue.as_deref().map_or(&[], |queue| &queue.pending),
             };
@@ -351,6 +359,7 @@ fn draw_ui(
                     }
                 }
             }
+            UiAction::ShowSiege(planet) => ui_state.siege.show(planet),
             UiAction::WatchBattle(battle) => {
                 practice.watch.write(WatchBattle(battle));
             }

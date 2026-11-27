@@ -169,7 +169,7 @@ eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgep
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
 | Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt"), Besitz (Zusammenhalt, Eigentümer) |
-| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staat (Finanzen und Haushalt), Forschung, Flotten (Schiffe, Werften, Kosten) |
+| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staat (Finanzen, Haushalt, Verteidigung), Forschung, Belagerung (mit der Zahl der eigenen Belagerungen), Flotten (Schiffe, Werften, Kosten) |
 | F1 | Hilfe |
 | Esc | Menü |
 
@@ -240,7 +240,8 @@ und wird aus den Einnahmen des Monats davor bezahlt; die „Einnahmen des Vormon
 gehören schon zum laufenden Haushaltsmonat. Darunter
 stehen der Soldrückstand der Flotte und unter „Rangfolge und Kürzungen“, wer die Rücklage
 angreifen darf und was eine Kürzung für Forschung, Werften und Besatzungen heißt.
-Steuersatz, Rücklage und Anleihen werden im selben Fenster festgesetzt.
+Unter dem Haushalt steht die **Verteidigung** aller eigenen Welten (siehe „Belagerung und
+Verteidigung“). Steuersatz, Rücklage und Anleihen werden im selben Fenster festgesetzt.
 
 ### Flotten
 
@@ -283,6 +284,52 @@ im Gefecht; ein offener gelber Bogen: sammelt sich. Eine Flotte auf dem Marsch r
 Tag um die Strecke vor, die Antriebstechnik und Treibstoff hergeben. Mit leerem Tank
 schleppt sie sich nur noch voran; dann sperrt sie kein System, kapert nicht und gibt kein
 Geleit.
+
+### Belagerung und Verteidigung
+
+„Belagerung“ in der Kopfleiste öffnet das Fenster der Belagerungen; die Zahl in Klammern
+nennt die, an denen die eigene Gemeinschaft als Belagerer oder Verteidiger beteiligt ist.
+Kriegseinträge der Chronik über eine laufende Belagerung tragen den Knopf „Belagerung
+zeigen“. Gezeigt werden die eigenen Belagerungen und fremde in Systemen, in denen eine
+eigene Flotte oder Welt liegt (wie bei den Gefechten); Beobachter sehen jede.
+
+**Belagerungen.** Die Liste nennt je Belagerung Welt, Belagerer, Verteidiger, Phase,
+Dauer, Fortschritt und Lage. Ein Klick auf die Welt zeigt sie im Einzelnen: die fünf
+Phasen als Leiste (Anmarsch, Einschließung, Beschuss, Bodenkrieg, Untergrund), Dauer und
+Fortschritt, die Vorräte der Garnison und den Nachschub der Landungstruppe in Tagen, die
+Anlagen der Welt (Stationen, aktive Geschütze, Schild mit Ladung, Bunker), die Truppen
+beider Seiten, die Flotten im Orbit mit Feuerkraft, Munition und Treibstoff und die
+Zonen. Hält der Belagerer den Orbit nicht, steht dort „ruht, Orbit umstritten“. Unter
+„Prognose“ stehen die drei Wege (Aushungern, Sturm, Flächenbeschuss) in ganzen Sätzen:
+ob die Welt fällt, in wie vielen Tagen, und sonst, woran es liegt (Treibstoff, Munition,
+Schild, Stationen, fehlende Truppen, eine Landung, die abgeschlagen würde), dazu die
+Verluste beider Seiten, der Rumpf der Schiffe und die Beute.
+
+| Wer | Befehle im Fenster |
+|---|---|
+| Belagerer | Feuerstufe (kein Feuer, stützen, gezielt, flächig), „Sturm“, Schwerpunkt, „Nach dem Fall plündern“; „Landen“ setzt Verbände der gewählten Flotte an Land (Stärke am Regler); „Belagerung aufheben“ fragt erst nach |
+| Verteidiger | Haltung der Garnison (vorwärts, Tiefe), „Geschütze schweigen“; „Welt übergeben“ fragt erst nach |
+
+**Flotten und Truppen.** Die Liste nennt je eigener Flotte Ort, Truppen an Bord und ihr
+Ziel. Liegt die gewählte Flotte über einer fremden Welt, beginnt „Belagern“ die
+Belagerung; über einer eigenen Welt gehen mit „Einschiffen“ reguläre Verbände samt
+Nachschub für die gewählten Tage an Bord, und „An Land setzen“ gibt sie der Garnison
+zurück. Dieselben Knöpfe stehen bei der gewählten Flotte im Fenster „Flotten“.
+
+Ein gesperrter Knopf nennt den Grund, mit dem die Simulation den Befehl ablehnen würde,
+daneben oder im Schwebetext. Gefragt wird sie dazu einmal je Tag und Lage, nicht in
+jedem Bild.
+
+**Verteidigung.** Die Tafel „Verteidigung“ steht an jeder eigenen Welt (linke Tafel,
+Reiter „Übersicht“) und im Fenster „Staatsfinanzen“ unter der Übersicht aller eigenen
+Welten. Sie nennt je Anlage (Orbitalstationen, Bodengeschütze, Schild, Bunker) die Stufe,
+die höchste Stufe nach dem Stand der Technik und den Ausbaustand (gelieferte Gütersätze
+gegen die der nächsten Stufe), dazu reguläre Verbände und Depot mit ihren Grenzen, den
+Unterhalt im Monat heute und unter dem Plan, was der Ausbau noch kostet und welche
+Garnison eine besetzte Welt dieser Größe ruhig hält. Die Felder der Spalte „Plan“ ändern
+das Ausbauziel; „Plan festsetzen“ schickt es ab, „Verwerfen“ nimmt die Änderung zurück.
+Darunter stehen Haltung und Feuerverbot der Garnison. Bezahlt wird aus der Zeile
+„Verteidigung“ des Haushalts, im Rang gleich nach der Flotte.
 
 ### Gefechte der Partie ansehen
 

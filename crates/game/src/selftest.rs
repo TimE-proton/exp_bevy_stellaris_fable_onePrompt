@@ -161,6 +161,7 @@ fn drive(
         focus.write(FocusSystem(system));
         ui_state.tab = LeftTab::Ownership;
         ui_state.exchange_open = true;
+        ui_state.siege.open = true;
     }
     if test.frame >= total.saturating_sub(12) && !test.shot_taken {
         test.shot_taken = true;
@@ -1254,6 +1255,16 @@ mod tests {
         let (exit, problems, visible) = campaign_run(CAMPAIGN, |_| {});
         assert_eq!(exit, AppExit::Success, "{problems:?}");
         assert!(visible.is_some_and(|visible| visible > 0), "{visible:?}");
+    }
+
+    #[test]
+    fn the_campaign_selftest_opens_the_siege_window() {
+        let mut game = TestGame::start(CAMPAIGN);
+        let exit = game.run_to_exit(600);
+        assert_eq!(exit, AppExit::Success);
+        // Zur Halbzeit öffnet der Selbsttest die datenlastigen Fenster, auch dieses.
+        assert!(game.resource::<UiState>().siege.open);
+        assert!(game.window_rect(crate::ui::siege::TITLE).is_some());
     }
 
     /// Schiebt die Kartenkamera weit neben die Galaxie.

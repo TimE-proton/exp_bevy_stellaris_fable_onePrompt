@@ -57,6 +57,7 @@ fn the_manual_has_its_parts() {
     // Die Unterabschnitte gehören zur Bedienung und nicht hinter den nächsten Abschnitt.
     assert!(manual.contains("\n### Forschung\n"));
     assert!(manual.contains("\n### Flotten\n"));
+    assert!(manual.contains("\n### Belagerung und Verteidigung\n"));
     assert!(manual.contains("\n### Gefechtsübung\n"));
     assert!(manual.contains("\n### Schlachtansicht\n"));
     assert!(!manual.contains("\n## "));
@@ -243,4 +244,58 @@ fn the_examples_of_the_manual_work() {
         ..PracticeSetup::default()
     };
     assert!(setup.resolve(&data).is_ok());
+}
+
+#[test]
+fn the_manual_names_what_the_siege_window_and_the_defence_panel_offer() {
+    use crate::ui::siege::{self, defense};
+    use sim::siege::arms::Works;
+    use sim::siege::{Course, Fire, Phase, Posture};
+
+    let part = section("### Belagerung und Verteidigung");
+    let flowing = part.replace('\n', " ");
+    for label in [
+        siege::TITLE,
+        siege::SHOW_SIEGE,
+        siege::RESTING,
+        siege::FORECAST,
+        siege::BEGIN,
+        siege::EMBARK,
+        siege::DISEMBARK,
+        siege::LAND,
+        siege::LIFT,
+        siege::CAPITULATE,
+        defense::HEADING,
+        defense::SET_PLAN,
+        defense::DISCARD,
+    ] {
+        assert!(flowing.contains(&format!("„{label}“")), "„{label}“ fehlt");
+    }
+    for tab in [siege::TAB_SIEGES, siege::TAB_TROOPS] {
+        assert!(part.contains(&format!("**{tab}.**")), "Reiter {tab}");
+    }
+    for phase in [
+        Phase::Approach,
+        Phase::Investment,
+        Phase::Bombardment,
+        Phase::Ground,
+        Phase::Underground,
+    ] {
+        assert!(flowing.contains(phase.label()), "{}", phase.label());
+    }
+    for course in Course::ALL {
+        assert!(flowing.contains(course.label()), "{}", course.label());
+    }
+    for fire in Fire::ALL {
+        assert!(flowing.contains(fire.label()), "{}", fire.label());
+    }
+    for posture in [Posture::Forward, Posture::Deep] {
+        assert!(flowing.contains(posture.label()), "{}", posture.label());
+    }
+    for works in Works::ALL {
+        assert!(flowing.contains(works.label()), "{}", works.label());
+    }
+    // Der Knopf der Kopfleiste und die Zeile des Haushalts stehen in ihren Abschnitten.
+    assert!(section("## Bedienung").contains("Belagerung (mit der Zahl"));
+    assert!(section("### Staat und Haushalt").contains("Verteidigung"));
 }
