@@ -49,12 +49,12 @@ pub fn militia_text(card: &DefenseCard) -> String {
     format!("Miliz {}", units(card.defense.militia))
 }
 
-/// Eine Zelle der Übersicht: was steht, und nach dem Pfeil der Plan, wenn er abweicht.
+/// Eine Zelle der Übersicht: was steht, und dahinter der Plan, wenn er abweicht.
 pub fn cell(stands: &str, planned: &str) -> String {
     if stands == planned {
         stands.to_string()
     } else {
-        format!("{stands} → {planned}")
+        format!("{stands}, Plan {planned}")
     }
 }
 
@@ -274,11 +274,19 @@ pub fn defense_overview(
 ) {
     ui.label(RichText::new(HEADING).color(ACCENT));
     let refs = siege_refs(sim);
-    let cards: Vec<DefenseCard> = sim
+    let mut cards: Vec<DefenseCard> = sim
         .galaxy
         .planets_of(player)
         .filter_map(|planet| defense_card(&refs, planet.id))
         .collect();
+    // Die Hauptwelt zuerst, dann die Welten, für die am meisten ausgegeben wird.
+    let capital = sim.polities.get(player).capital;
+    cards.sort_by(|a, b| {
+        let weight = |card: &DefenseCard| card.upkeep + card.plan_upkeep + card.build_cost;
+        (Some(b.planet) == capital)
+            .cmp(&(Some(a.planet) == capital))
+            .then(weight(b).total_cmp(&weight(a)))
+    });
     if cards.is_empty() {
         ui.label(small("Keine eigene Welt.").color(MUTED));
         return;
@@ -295,15 +303,33 @@ pub fn defense_overview(
         .show(ui, |ui| {
             for (title, hint) in [
                 ("Welt", "Ein Klick zeigt den Plan dieser Welt zum Ändern."),
-                ("Stat.", "Orbitalstationen: Stufe, nach dem Pfeil der Plan"),
-                ("Gesch.", "Bodengeschütze: Stufe, nach dem Pfeil der Plan"),
-                ("Schild", "Schild: Stufe, nach dem Pfeil der Plan"),
-                ("Bunker", "Bunker: Stufe, nach dem Pfeil der Plan"),
-                ("Reguläre", "Reguläre Verbände, nach dem Pfeil der Plan"),
-                ("Depot", "Vorräte in Tagen, nach dem Pfeil der Plan"),
+                (
+                    "Stat.",
+                    "Orbitalstationen: Stufe, dahinter der Plan, wenn er abweicht",
+                ),
+                (
+                    "Gesch.",
+                    "Bodengeschütze: Stufe, dahinter der Plan, wenn er abweicht",
+                ),
+                (
+                    "Schild",
+                    "Schild: Stufe, dahinter der Plan, wenn er abweicht",
+                ),
+                (
+                    "Bunker",
+                    "Bunker: Stufe, dahinter der Plan, wenn er abweicht",
+                ),
+                (
+                    "Reguläre",
+                    "Reguläre Verbände, dahinter der Plan, wenn er abweicht",
+                ),
+                (
+                    "Depot",
+                    "Vorräte in Tagen, dahinter der Plan, wenn er abweicht",
+                ),
                 (
                     "Unterhalt",
-                    "Sold und Unterhalt im Monat in Credits, nach dem Pfeil unter dem Plan",
+                    "Sold und Unterhalt im Monat in Credits, dahinter unter dem Plan",
                 ),
                 (
                     "Ausbau",

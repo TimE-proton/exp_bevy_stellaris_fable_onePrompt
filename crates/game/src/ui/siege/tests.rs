@@ -234,7 +234,7 @@ fn small_texts_follow_german_usage() {
     assert_eq!(toggle_label(0), "Belagerung");
     assert_eq!(toggle_label(2), "Belagerung (2)");
     assert_eq!(defense::cell("1", "1"), "1");
-    assert_eq!(defense::cell("1", "3"), "1 → 3");
+    assert_eq!(defense::cell("1", "3"), "1, Plan 3");
     assert_eq!(defense::level_text(2.0), "2");
     assert_eq!(defense::level_text(0.4), "0,4");
     // Der Regler rastet auf halbe Verbände und am Ende auf alles, was bereitsteht.
@@ -1041,7 +1041,9 @@ fn the_overview_sums_what_the_cards_say() {
         painted.text(SET_PLAN).is_some(),
         "die Tafel der gewählten Welt"
     );
-    let first = &scene.state.galaxy.planet(cards[0].planet).name;
+    // Die Hauptwelt führt die Liste an.
+    let capital = scene.state.polities.get(ME).capital.expect("Hauptwelt");
+    let first = &scene.state.galaxy.planet(capital).name;
     assert!(
         painted.all(first).len() >= 2,
         "in der Liste und über der Tafel"
@@ -1171,8 +1173,19 @@ fn the_state_window_shows_defence_and_its_budget_line() {
     };
     assert!(worlds.len() > 2);
     assert!(game.text(defense::REGULARS).is_some());
+    let capital = game
+        .resource::<sim::polity::Polities>()
+        .get(ME)
+        .capital
+        .unwrap();
+    let capital = game
+        .resource::<sim::galaxy::Galaxy>()
+        .planet(capital)
+        .name
+        .clone();
+    assert!(worlds.contains(&capital));
     assert!(
-        game.disabled_button(&format!("{SET_PLAN}: {}", worlds[0]))
+        game.disabled_button(&format!("{SET_PLAN}: {capital}"))
             .is_some()
     );
 }
