@@ -184,7 +184,7 @@ fn drive(
 ) {
     test.frame += 1;
     let total = test.total;
-    visit_siege(&mut commands, &args, &mut test, &mut siege);
+    visit_siege(&mut commands, &args, &mut test, &mut speed, &mut siege);
     if test.frame == 5 {
         // Zeit laufen lassen, schnellste Stufe.
         speed.paused = false;
@@ -264,6 +264,7 @@ fn visit_siege(
     commands: &mut Commands,
     args: &Args,
     test: &mut Selftest,
+    speed: &mut SimSpeed,
     siege: &mut SiegeVisitParams,
 ) {
     let frame = test.frame;
@@ -273,6 +274,9 @@ fn visit_siege(
             test.siege = match siege.markers.0.first() {
                 Some(marker) if wanted => {
                     siege.watch.write(WatchSiege(marker.planet));
+                    // In der Ansicht läuft die Zeit in Echtzeit: So zeigt das Foto, was
+                    // der Tagesbericht meldet, und nicht schon das Ende der Belagerung.
+                    speed.level = 1;
                     SiegeVisit::Watching {
                         asked: frame,
                         judged: false,
@@ -317,6 +321,7 @@ fn visit_siege(
             }
             if frame >= asked + SIEGE_VISIT_LEAVE {
                 siege.next.set(ViewState::Galaxy);
+                speed.level = SPEEDS.len() - 1;
                 test.siege = SiegeVisit::Done { seen: true };
             }
         }
@@ -1385,6 +1390,47 @@ mod tests {
         // Zur Halbzeit öffnet der Selbsttest die datenlastigen Fenster, auch dieses.
         assert!(game.resource::<UiState>().siege.open);
         assert!(game.window_rect(crate::ui::siege::TITLE).is_some());
+    }
+
+    /// Ein geladener Spielstand mit einer Belagerung der eigenen Gemeinschaft.
+    fn siege_run(name: &str, disturb: impl FnOnce(&mut App)) -> (AppExit, Vec<String>, SiegeVisit) {
+        use crate::testing::conquest;
+        let path = conquest::save_file(conquest::BOMBARDMENT, Some(sim::ids::PolityId(0)), name);
+        let mut game = TestGame::start(&format!("--selftest 220 --load {}", path.display()));
+        disturb(&mut game.app);
+        let exit = game.run_to_exit(900);
+        let _ = std::fs::remove_file(&path);
+        let test = game.resource::<Selftest>();
+        (exit, test.problems(), test.siege)
+    }
+
+    #[test]
+    fn the_campaign_selftest_visits_the_orbit_view_of_a_loaded_siege() {
+        let (exit, problems, visit) = siege_run("selbsttest_belagerung", |_| {});
+        assert_eq!(exit, AppExit::Success, "{problems:?}");
+        assert_eq!(visit, SiegeVisit::Done { seen: true });
+        // Eine frische Partie hat keine Belagerung: kein Abstecher, trotzdem „OK“.
+        let mut game = TestGame::start("--selftest 220 --seed 3");
+        assert_eq!(game.run_to_exit(900), AppExit::Success);
+        assert_eq!(
+            game.resource::<Selftest>().siege,
+            SiegeVisit::Done { seen: false }
+        );
+    }
+
+    #[test]
+    fn the_campaign_selftest_fails_when_the_orbit_camera_looks_elsewhere() {
+        let (exit, problems, _) = siege_run("selbsttest_belagerung_leer", |app| {
+            app.add_systems(PostUpdate, look_away.before(TransformSystems::Propagate));
+        });
+        assert!(exit.is_error());
+        assert_eq!(
+            problems,
+            [
+                "die Orbitansicht zeigt den Planeten nicht im Sichtfeld der Kamera",
+                "von der Flotte des Belagerers liegt kein Rumpf im Sichtfeld der Kamera"
+            ]
+        );
     }
 
     /// Schiebt die Kartenkamera weit neben die Galaxie.

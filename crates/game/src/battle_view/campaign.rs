@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use sim::battle::Battle;
 use sim::clock::{Date, SimClock, TICKS_PER_DAY};
 use sim::command::{CommandQueue, CommandSource, SimCommand};
-use sim::fleet::{BattleOutcome, BattleReport, Battles, Fleets, SideReport};
+use sim::fleet::{BattleOutcome, BattleReport, Battles, Departure, Fleets, SideReport};
 use sim::galaxy::Galaxy;
 use sim::ids::{BattleId, PolityId};
 use sim::polity::Polities;
@@ -43,6 +43,9 @@ pub struct WatchedBattle {
     epoch: u32,
     /// Die Simulation hat das Gefecht abgeschlossen; gezeigt wird sein Ergebnis.
     pub ended: bool,
+    /// Parteien, deren Gemeinschaft während des Gefechts geendet hat: Ihre Flotte ist
+    /// aufgelöst, nicht geschlagen.
+    pub dissolved: Vec<usize>,
 }
 
 /// Wo auf dem Bildschirm die Gefechte stehen, die der Spieler ansehen darf: An dieser
@@ -170,6 +173,20 @@ fn whereabouts(galaxy: &Galaxy, fleets: &Fleets, report: &BattleReport, side: us
     }
 }
 
+/// Parteien eines Gefechts, deren Flotte aufgelöst wurde, weil ihre Gemeinschaft geendet
+/// hat.
+pub fn dissolved_sides(battles: &Battles, battle: BattleId) -> Vec<usize> {
+    battles
+        .departed
+        .iter()
+        .filter(|entry| entry.battle == battle && entry.cause == Departure::Dissolved)
+        .map(|entry| entry.side as usize)
+        .collect()
+}
+
+/// Was das Ergebnis bei einer Partei vermerkt, deren Gemeinschaft im Gefecht geendet hat.
+pub const DISSOLVED_NOTE: &str = "Gemeinschaft hat geendet, Flotte aufgelöst (nicht geschlagen)";
+
 /// Hält die Partei am Ende das Feld? Wer vorzeitig ausschied, hält es nicht mehr: Bei ihm
 /// sagt `held_field` nur, ob er beim Ausscheiden noch auf dem Feld stand. So zählt auch
 /// der Kern in seiner Chronik.
@@ -183,6 +200,7 @@ pub fn result_of(
     fleets: &Fleets,
     polities: &Polities,
     report: &BattleReport,
+    dissolved: &[usize],
 ) -> BattleResult {
     let place = &galaxy.system(report.system).name;
     let holders: Vec<&str> = report
@@ -218,7 +236,10 @@ pub fn result_of(
         .iter()
         .enumerate()
         .map(|(index, side)| {
-            let note = if side.left_early.is_some() && side.held_field {
+            let gone = dissolved.contains(&index);
+            let note = if gone {
+                DISSOLVED_NOTE
+            } else if side.left_early.is_some() && side.held_field {
                 "vorzeitig ausgeschieden, als kein Gegner mehr auf dem Feld stand"
             } else if side.left_early.is_some() {
                 "vorzeitig ausgeschieden, hat das Feld geräumt"
@@ -243,7 +264,11 @@ pub fn result_of(
                 // Ohne Entscheidung hält niemand das Feld als Sieger.
                 holds_field: holds_at_end(side) && !report.outcome.undecided(),
                 note: note.into(),
-                whereabouts: whereabouts(galaxy, fleets, report, index),
+                whereabouts: if gone {
+                    "Die Flotte wurde mit dem Ende ihrer Gemeinschaft aufgelöst.".into()
+                } else {
+                    whereabouts(galaxy, fleets, report, index)
+                },
             }
         })
         .collect();
@@ -336,6 +361,7 @@ fn open_requested(
         id,
         epoch: epoch.0,
         ended: false,
+        dissolved: dissolved_sides(&battles, id),
     });
     ui_state.menu_open = false;
     next.set(ViewState::Battle);
@@ -384,6 +410,13 @@ fn follow(
                 battle,
             );
             feed.refresh(battle);
+            // Wer ausscheidet, weil seine Gemeinschaft endet, bleibt für das Ergebnis
+            // vermerkt, auch wenn die Simulation den Eintrag später abräumt.
+            for side in dissolved_sides(&battles, watched.id) {
+                if !watched.dissolved.contains(&side) {
+                    watched.dissolved.push(side);
+                }
+            }
         }
         None => {
             watched.ended = true;
@@ -411,7 +444,13 @@ fn follow(
                             })
                             .collect(),
                     };
-                    feed.conclude(result_of(&galaxy, &fleets, &polities, report), &fates);
+                    for side in dissolved_sides(&battles, watched.id) {
+                        if !watched.dissolved.contains(&side) {
+                            watched.dissolved.push(side);
+                        }
+                    }
+                    let result = result_of(&galaxy, &fleets, &polities, report, &watched.dissolved);
+                    feed.conclude(result, &fates);
                     options.summary = true;
                     speed.paused = true;
                 }

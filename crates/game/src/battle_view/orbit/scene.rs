@@ -32,7 +32,7 @@ pub const PLANET_RADIUS: f32 = 420.0;
 pub const SHIELD_RADIUS: f32 = PLANET_RADIUS * 1.09;
 /// Bahn der Orbitalstationen.
 const STATION_ORBIT: f32 = PLANET_RADIUS * 1.34;
-const STATION_SIZE: f32 = 30.0;
+const STATION_SIZE: f32 = 46.0;
 /// Weiter als das entfernt sich die Kamera nicht vom Planeten.
 const MAX_DISTANCE: f32 = 9_000.0;
 /// Breite der Aufstellung der Flotte.
@@ -92,11 +92,11 @@ pub fn zone_radius(share: f32) -> f32 {
 /// zurück, solange der Orbit umstritten ist.
 pub fn fleet_altitude(phase: Phase, control: bool) -> f32 {
     if !control {
-        return PLANET_RADIUS * 3.0;
+        return PLANET_RADIUS * 2.8;
     }
     PLANET_RADIUS
         * match phase {
-            Phase::Approach => 2.7,
+            Phase::Approach => 2.5,
             Phase::Investment => 2.25,
             Phase::Bombardment => 1.95,
             Phase::Ground | Phase::Underground => 1.8,
@@ -678,6 +678,18 @@ pub fn show_rates(watched: &WatchedSiege, today: u64) -> [f32; 4] {
     [bombard, answer, ground, below]
 }
 
+/// Liegt zwischen zwei Punkten über der Welt freie Sicht, oder steht die Welt dazwischen?
+pub fn clear_path(from: Vec3, to: Vec3) -> bool {
+    let along = to - from;
+    let length = along.length();
+    if length < 1.0 {
+        return true;
+    }
+    let direction = along / length;
+    let reach = (-from).dot(direction).clamp(0.0, length);
+    (from + direction * reach).length() >= PLANET_RADIUS * 1.03
+}
+
 /// Zufälliger Punkt in einer Zone, als Richtung vom Mittelpunkt der Welt.
 fn spot_in_zone(random: &mut Cosmetic, zone: (Vec3, f32)) -> Vec3 {
     let away = (zone.1 / PLANET_RADIUS) * random.unit().sqrt() * 0.9;
@@ -758,8 +770,17 @@ fn stage(
             shooters[(scene.random.unit() * shooters.len() as f32) as usize % shooters.len()];
         let at_stations = layout.phase == Phase::Approach && !station_spots.is_empty();
         let (to, hit) = if at_stations {
-            let pick = (scene.random.unit() * station_spots.len() as f32) as usize;
-            (station_spots[pick % station_spots.len()], Hit::Hull)
+            // Nur Stationen, die von diesem Schiff aus nicht hinter der Welt stehen.
+            let in_sight: Vec<Vec3> = station_spots
+                .iter()
+                .copied()
+                .filter(|station| clear_path(from, *station))
+                .collect();
+            if in_sight.is_empty() {
+                continue;
+            }
+            let pick = (scene.random.unit() * in_sight.len() as f32) as usize;
+            (in_sight[pick % in_sight.len()], Hit::Hull)
         } else {
             let direction = if !scene.zones.is_empty() && scene.random.unit() < 0.7 {
                 let pick = (scene.random.unit() * scene.zones.len() as f32) as usize;
@@ -780,19 +801,24 @@ fn stage(
         spawn_shot(&mut commands, &assets, &scene.attacker, from, to, beam, hit);
     }
 
-    // Gegenfeuer: aktive Geschütze und Stationen schießen auf die Flotte.
+    // Gegenfeuer: aktive Geschütze und Stationen schießen auf die Flotte, soweit die Welt
+    // nicht dazwischen steht.
     while scene.budget[1] >= 1.0 {
         scene.budget[1] -= 1.0;
+        if scene.hulls.is_empty() {
+            continue;
+        }
+        let pick = (scene.random.unit() * scene.hulls.len() as f32) as usize;
+        let to = scene.hulls[pick % scene.hulls.len()].0;
         let mut sources: Vec<Vec3> = station_spots.clone();
         if layout.guns_active {
             sources.extend(scene.guns.iter().map(|gun| *gun * (PLANET_RADIUS + 16.0)));
         }
-        if sources.is_empty() || scene.hulls.is_empty() {
+        sources.retain(|source| clear_path(*source * 1.04, to));
+        if sources.is_empty() {
             continue;
         }
         let from = sources[(scene.random.unit() * sources.len() as f32) as usize % sources.len()];
-        let pick = (scene.random.unit() * scene.hulls.len() as f32) as usize;
-        let to = scene.hulls[pick % scene.hulls.len()].0;
         let beam = scene.random.unit() < 0.5;
         spawn_shot(
             &mut commands,

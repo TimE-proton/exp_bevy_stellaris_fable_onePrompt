@@ -187,12 +187,11 @@ pub fn window(ctx: &egui::Context, endings: &mut Endings) {
     egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
-        .anchor(
-            Align2::CENTER_CENTER,
-            [0.0, if message.player { 0.0 } else { -40.0 }],
-        )
+        // Oben in der Mitte, unter der Kopfleiste: Das Ergebnis eines Gefechts oder einer
+        // Belagerung steht in der Bildmitte und bleibt daneben lesbar.
+        .anchor(Align2::CENTER_TOP, [0.0, 64.0])
         .show(ctx, |ui| {
-            ui.set_width(470.0);
+            ui.set_width(400.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(&message.name)

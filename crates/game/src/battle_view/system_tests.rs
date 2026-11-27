@@ -689,6 +689,7 @@ mod campaign {
             game.resource::<Fleets>(),
             game.resource::<Polities>(),
             &report,
+            &[],
         );
         let shown = game
             .resource::<BattleFeed>()
@@ -1127,7 +1128,23 @@ mod campaign {
             fleets,
             game.resource::<Polities>(),
             &report,
+            &[],
         );
+        // Endet die Gemeinschaft einer Partei im Gefecht, ist ihre Flotte aufgelöst und
+        // nicht geschlagen: Das Ergebnis sagt es, statt von einem geräumten Feld zu reden.
+        let with_ending = result_of(
+            game.resource::<Galaxy>(),
+            fleets,
+            game.resource::<Polities>(),
+            &report,
+            &[1],
+        );
+        assert_eq!(
+            with_ending.sides[1].note,
+            crate::battle_view::campaign::DISSOLVED_NOTE
+        );
+        assert!(with_ending.sides[1].whereabouts.contains("aufgelöst"));
+        assert_eq!(with_ending.sides[0].note, result.sides[0].note);
         assert_eq!(
             result.headline,
             format!("Gefecht bei {place} entschieden: F1 hält das Feld.")

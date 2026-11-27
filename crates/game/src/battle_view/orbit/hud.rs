@@ -510,8 +510,8 @@ fn result_window(ctx: &egui::Context, watched: &WatchedSiege, actions: &mut Vec<
             }
             ui.add_space(4.0);
             ui.label(small(format!(
-                "Dauer: {}. Die Partie ist angehalten; „{BACK}“ führt zur Karte, dort läuft \
-                 sie mit der Leertaste weiter.",
+                "Dauer: {}. Die Partie wurde dazu angehalten; „{BACK}“ führt zur Karte, die \
+                 Leertaste lässt die Zeit weiterlaufen.",
                 days_text(watched.card.days as f64)
             )));
             ui.add_space(6.0);

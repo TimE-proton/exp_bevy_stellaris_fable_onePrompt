@@ -111,6 +111,26 @@ fn changes_between_two_days_become_messages() {
     assert!(all.contains("hält den Orbit wieder"), "{all}");
 }
 
+#[test]
+fn nobody_shoots_through_the_world() {
+    use super::scene::{clear_path, station_position};
+    let fleet = scene::attack_direction() * fleet_altitude(Phase::Approach, true);
+    // Über dem Landegebiet ist freie Sicht, zur Rückseite der Welt nicht.
+    assert!(clear_path(
+        fleet,
+        scene::landing_direction() * PLANET_RADIUS * 1.2
+    ));
+    assert!(!clear_path(
+        fleet,
+        -scene::attack_direction() * PLANET_RADIUS * 1.34
+    ));
+    // Von vier Stationen auf ihrer Bahn sieht die Flotte einige, aber nicht alle.
+    let seen = (0..4)
+        .filter(|index| clear_path(fleet, station_position(*index, 4, 0.0)))
+        .count();
+    assert!((1..4).contains(&seen), "{seen}");
+}
+
 fn watched(days: u64) -> WatchedSiege {
     let (data, state) = conquest::state(days);
     let card = card(days);
@@ -303,10 +323,42 @@ fn a_landing_sends_boats_from_the_fleet_to_the_ground() {
     assert!(game.resource::<OrbitScene>().landing_spot().is_none());
 }
 
+#[test]
+fn a_resting_siege_says_so_and_the_way_into_the_battle_leads_over_the_map() {
+    // Im Bodenkrieg dieses Stands liegt die Flotte nicht über der Welt: Die Belagerung
+    // ruht, die Truppe am Boden kämpft weiter.
+    let mut game = at_the_siege_window(conquest::GROUND, "orbit_ruht");
+    game.click_on(WATCH);
+    game.frames(4);
+    assert_eq!(view(&game), ViewState::Siege);
+    assert!(!game.resource::<WatchedSiege>().card.control);
+    assert!(
+        game.text(&format!("Die Belagerung {}", window::RESTING))
+            .is_some()
+    );
+    assert_eq!(game.count::<OrbitHull>(), 0, "keine Flotte im Orbit");
+    // Der Knopf zum Gefecht steht nur da, wenn im System eines läuft; hier keines.
+    assert!(game.button(super::super::campaign::WATCH).is_none());
+    // Die Bitte um ein Gefecht reist über die Karte: Die Ansicht schließt, die
+    // Schlachtansicht antwortet (hier: Das Gefecht gibt es nicht mehr).
+    game.world_mut().resource_mut::<BattleAfterLeave>().0 = Some(BattleId(9_999));
+    game.world_mut()
+        .resource_mut::<NextState<ViewState>>()
+        .set(ViewState::Galaxy);
+    game.frames(4);
+    assert_eq!(view(&game), ViewState::Galaxy);
+    assert!(
+        game.resource::<Notice>().text.contains("Gefecht"),
+        "{}",
+        game.resource::<Notice>().text
+    );
+    assert_eq!(game.resource::<BattleAfterLeave>().0, None);
+}
+
 /// Schreibt Spielstände für Bildschirmfotos der Orbitansicht in das Verzeichnis aus
 /// `KONFLUENZ_FOTOSTAENDE`: Beschuss, der Tag vor der Landung, Bodenkrieg kurz vor dem Fall, die letzte Welt einer
-/// Gemeinschaft aus beiden Sichten und eine Welt mit Schild und Stationen (dafür sind die
-/// Anlagen von Hand gesetzt). Aufruf:
+/// Gemeinschaft aus beiden Sichten und Welten mit Schild und mit Stationen (dafür sind
+/// die Anlagen von Hand gesetzt). Aufruf:
 /// `KONFLUENZ_FOTOSTAENDE=/pfad cargo test -p game -- --ignored fotostaende`.
 #[test]
 #[ignore = "schreibt Spielstände für Bildschirmfotos"]
@@ -316,20 +368,22 @@ fn fotostaende() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let write = |name: &str, days: u64, player: Option<PolityId>, fortify: bool| {
+    // `works`: Stufen von Schild und Geschützen und Stufen der Stationen, von Hand gesetzt.
+    let write = |name: &str, days: u64, player: Option<PolityId>, works: Option<(u8, f32)>| {
         let (data, state) = conquest::state(days);
         let mut state = state.clone();
         state.config = SimConfig {
             player,
             ..state.config
         };
-        if fortify {
+        if let Some((shield, stations)) = works {
             let planet = *state.sieges.active.keys().next().expect("Belagerung");
-            let full = (2.0 * data.balance.siege.shield_cap) as f32;
+            let full = (shield as f64 * data.balance.siege.shield_cap) as f32;
             let defense = state.sieges.defense_mut(planet);
-            defense.shield = 2;
+            defense.shield = shield;
             defense.charge = full;
             defense.guns = 2.0;
+            defense.stations = stations;
         }
         SaveGame {
             format: SAVE_FORMAT,
@@ -340,20 +394,21 @@ fn fotostaende() {
         .expect("Spielstand schreiben");
     };
     let defender = card(conquest::LAST_WORLD).defender;
-    write("beschuss", conquest::BOMBARDMENT, Some(ME), false);
-    write("schild", conquest::BOMBARDMENT, Some(ME), true);
-    write("landung", conquest::LANDING, Some(ME), false);
-    write("boden", conquest::GROUND, Some(ME), false);
+    write("beschuss", conquest::BOMBARDMENT, Some(ME), None);
+    write("schild", conquest::BOMBARDMENT, Some(ME), Some((2, 0.0)));
+    write("stationen", conquest::BOMBARDMENT, Some(ME), Some((1, 3.0)));
+    write("landung", conquest::LANDING, Some(ME), None);
+    write("boden", conquest::GROUND, Some(ME), None);
     write(
         "letzte_welt_belagerer",
         conquest::LAST_WORLD,
         Some(ME),
-        false,
+        None,
     );
     write(
         "letzte_welt_verteidiger",
         conquest::LAST_WORLD,
         Some(defender),
-        false,
+        None,
     );
 }
