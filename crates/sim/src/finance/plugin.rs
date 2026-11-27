@@ -15,7 +15,7 @@ use crate::fleet::{Fleets, fleet_claim, procurement_estimate};
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::Logistics;
-use crate::polity::Polities;
+use crate::polity::{Polities, SuccessionParams};
 use crate::state::SimConfig;
 use crate::tech::{Research, research_claim};
 use crate::{SimSet, sim_schedule};
@@ -210,47 +210,22 @@ fn monthly_books(
     }
 }
 
-fn cohesion(
-    data: Res<GameData>,
-    clock: Res<SimClock>,
-    fleets: Res<Fleets>,
-    mut logistics: ResMut<Logistics>,
-    mut galaxy: ResMut<Galaxy>,
-    mut polities: ResMut<Polities>,
-    mut economy: ResMut<Economy>,
-    mut finance: ResMut<Finance>,
-    mut research: ResMut<Research>,
-    mut chronicle: ResMut<Chronicle>,
-) {
+fn cohesion(clock: Res<SimClock>, mut params: SuccessionParams) {
     let secessions = update_cohesion(
-        &mut finance,
-        &galaxy,
-        &mut economy,
-        &logistics,
-        &fleets,
-        &polities,
-        &data,
+        &mut params.finance,
+        &params.galaxy,
+        &mut params.economy,
+        &params.logistics,
+        &params.fleets,
+        &params.polities,
+        &params.data,
         clock.day(),
     );
+    // Ein neuer Freistaat hat noch im selben Takt in jeder Liste je Gemeinschaft seinen
+    // Eintrag und nimmt das Wissen des Reichs mit, das er verlässt: Seine Werke und
+    // Frachter rechnen sofort mit der geerbten Technik.
+    let mut succession = params.borrow();
     for secession in secessions {
-        let founded = apply_secession(
-            &secession,
-            &mut finance,
-            &mut galaxy,
-            &mut economy,
-            &logistics,
-            &mut polities,
-            &mut chronicle,
-            &data,
-            clock.tick,
-        );
-        // Ein neuer Freistaat nimmt das Wissen des Reichs mit, das er verlässt. Noch im
-        // selben Takt hat er in jeder Liste je Gemeinschaft seinen Eintrag, und seine
-        // Werke und Frachter rechnen mit der geerbten Technik.
-        if let (None, Some(child)) = (secession.joins, founded) {
-            research.inherit(&data, secession.from, child);
-            economy.sync_polities();
-            research.publish_effects(&mut economy, &mut logistics);
-        }
+        apply_secession(&secession, &mut succession, clock.tick);
     }
 }

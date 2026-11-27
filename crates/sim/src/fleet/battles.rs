@@ -104,6 +104,10 @@ pub enum Departure {
     NoOpponent,
     /// Kein eigenes Schiff mehr auf dem Feld: entkommen oder verloren.
     LeftField,
+    /// Die Gemeinschaft der Partei hat unter Zwang geendet, ihre Flotte ist aufgelöst
+    /// (`polity::succession`). Die Partei steht fortan unter dem Namen der Erbin in der
+    /// Bilanz; was sie verloren hat, wird beim Abschluss niemandem angerechnet.
+    Dissolved,
 }
 
 /// Eine Partei, die ein laufendes Gefecht vorzeitig verlassen hat. Im Rechner bleibt sie
@@ -253,7 +257,11 @@ fn has_departed(departed: &[Departed], battle: BattleId, side: usize) -> bool {
 
 /// Stelle der Partei, als die eine Flotte in einem Gefecht steht. War die Flotte schon
 /// einmal dabei, ist ausgeschieden und später wieder eingetreten, zählt der jüngste Eintrag.
-fn side_of_fleet(departed: &[Departed], battle: &Battle, fleet: FleetId) -> Option<usize> {
+pub(super) fn side_of_fleet(
+    departed: &[Departed],
+    battle: &Battle,
+    fleet: FleetId,
+) -> Option<usize> {
     (0..battle.combatants.len()).rev().find(|side| {
         battle.combatants[*side].fleet == Some(fleet) && !has_departed(departed, battle.id, *side)
     })
@@ -635,7 +643,7 @@ fn attached(fleets: &Fleets, battle: &Battle, side: usize) -> Option<usize> {
 }
 
 /// Zählt verlorene Schiffe einer Gemeinschaft (ohne Bordjäger).
-fn count_lost(ships_lost: &mut Vec<u32>, owner: PolityId, lost: u32) {
+pub(super) fn count_lost(ships_lost: &mut Vec<u32>, owner: PolityId, lost: u32) {
     if lost == 0 {
         return;
     }
@@ -1055,7 +1063,7 @@ pub fn advance_battles(
 /// `settled` nennt die Schiffe, deren Verlust schon feststeht. Am Ende des Gefechts sind
 /// das alle verlorenen (`None`); solange es läuft, nur die zerstörten: Ein treibendes
 /// Schiff kann noch geborgen werden und bleibt bis dahin, wie es zuletzt war.
-fn write_back(
+pub(super) fn write_back(
     results: &[ShipResult],
     side: usize,
     fleet: &mut Fleet,
@@ -1303,9 +1311,19 @@ fn conclude(
             stalemate: combatant.stalemate,
             left_early: None,
         };
+        debris += report.lost_value;
+        if let Some(entry) = &left[side]
+            && entry.cause == Departure::Dissolved
+        {
+            // Die Flotte wurde mit dem Ende ihrer Gemeinschaft aufgelöst. Was die Partei
+            // seither noch verlor (Bordjäger ohne Träger), ist Trümmer, aber niemandes
+            // Verlust: Die Erbin, unter deren Namen sie steht, hat hier nie gekämpft.
+            report.left_early = Some(entry.tick);
+            sides.push(report);
+            continue;
+        }
         let owner = tally.entry(combatant.owner).or_default();
         owner.lost += report.lost_value as f64;
-        debris += report.lost_value;
         if let Some(entry) = &left[side] {
             // Schon früher ausgeschieden: Die Flotte ist längst frei, es bleibt die Bilanz.
             report.held_field = entry.cause == Departure::NoOpponent;
@@ -1624,7 +1642,14 @@ fn conclude(
             battles.won[winner.index()] += 1;
         }
     }
-    for side in &report.sides {
+    for (index, side) in report.sides.iter().enumerate() {
+        // Eine aufgelöste Flotte ist nicht im Gefecht verloren gegangen.
+        if left[index]
+            .as_ref()
+            .is_some_and(|entry| entry.cause == Departure::Dissolved)
+        {
+            continue;
+        }
         let ships = |counts: &[u32; 6]| counts.iter().sum::<u32>() - counts[0];
         if ships(&side.initial) > 0 && ships(&side.lost) >= ships(&side.initial) {
             let index = side.owner.index();

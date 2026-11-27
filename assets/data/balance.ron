@@ -1,5 +1,20 @@
 // Stellschrauben, die zu keinem einzelnen Katalog gehören.
 (
+    endgame: (
+        // So viele neue Gemeinschaften entstehen in einer Partie höchstens durch
+        // Abspaltung. Danach bleibt eine abtrünnige Region autonom: Die Zahl der freien
+        // Gemeinschaften kann dann nur noch sinken.
+        max_free_states: 6,
+        // Souverän ist eine freie Gemeinschaft, deren Verbund (sie selbst und alle, die
+        // ihr unterstehen) mindestens diesen Anteil an der Bevölkerung aller hält. Gibt es
+        // nur noch eine, endet die Partie; kleinere freie Gemeinschaften zählen nicht.
+        // Mal finance.cohesion.max_polities muss der Wert unter 1 bleiben.
+        sovereign_min_share: 0.02,
+        // Fällt die Bevölkerung aller unter diesen Anteil ihres Höchststands und bleibt
+        // so viele Monate in Folge darunter, endet die Partie ohne Überlebende.
+        collapse_share: 0.30,
+        collapse_months: 24,
+    ),
     colonization: (
         // Siedler der ersten Welle in Millionen; sie ziehen von der Hauptwelt um.
         settlers: 20.0,
@@ -84,6 +99,9 @@
         // Eine Heimatwelt, die 20 Einheiten am Tag fördert, verbraucht so in hundert
         // Jahren rund ein Fünftel eines mittleren Vorkommens.
         depletion: 0.0000003,
+        // Unter diesen Restanteil fällt kein Vorkommen: Der Abbau wird mit dem Vorrat immer
+        // unergiebiger, versiegt aber nie ganz.
+        reserve_floor: 0.02,
         // Geldmengensteuerung: Fällt das Preisniveau am Heimatmarkt unter das Ziel, schöpft
         // die Notenbank Geld für den Staat, höchstens diesen Anteil am Geld der Haushalte
         // je Monat. Die Schöpfung ist ausgewiesen und Teil der Geldsummenprüfung.

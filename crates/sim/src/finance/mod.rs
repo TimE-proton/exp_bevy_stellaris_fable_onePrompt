@@ -14,14 +14,14 @@ pub mod shares;
 
 pub use bonds::{Bond, bond_yield, issue_bonds, service_bonds};
 pub use cohesion::{
-    CohesionFactors, Region, Secession, Stage, apply_secession, cohesion_target,
+    CohesionFactors, Region, Secession, Stage, apply_secession, cohesion_target, issuers_of_region,
     ownership_of_region, update_cohesion,
 };
 pub use investors::invest_holders;
 pub use plugin::{EquityFlows, FinancePlugin};
 pub use shares::{
-    buy_shares, distribute_shares, expropriate, offer_shares, pay_dividend, record_injection,
-    reprice, takeover_bid,
+    buy_shares, distribute_shares, expropriate, move_holdings, offer_shares, pass_holdings,
+    pay_dividend, record_injection, reprice, takeover_bid,
 };
 
 use crate::data::{GameData, Sector};

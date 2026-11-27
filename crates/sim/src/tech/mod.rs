@@ -407,16 +407,42 @@ impl Research {
             return;
         }
         self.sync(data, parent.index().max(child.index()) + 1);
-        let source = self.polities[parent.index()].clone();
+        // Erschöpfend zerlegt und gefüllt: Bei einem neuen Feld des Forschungsstands muss
+        // hier entschieden werden, ob die Neue es erbt oder frisch beginnt.
+        let PolityResearch {
+            known,
+            progress,
+            target: _,
+            auto: _,
+            budget_share,
+            points_last_month: _,
+            spent_last_month: _,
+            effects,
+            spillover,
+            carry: _,
+            spent_total: _,
+            points_total: _,
+            completed: _,
+            focus,
+            usual_share,
+        } = self.polities[parent.index()].clone();
+        let fresh = PolityResearch::new(data);
         self.polities[child.index()] = PolityResearch {
-            known: source.known,
-            progress: source.progress,
-            budget_share: source.budget_share,
-            effects: source.effects,
-            spillover: source.spillover,
-            focus: source.focus,
-            usual_share: source.usual_share,
-            ..PolityResearch::new(data)
+            known,
+            progress,
+            target: fresh.target,
+            auto: fresh.auto,
+            budget_share,
+            points_last_month: fresh.points_last_month,
+            spent_last_month: fresh.spent_last_month,
+            effects,
+            spillover,
+            carry: fresh.carry,
+            spent_total: fresh.spent_total,
+            points_total: fresh.points_total,
+            completed: fresh.completed,
+            focus,
+            usual_share,
         };
         let (parent, child) = (parent.index(), child.index());
         for other in 0..self.intel.len() {
@@ -435,6 +461,83 @@ impl Research {
         self.beliefs[child][parent] = exact;
         self.beliefs[parent][child] = exact;
         self.beliefs[child][child] = exact;
+    }
+
+    /// Eine Gemeinschaft endet, und `into` tritt ihr Erbe an: Die Erbin beherrscht danach,
+    /// was eine von beiden beherrschte, und führt je Technologie die weiter gediehene
+    /// Arbeit fort. Ziel, Etat, Vorlieben und Bilanz bleiben ihre eigenen. Über Dritte weiß
+    /// sie, was eine von beiden wusste: den besseren Einblick und, was beide Bilder
+    /// zugleich zulassen. Der Stand der beendeten Gemeinschaft bleibt als Geschichte stehen.
+    pub fn absorb(&mut self, data: &GameData, from: PolityId, into: PolityId) {
+        if from == into {
+            return;
+        }
+        self.sync(data, from.index().max(into.index()) + 1);
+        // Erschöpfend zerlegt: Ein neues Feld des Forschungsstands fällt hier auf.
+        let PolityResearch {
+            known: inherited,
+            progress: begun,
+            target: _,
+            auto: _,
+            budget_share: _,
+            points_last_month: _,
+            spent_last_month: _,
+            effects: _,
+            spillover: _,
+            carry: left_over,
+            spent_total: _,
+            points_total: _,
+            completed: _,
+            focus: _,
+            usual_share: _,
+        } = self.polities[from.index()].clone();
+        let PolityResearch {
+            known,
+            progress,
+            target,
+            auto: _,
+            budget_share: _,
+            points_last_month: _,
+            spent_last_month: _,
+            effects,
+            spillover: _,
+            carry,
+            spent_total: _,
+            points_total: _,
+            completed: _,
+            focus: _,
+            usual_share: _,
+        } = &mut self.polities[into.index()];
+        for tech in 0..known.len() {
+            known[tech] |= inherited[tech];
+            // Was erforscht ist, braucht keine angefangene Arbeit mehr.
+            progress[tech] = if known[tech] {
+                0.0
+            } else {
+                progress[tech].max(begun[tech])
+            };
+        }
+        *carry = carry.max(left_over);
+        if target.is_some_and(|tech| known[tech as usize]) {
+            *target = None;
+        }
+        *effects = TechEffects::of(data, known);
+
+        let (from, into) = (from.index(), into.index());
+        for other in 0..self.intel.len() {
+            if other == from || other == into {
+                continue;
+            }
+            self.intel[into][other] = self.intel[into][other].max(self.intel[from][other]);
+            // Beide Bilder enthalten die Wahrheit, also auch ihr Durchschnitt.
+            let theirs = self.beliefs[from][other];
+            for (mine, seen) in self.beliefs[into][other].iter_mut().zip(theirs) {
+                mine.lo = mine.lo.max(seen.lo);
+                mine.hi = mine.hi.min(seen.hi).max(mine.lo);
+            }
+        }
+        // Die Bilder der anderen müssen die neue Wahrheit weiter enthalten.
+        self.settle_beliefs(data);
     }
 
     /// Stellt sicher, dass es für jede Gemeinschaft einen vollständigen Eintrag gibt, und
@@ -920,6 +1023,80 @@ mod tests {
         );
         // Das alte Reich behält, was es hatte.
         assert_eq!(research.polities[0].target, Some(begun));
+    }
+
+    #[test]
+    fn an_heir_knows_what_either_knew_and_keeps_the_further_work() {
+        let data = data();
+        let mut research = Research::default();
+        research.sync(&data, 4);
+        let (from, into, other) = (PolityId(1), PolityId(2), PolityId(3));
+        let index = |key: &str| data.tech_index(key).unwrap();
+        research.grant(&data, from, index("waffen_2"));
+        research.grant(&data, into, index("wirtschaft_1"));
+        research.grant(&data, other, index("antrieb_3"));
+        // Angefangene Arbeit: An einer Technologie ist die eine weiter, an einer die andere,
+        // und eine hat die Erbin begonnen, die die andere schon beherrscht.
+        let (ahead, behind, known_there) = (
+            index("verteidigung_1") as usize,
+            index("antrieb_1") as usize,
+            index("waffen_1") as usize,
+        );
+        research.polities[1].progress[ahead] = 900.0;
+        research.polities[2].progress[ahead] = 300.0;
+        research.polities[1].progress[behind] = 100.0;
+        research.polities[2].progress[behind] = 700.0;
+        research.polities[2].progress[known_there] = 50.0;
+        research.polities[1].carry = 40.0;
+        research.polities[2].carry = 15.0;
+        research.polities[2].auto = false;
+        research.polities[2].target = Some(known_there as u16);
+        research.polities[2].budget_share = 0.25;
+        research.polities[1].budget_share = 0.05;
+        // Über die Dritte weiß jede etwas anderes; die Beendete hat den besseren Einblick.
+        let propulsion = TechBranch::Propulsion.index();
+        research.add_intel(from, other, 0.6);
+        research.beliefs[1][3][propulsion] = TierEstimate { lo: 2, hi: 4 };
+        research.beliefs[2][3][propulsion] = TierEstimate { lo: 0, hi: 3 };
+        let seen_by_other = research.estimate(&data, other, into);
+        let before = research.polities[1].clone();
+
+        research.absorb(&data, from, into);
+
+        assert!(research.is_consistent(&data, 4));
+        for key in ["waffen_1", "waffen_2", "wirtschaft_1"] {
+            assert!(research.knows(into, index(key)), "{key}");
+        }
+        assert!(!research.knows(into, index("antrieb_3")));
+        assert_eq!(
+            research.effects(into),
+            TechEffects::of(&data, research.known(into))
+        );
+        let entry = research.get(into).unwrap();
+        assert_eq!(entry.progress[ahead], 900.0);
+        assert_eq!(entry.progress[behind], 700.0);
+        assert_eq!(entry.progress[known_there], 0.0, "schon erforscht");
+        assert_eq!(entry.carry, 40.0);
+        assert_eq!(entry.target, None, "das Ziel ist mit dem Erbe erreicht");
+        assert_eq!(entry.budget_share, 0.25, "der Etat bleibt der eigene");
+        // Der bessere Einblick, und was beide Bilder zugleich zulassen.
+        assert_eq!(research.intel(into, other), research.intel(from, other));
+        assert_eq!(
+            research.estimate(&data, into, other)[propulsion],
+            TierEstimate { lo: 2, hi: 3 }
+        );
+        // Die Dritte sieht die Erbin weiter so, dass die Wahrheit hineinpasst: Der Zweig
+        // Waffen ist von null auf zwei gestiegen.
+        let weapons = TechBranch::Weapons.index();
+        let now = research.estimate(&data, other, into)[weapons];
+        assert!(now.contains(2) && now.lo >= seen_by_other[weapons].lo);
+        // Die beendete Gemeinschaft bleibt als Geschichte stehen; sich selbst zu erben
+        // ändert nichts.
+        assert_eq!(research.polities[1], before);
+        let unchanged = research.clone();
+        research.absorb(&data, into, into);
+        assert_eq!(research.polities, unchanged.polities);
+        assert_eq!(research.beliefs, unchanged.beliefs);
     }
 
     #[test]

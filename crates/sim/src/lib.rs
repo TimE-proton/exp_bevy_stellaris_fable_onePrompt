@@ -16,6 +16,7 @@ pub mod command;
 pub mod data;
 pub mod diplomacy;
 pub mod economy;
+pub mod endgame;
 pub mod finance;
 pub mod fleet;
 pub mod galaxy;
@@ -139,11 +140,18 @@ impl PluginGroup for SimPlugins {
             .add(tech::TechPlugin)
             .add(fleet::FleetPlugin)
             .add(ai::AiPlugin)
+            .add(endgame::EndgamePlugin)
     }
 }
 
-fn game_running(clock: Option<Res<SimClock>>, data: Option<Res<GameData>>) -> bool {
-    clock.is_some() && data.is_some()
+/// Die Simulation läuft, solange eine Partie geladen und nicht zu Ende ist. Mit dem
+/// Ausgang steht alles still, auch die Uhr: Der Zustand ändert sich danach nicht mehr.
+fn game_running(
+    clock: Option<Res<SimClock>>,
+    data: Option<Res<GameData>>,
+    endgame: Option<Res<endgame::Endgame>>,
+) -> bool {
+    clock.is_some() && data.is_some() && endgame.is_none_or(|endgame| !endgame.ended())
 }
 
 fn advance_clock(mut clock: ResMut<SimClock>) {

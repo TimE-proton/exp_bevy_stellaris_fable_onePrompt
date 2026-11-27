@@ -158,6 +158,9 @@ pub struct PolityDef {
     /// Ohne Angabe gilt `balance.ron: research.budget_share`.
     #[serde(default)]
     pub research_share: Option<f64>,
+    /// Gelebte Kultur zu Spielbeginn: Offenheit, Gemeinsinn, Wehrhaftigkeit, je 0..1.
+    /// Daraus ergibt sich die kulturelle Nähe zweier Gemeinschaften.
+    pub culture: (f32, f32, f32),
 }
 
 /// `names.ron`
@@ -238,6 +241,7 @@ pub struct RecipeDef {
 /// `balance.ron`: Stellschrauben, die zu keinem einzelnen Katalog gehören.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Balance {
+    pub endgame: EndgameBalance,
     pub colonization: ColonizationBalance,
     pub population: PopulationBalance,
     pub economy: EconomyBalance,
@@ -247,6 +251,19 @@ pub struct Balance {
     pub military: super::ships::MilitaryBalance,
     pub battle: super::ships::BattleBalance,
     pub research: super::ships::ResearchBalance,
+}
+
+/// Wann eine Partie endet und wie viele neue Gemeinschaften in ihr entstehen dürfen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EndgameBalance {
+    /// So viele Gemeinschaften entstehen in einer Partie höchstens durch Abspaltung.
+    pub max_free_states: u32,
+    /// Anteil an der Bevölkerung aller, ab dem ein Verbund als souverän zählt.
+    pub sovereign_min_share: f64,
+    /// Fällt die Bevölkerung aller unter diesen Anteil ihres Höchststands …
+    pub collapse_share: f64,
+    /// … und bleibt so viele Monate in Folge darunter, endet die Partie.
+    pub collapse_months: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -400,6 +417,8 @@ pub struct EconomyBalance {
     pub cash_per_million: f64,
     pub spend_rate: f64,
     pub depletion: f64,
+    /// Unter diesen Restanteil fällt kein Vorkommen: Der Abbau versiegt nie ganz.
+    pub reserve_floor: f32,
     /// Preisniveau am Heimatmarkt (1 = Richtpreise), unter dem die Notenbank Geld schöpft.
     pub price_target: f64,
     /// Höchste Geldschöpfung je Monat als Anteil am Geld der Haushalte.

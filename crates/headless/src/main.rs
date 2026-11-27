@@ -334,6 +334,22 @@ fn main() -> ExitCode {
                 "Befehle der KI: {applied} angenommen, {rejected} abgelehnt ({:.2} %)",
                 100.0 * rejected as f64 / (applied + rejected).max(1) as f64
             );
+            let endings: Vec<String> = runs
+                .iter()
+                .filter_map(|run| ending_text(run).map(|text| format!("Seed {}: {text}", run.seed)))
+                .collect();
+            if endings.is_empty() {
+                println!("Enden: Keine Partie endete in der Laufzeit.");
+            } else {
+                println!(
+                    "Enden: {} von {} Partien endeten in der Laufzeit.",
+                    endings.len(),
+                    runs.len()
+                );
+                for ending in &endings {
+                    println!("  {ending}");
+                }
+            }
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -343,12 +359,12 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won,ending,ending_year\n",
                 );
                 for run in &runs {
                     for polity in &run.polities {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -390,7 +406,12 @@ fn main() -> ExitCode {
                             polity.offensives,
                             run.ai_applied,
                             run.ai_rejected,
-                            polity.battles_won
+                            polity.battles_won,
+                            // Ende der Partie und Jahr; leer, wenn sie nicht endete.
+                            run.outcome
+                                .map_or("", |outcome| outcome.ending.label()),
+                            run.outcome
+                                .map_or(String::new(), |outcome| outcome.year().to_string())
                         ));
                     }
                 }
@@ -793,4 +814,28 @@ fn print_summary(summary: &RunSummary) {
             );
         }
     }
+    match ending_text(summary) {
+        Some(text) => println!("Ende: {text}"),
+        None => println!("Ende: Die Partie ist in der Laufzeit nicht zu Ende gegangen."),
+    }
+}
+
+/// Ausgang einer Partie in einem Satz: Ende, Jahr, Überlebende, die beiden Summen. `None`,
+/// wenn sie in der Laufzeit nicht endete.
+fn ending_text(summary: &RunSummary) -> Option<String> {
+    let outcome = summary.outcome?;
+    let survivor = outcome
+        .survivor
+        .and_then(|survivor| summary.polities.get(survivor.index()))
+        .map_or_else(
+            || "ohne Überlebende".to_string(),
+            |polity| format!("es bleibt {}", polity.name),
+        );
+    Some(format!(
+        "{} im Jahr {}, {survivor}; beigetreten {:.0} Mio., genommen {:.0} Mio.",
+        outcome.ending.label(),
+        outcome.year(),
+        outcome.joined,
+        outcome.forced
+    ))
 }

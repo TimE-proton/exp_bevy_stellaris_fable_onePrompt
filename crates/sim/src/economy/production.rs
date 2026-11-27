@@ -199,7 +199,7 @@ pub fn produce_and_consume(galaxy: &mut Galaxy, economy: &mut Economy, data: &Ga
                         .find(|deposit| deposit.good == good)
                 {
                     let used = quantity * balance.depletion / deposit.richness.max(0.05) as f64;
-                    deposit.reserve = (deposit.reserve - used as f32).max(0.02);
+                    deposit.reserve = (deposit.reserve - used as f32).max(balance.reserve_floor);
                 }
             }
 

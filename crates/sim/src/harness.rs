@@ -5,15 +5,17 @@ use crate::clock::{DAYS_PER_MONTH, SimClock, TICKS_PER_DAY};
 use crate::command::{CommandLog, CommandQueue, CommandSource, ReplayScript, SimCommand};
 use crate::data::GameData;
 use crate::economy::Economy;
+use crate::endgame::{Endgame, Outcome};
 use crate::fleet::{Fleets, Stance, yard_slots};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, PlanetId, PolityId};
-use crate::polity::Polities;
+use crate::polity::{Polities, Succession, SuccessionParams};
 use crate::state::{SaveGame, SimConfig, SimState, hash_world, new_game};
 use crate::tech::Research;
 use crate::{SimPlugins, needs_fine_ticks, sim_schedule};
 use bevy_app::App;
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemState;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Eine Partie ohne Fenster. Ruft das Simulations-Schedule direkt auf, ohne Wanduhr.
@@ -82,8 +84,12 @@ impl Headless {
         self.world().resource::<CommandLog>()
     }
 
-    /// Stellt einen Befehl ein, als käme er vom Spieler.
+    /// Stellt einen Befehl ein, als käme er vom Spieler. Nach dem Ende der Partie nimmt
+    /// sie keine Befehle mehr an: Der Zustand steht still.
     pub fn issue(&mut self, polity: PolityId, command: SimCommand) {
+        if self.outcome().is_some() {
+            return;
+        }
         self.world_mut().resource_mut::<CommandQueue>().push(
             polity,
             CommandSource::Player,
@@ -119,13 +125,21 @@ impl Headless {
         self.app.world_mut().run_schedule(sim_schedule());
     }
 
-    /// Läuft `days` Tage weiter und überspringt Takte, in denen nichts geschieht.
+    /// Läuft `days` Tage weiter und überspringt Takte, in denen nichts geschieht. Ist die
+    /// Partie zu Ende, kehrt der Lauf sofort zurück: Uhr und Zustand stehen still.
     pub fn run_days(&mut self, days: u64) {
         let target = self.clock().tick + days * TICKS_PER_DAY;
         while self.clock().tick < target {
+            if self.outcome().is_some() {
+                return;
+            }
             self.tick();
             let tick = self.clock().tick;
-            if tick.is_multiple_of(TICKS_PER_DAY) || needs_fine_ticks(self.world()) {
+            // Nach dem Ende wird auch nicht mehr zum nächsten Tag gesprungen.
+            if tick.is_multiple_of(TICKS_PER_DAY)
+                || needs_fine_ticks(self.world())
+                || self.outcome().is_some()
+            {
                 continue;
             }
             let mut jump = (tick / TICKS_PER_DAY + 1) * TICKS_PER_DAY;
@@ -140,9 +154,13 @@ impl Headless {
         }
     }
 
-    /// Läuft `days` Tage weiter und rechnet jeden Takt, wie es das Spiel tut.
+    /// Läuft `days` Tage weiter und rechnet jeden Takt, wie es das Spiel tut. Ist die
+    /// Partie zu Ende, kehrt der Lauf sofort zurück.
     pub fn run_days_exact(&mut self, days: u64) {
         for _ in 0..days * TICKS_PER_DAY {
+            if self.outcome().is_some() {
+                return;
+            }
             self.tick();
         }
     }
@@ -326,6 +344,7 @@ pub fn economy_stats(world: &World) -> EconomyStats {
 
 /// Harte Invarianten. Ein Verstoß ist ein Programmfehler, kein Balanceproblem.
 pub fn check_invariants(world: &World) -> Result<(), String> {
+    crate::polity::succession::check(world)?;
     let stats = economy_stats(world);
     if stats.money_drift != 0 {
         return Err(format!(
@@ -395,6 +414,8 @@ pub struct RunSummary {
     /// Befehle der KI, die angenommen und die abgelehnt wurden.
     pub ai_applied: u64,
     pub ai_rejected: u64,
+    /// Ausgang der Partie, wenn sie in der Laufzeit geendet hat: Ende, Überlebende, Tag.
+    pub outcome: Option<Outcome>,
 }
 
 impl RunSummary {
@@ -535,6 +556,7 @@ pub fn summarize(sim: &Headless) -> RunSummary {
         battle_outcomes: battles.outcomes,
         ai_applied: sim.command_log().ai_applied,
         ai_rejected: sim.command_log().ai_rejected,
+        outcome: sim.outcome(),
     }
 }
 
@@ -1042,6 +1064,24 @@ pub fn sweep_scripted(
     let mut results = results.into_inner().expect("Sweep-Thread abgestürzt");
     results.sort_by_key(|(index, _)| *index);
     results.into_iter().map(|(_, summary)| summary).collect()
+}
+
+impl Headless {
+    /// Ausgang der Partie; `None`, solange sie läuft.
+    pub fn outcome(&self) -> Option<Outcome> {
+        self.world()
+            .get_resource::<Endgame>()
+            .and_then(|endgame| endgame.outcome)
+    }
+
+    /// Besitzwechsel, Gründung und Ende einer Gemeinschaft direkt auf der Welt, für Tests
+    /// und Werkzeuge: `sim.succession(|s| s.absorb(from, into, Path::Joined, tick))`.
+    pub fn succession<R>(&mut self, run: impl FnOnce(&mut Succession) -> R) -> R {
+        let world = self.world_mut();
+        let mut state = SystemState::<SuccessionParams>::new(world);
+        let mut params = state.get_mut(world).expect("Partie läuft");
+        run(&mut params.borrow())
+    }
 }
 
 #[cfg(test)]

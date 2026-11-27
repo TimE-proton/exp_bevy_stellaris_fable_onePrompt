@@ -1,5 +1,9 @@
 //! Galaktische Gemeinschaften und ihr Besitz an Planeten.
 
+pub mod succession;
+
+pub use succession::{Absorbed, Founding, Succession, SuccessionParams, Transfer, TransferTerms};
+
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::data::{ColonizationBalance, GameData, Rgb};
 use crate::economy::{Economy, Money, seed_colony, to_money};
