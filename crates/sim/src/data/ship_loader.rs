@@ -645,6 +645,73 @@ pub(super) fn resolve_ships(data: &mut GameData) -> Result<(), DataError> {
             "response_jumps muss mindestens 1 sein",
             ai.response_jumps >= 1,
         ),
+        (
+            "siege: odds, storm_ratio, occupation_margin und capital_bonus müssen positiv sein, occupation_margin und capital_bonus mindestens 1",
+            ai.siege.odds > 0.0
+                && ai.siege.odds.is_finite()
+                && ai.siege.storm_ratio > 0.0
+                && ai.siege.storm_ratio.is_finite()
+                && ai.siege.occupation_margin >= 1.0
+                && ai.siege.occupation_margin.is_finite()
+                && ai.siege.capital_bonus >= 1.0
+                && ai.siege.capital_bonus.is_finite(),
+        ),
+        (
+            "siege: reach muss über 0 und unter 0,5 liegen, sail_fuel über dem Doppelten von reach und höchstens 1",
+            ai.siege.reach > 0.0
+                && ai.siege.reach < 0.5
+                && ai.siege.sail_fuel > 2.0 * ai.siege.reach
+                && ai.siege.sail_fuel <= 1.0,
+        ),
+        (
+            "siege: hull_limit, stick, area_stake_max, expedition_share, garrison_keep, defense_share, capitulate_resolve, capitulate_garrison und capitulate_capital_resolve müssen in 0..1 liegen",
+            [
+                ai.siege.hull_limit,
+                ai.siege.stick,
+                ai.siege.area_stake_max,
+                ai.siege.expedition_share,
+                ai.siege.garrison_keep,
+                ai.siege.defense_share,
+                ai.siege.capitulate_resolve,
+                ai.siege.capitulate_garrison,
+                ai.siege.capitulate_capital_resolve,
+            ]
+            .iter()
+            .all(|value| unit.contains(value)),
+        ),
+        (
+            "siege: day_cost, loss_weight, prize_weight, hull_weight, station_days, sack_below_months, hold_fire_days, deep_ratio, relief_odds und capitulate_ratio dürfen nicht negativ sein, haste mindestens 1",
+            [
+                ai.siege.day_cost,
+                ai.siege.loss_weight,
+                ai.siege.prize_weight,
+                ai.siege.hull_weight,
+                ai.siege.station_days,
+                ai.siege.sack_below_months,
+                ai.siege.hold_fire_days,
+                ai.siege.deep_ratio,
+                ai.siege.relief_odds,
+                ai.siege.capitulate_ratio,
+            ]
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+                && ai.siege.haste >= 1.0
+                && ai.siege.haste.is_finite(),
+        ),
+        (
+            "siege: defense_jumps muss mindestens 1 sein, defense_peace in 0..1 liegen",
+            ai.siege.defense_jumps >= 1 && unit.contains(&ai.siege.defense_peace),
+        ),
+        (
+            "siege: Reguläre der Ausbauziele dürfen nicht negativ sein",
+            [
+                ai.siege.defense_capital,
+                ai.siege.defense_exposed,
+                ai.siege.defense_interior,
+            ]
+            .iter()
+            .all(|row| row.regulars.is_finite() && row.regulars >= 0.0),
+        ),
     ];
     for (message, ok) in ai_checks {
         if !ok {

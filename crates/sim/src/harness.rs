@@ -421,6 +421,14 @@ pub struct RunSummary {
     /// (`SiegeStats::fallen`) und Gemeinschaften, die mit ihrer letzten Welt endeten
     /// (`SiegeStats::ended`).
     pub sieges: crate::siege::SiegeStats,
+    /// Besiedelte Welten am Ende der Partie, die nicht Hauptwelt sind, und wie viele
+    /// davon ohne Vorräte dastehen (Depot unter einem Tag): Ihre Miliz löste sich vom
+    /// ersten Tag einer Einschließung an auf.
+    pub colonies: u32,
+    pub colonies_without_stores: u32,
+    /// Flotten, die am Ende mit fast leerem Tank (unter 5 %) außerhalb jedes Systems
+    /// liegen, in dem ihre Gemeinschaft eine Welt hält.
+    pub fleets_dry_abroad: u32,
 }
 
 impl RunSummary {
@@ -477,6 +485,8 @@ pub struct PolitySummary {
     /// Angriffe der KI-Führung (Jagd auf die gegnerische Hauptflotte oder Blockade).
     pub blockade_days: u32,
     pub offensives: u32,
+    /// Feldzüge gegen Welten, die die KI der Gemeinschaft begonnen hat.
+    pub campaigns: u32,
     /// Entschiedene Gefechte, in denen die Gemeinschaft am Ende das Feld hielt.
     pub battles_won: u32,
 }
@@ -499,8 +509,34 @@ pub fn summarize(sim: &Headless) -> RunSummary {
         }
         weighted / f64::max(weight, 1e-9)
     };
+    let sieges = sim.world().resource::<crate::siege::Sieges>();
+    let capitals: BTreeSet<PlanetId> = sim
+        .polities()
+        .alive()
+        .filter_map(|polity| polity.capital)
+        .collect();
+    let colonies: Vec<PlanetId> = galaxy
+        .planets
+        .iter()
+        .filter(|planet| planet.owner.is_some() && !capitals.contains(&planet.id))
+        .map(|planet| planet.id)
+        .collect();
     RunSummary {
-        sieges: sim.world().resource::<crate::siege::Sieges>().stats.clone(),
+        colonies: colonies.len() as u32,
+        colonies_without_stores: colonies
+            .iter()
+            .filter(|planet| sieges.defense(**planet).depot < 1.0)
+            .count() as u32,
+        fleets_dry_abroad: fleets
+            .list
+            .iter()
+            .filter(|fleet| {
+                fleet.alive
+                    && fleet.min_fuel() < 0.05
+                    && !galaxy.owns_planet_in(fleet.owner, fleet.system)
+            })
+            .count() as u32,
+        sieges: sieges.stats.clone(),
         seed: config.seed,
         days: sim.clock().day(),
         hash: sim.hash(),
@@ -552,6 +588,7 @@ pub fn summarize(sim: &Headless) -> RunSummary {
                     .fold(0.0, |sum, fleet| sum + fleet.build_value(data)),
                 blockade_days: fleets.tally_of(polity.id).blockade_days,
                 offensives: ai.plan(polity.id).offensives,
+                campaigns: ai.plan(polity.id).campaigns,
                 battles_won: battles.won_by(polity.id),
             })
             .collect(),
@@ -602,7 +639,8 @@ pub enum ScriptedAct {
     /// Grenzkrieg: A erklärt seinem nächsten Nachbarn den Krieg ([`nearest_neighbour`]).
     /// Wer das ist, entscheidet sich an dem Tag in der Partie.
     BorderWar { a: PolityId },
-    /// A schließt Frieden mit allen, mit denen es im Krieg liegt.
+    /// A schließt Frieden mit allen, mit denen es im Krieg liegt. Belagert ein Gegner
+    /// eine Welt von A, kann nur er den Frieden anbieten: Dann schließt er ihn.
     PeaceWithAll { a: PolityId },
     /// Legt fest, wie weit die KI eine Gemeinschaft militärisch führt (ohne `who` alle):
     /// siehe [`Headless::set_military_mode`].
@@ -741,6 +779,11 @@ impl WarScript {
                         .plan
                         .clone();
                     plan.regulars = *regulars;
+                    // Diesen Plan lässt die KI der Gemeinschaft fortan stehen.
+                    sim.world_mut()
+                        .resource_mut::<AiState>()
+                        .defense_hold
+                        .insert(planet);
                     sim.issue(*who, SimCommand::SetDefensePlan { planet, plan });
                 }
             }
@@ -758,7 +801,21 @@ impl WarScript {
                     .enemies_of(*a)
                     .collect();
                 for target in enemies {
-                    sim.issue(*a, SimCommand::MakePeace { target });
+                    // Frieden kann nur der Belagerer anbieten: Belagert der Gegner eine
+                    // Welt von A, schließt er ihn.
+                    let besieged = crate::siege::peace_veto(
+                        sim.galaxy(),
+                        sim.polities(),
+                        sim.sieges(),
+                        *a,
+                        target,
+                    )
+                    .is_err();
+                    if besieged {
+                        sim.issue(target, SimCommand::MakePeace { target: *a });
+                    } else {
+                        sim.issue(*a, SimCommand::MakePeace { target });
+                    }
                 }
             }
             ScriptedAct::Mode { who, mode } => sim.set_military_mode(*who, *mode),
@@ -888,10 +945,13 @@ impl WarScript {
     ///
     /// - Ziel ist die Welt des Gegners, die dem eigenen Sitz am nächsten liegt und nicht
     ///   sein Sitz ist, solange `a` ihm noch keine Welt genommen hat; danach sein Sitz.
-    /// - Jede Flotte schifft zu Hause ein, was an Regulären bereitsteht und an Bord
-    ///   passt, fährt mit vollen Tanks im Blockadeauftrag zum Ziel und belagert es. Mit
+    /// - Zu Hause vereinigen sich die Flotten mit der größten dort; kein Neubau läuft
+    ///   einzeln aus. Jede Flotte schifft zu Hause ein, was an Regulären bereitsteht und
+    ///   an Bord passt, fährt mit vollen Tanks im Blockadeauftrag zum Ziel und belagert es. Mit
     ///   fast leeren Tanks kehrt sie heim und kommt wieder; ebenso, wenn die Welt reif
     ///   zur Übernahme ist, aber weder am Boden noch an Bord eine Truppe steht.
+    /// - Eine Belagerung, die älter ist als `siege.max_siege_days`, hebt das Drehbuch auf
+    ///   und setzt neu an.
     /// - In den ersten zehn Tagen einer Belagerung wird gezielt gefeuert, danach
     ///   geschwiegen. Gelandet und gestürmt wird, sobald die Truppen an Bord der
     ///   Garnison an der Oberfläche anderthalbfach überlegen sind; sonst wartet die
@@ -957,6 +1017,32 @@ impl WarScript {
                 })
                 && troops_aboard <= 0.0
                 && home_left >= 1.0;
+            // Die größte Flotte, die einsatzbereit und ohne Marschbefehl zu Hause liegt.
+            let flagship = fleets
+                .of(a)
+                .filter(|fleet| {
+                    fleet.is_ready() && fleet.route.is_empty() && fleet.system == home_system
+                })
+                .max_by(|x, y| {
+                    x.build_value(data)
+                        .total_cmp(&y.build_value(data))
+                        .then(y.id.cmp(&x.id))
+                })
+                .map(|fleet| fleet.id);
+            // Zum Ziel fährt nur, wer wenigstens den halben Bauwert einer Startflotte
+            // hat, oder die größte Flotte der Gemeinschaft.
+            let largest = fleets
+                .of(a)
+                .max_by(|x, y| {
+                    x.build_value(data)
+                        .total_cmp(&y.build_value(data))
+                        .then(y.id.cmp(&x.id))
+                })
+                .map(|fleet| fleet.id);
+            let strong = |fleet: &crate::fleet::Fleet| {
+                Some(fleet.id) == largest
+                    || fleet.build_value(data) >= 0.5 * data.balance.military.starting_fleet_value
+            };
             for fleet in fleets.of(a) {
                 if !fleet.is_docked() || fleet.in_battle || fleet.is_regrouping() {
                     continue;
@@ -971,7 +1057,7 @@ impl WarScript {
                 let dry = fleet.min_fuel() < 0.1;
                 let at_home = fleet.system == home_system;
                 if fleet.system == world_of.system && !dry && !at_home {
-                    if ripe && berths(fleet) >= 1.0 {
+                    if (ripe && berths(fleet) >= 1.0) || (!assigned && !strong(fleet)) {
                         commands.push(SimCommand::MoveFleet {
                             fleet: fleet.id,
                             to: home_system,
@@ -985,6 +1071,18 @@ impl WarScript {
                     continue;
                 }
                 if at_home {
+                    // Einzeln läuft kein neues Schiff aus: Was zu Hause ohne Marschbefehl
+                    // liegt, stößt erst zur größten Flotte dort. Sonst gingen Neubauten
+                    // Stück für Stück an der Verteidigung des Ziels verloren.
+                    if let Some(flagship) = flagship.filter(|flagship| *flagship != fleet.id)
+                        && fleet.route.is_empty()
+                    {
+                        commands.push(SimCommand::MergeFleets {
+                            from: fleet.id,
+                            into: flagship,
+                        });
+                        continue;
+                    }
                     // Einschiffen, was da ist und an Bord passt; mit vollen Tanks los.
                     let strength = (berths(fleet) - aboard).min(home_left).floor();
                     if strength >= 1.0 {
@@ -1004,7 +1102,7 @@ impl WarScript {
                                 planet: target,
                             });
                         }
-                    } else if fleet.min_fuel() >= 0.9 {
+                    } else if fleet.min_fuel() >= 0.9 && strong(fleet) {
                         commands.push(SimCommand::SetStance {
                             fleet: fleet.id,
                             stance: Stance::Blockade,
@@ -1018,7 +1116,7 @@ impl WarScript {
                 }
                 // Unterwegs: Wer leer fährt, während zu Hause Truppen warten, holt sie erst.
                 let fetch = aboard <= 0.0 && home_left >= 1.0 && berths(fleet) >= 1.0;
-                let to = if dry || fetch {
+                let to = if dry || fetch || !strong(fleet) {
                     home_system
                 } else {
                     world_of.system
@@ -1032,6 +1130,11 @@ impl WarScript {
             if let Some(siege) = sieges.siege(target).filter(|siege| siege.attacker == a) {
                 let defense = sieges.defense(target);
                 let age = sim.clock().day().saturating_sub(siege.started_day);
+                // Nach der Frist, in der jede Einschließung endet, ist diese gescheitert:
+                // aufheben und neu ansetzen, statt eine Truppe über Jahre am Boden zu lassen.
+                if age > balance.max_siege_days as u64 {
+                    commands.push(SimCommand::LiftSiege { planet: target });
+                }
                 let fire = if age < 10 { Fire::Precise } else { Fire::Hold };
                 let orders = SiegeOrders {
                     fire,
@@ -1274,6 +1377,31 @@ pub fn conquest_war() -> Vec<ScriptedEvent> {
             act: ScriptedAct::PeaceWithAll { a },
         },
     ]
+}
+
+/// Das Drehbuch „Feldzug“ für Sweeps: Das Drehbuch erklärt nur die Kriege und schließt
+/// die Frieden; Flotten, Belagerungen und Verteidigung führt auf allen Seiten die KI. Die
+/// ersten vier Gemeinschaften erklären nacheinander (zu Beginn der Jahre 20, 25, 30 und
+/// 35) ihrem dann nächsten Nachbarn den Krieg und schließen je 15 Jahre später Frieden
+/// mit allen, mit denen sie dann im Krieg liegen.
+pub fn campaign_wars() -> Vec<ScriptedEvent> {
+    let year = crate::clock::DAYS_PER_YEAR;
+    (0..4u64)
+        .flat_map(|index| {
+            let a = PolityId(index as u32);
+            let start = (20 + 5 * index) * year;
+            [
+                ScriptedEvent {
+                    day: start,
+                    act: ScriptedAct::BorderWar { a },
+                },
+                ScriptedEvent {
+                    day: start + 15 * year,
+                    act: ScriptedAct::PeaceWithAll { a },
+                },
+            ]
+        })
+        .collect()
 }
 
 /// Wie [`run_ai_game`], prüft aber jährlich die Invarianten und meldet den ersten Verstoß.

@@ -119,8 +119,13 @@ fn class_of(data: &GameData, ship: &Ship) -> ShipClass {
     data.designs[ship.design as usize].stats.class
 }
 
+/// Feuerkraft einer Flotte gegen Stationen und Boden, wie die Belagerung sie rechnet.
+pub fn fleet_firepower(data: &GameData, fleet: &Fleet) -> f64 {
+    fleet.ships.iter().map(|ship| firepower(data, ship)).sum()
+}
+
 /// Verbände, die eine Flotte tragen kann: Plätze je Rumpfsegment ihrer Schiffe.
-fn berths_of(data: &GameData, fleet: &Fleet) -> f64 {
+pub fn berths_of(data: &GameData, fleet: &Fleet) -> f64 {
     if !fleet.alive {
         return 0.0;
     }
@@ -705,7 +710,7 @@ pub(super) fn check(world: &World) -> Result<(), String> {
 /// Tests an Flotten stellen und lesen, läuft über diese Hilfen: Auch dort kennt nur diese
 /// Datei die Flottenebene.
 #[cfg(test)]
-pub(super) mod testing {
+pub(crate) mod testing {
     use super::*;
     use crate::clock::TICKS_PER_DAY;
     use crate::fleet::{Stance, update_blockades};

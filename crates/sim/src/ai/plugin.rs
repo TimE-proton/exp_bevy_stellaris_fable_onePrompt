@@ -1,4 +1,5 @@
 use super::military::{Situation, lead_fleets, plan_month};
+use super::siege::{lead_sieges, plan_defenses};
 use super::{AiState, MilitaryMode, best_colony_target};
 use crate::clock::{SimClock, day_start, month_start};
 use crate::command::{CommandQueue, CommandSource, SimCommand};
@@ -9,7 +10,9 @@ use crate::finance::{Finance, Stage};
 use crate::fleet::{Battles, Fleets, fleet_claim};
 use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId};
+use crate::logistics::Logistics;
 use crate::polity::{Polities, claimable_planets};
+use crate::siege::Sieges;
 use crate::state::SimConfig;
 use crate::tech::Research;
 use crate::{SimSet, sim_schedule};
@@ -27,6 +30,8 @@ impl Plugin for AiPlugin {
                 expand.run_if(day_start),
                 steward_finances.run_if(month_start),
                 plan_military.run_if(month_start),
+                plan_defense.run_if(month_start),
+                lead_siege.run_if(day_start),
                 lead_military.run_if(day_start),
             )
                 .chain()
@@ -46,11 +51,14 @@ struct MilitaryView<'w> {
     battles: Res<'w, Battles>,
     diplomacy: Res<'w, Diplomacy>,
     research: Res<'w, Research>,
+    finance: Res<'w, Finance>,
+    logistics: Res<'w, Logistics>,
+    sieges: Res<'w, Sieges>,
     clock: Res<'w, SimClock>,
 }
 
 impl MilitaryView<'_> {
-    fn situation(&self) -> Situation<'_> {
+    fn situation(&self, seed: u64) -> Situation<'_> {
         Situation {
             data: &self.data,
             galaxy: &self.galaxy,
@@ -60,6 +68,10 @@ impl MilitaryView<'_> {
             battles: &self.battles,
             diplomacy: &self.diplomacy,
             research: &self.research,
+            finance: &self.finance,
+            logistics: &self.logistics,
+            sieges: &self.sieges,
+            seed,
             day: self.clock.day(),
         }
     }
@@ -72,7 +84,43 @@ fn plan_military(
     mut ai: ResMut<AiState>,
     mut queue: ResMut<CommandQueue>,
 ) {
-    plan_month(&view.situation(), &mut ai, &mut queue, config.player);
+    plan_month(
+        &view.situation(config.seed),
+        &mut ai,
+        &mut queue,
+        config.player,
+    );
+}
+
+/// Monatsbeginn, nach der Rüstung: Verteidigungspläne der Welten ([`plan_defenses`]).
+fn plan_defense(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    mut ai: ResMut<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    plan_defenses(
+        &view.situation(config.seed),
+        &mut ai,
+        &mut queue,
+        config.player,
+    );
+}
+
+/// Tagesbeginn, vor der Führung der Flotten: Feldzüge gegen Welten und die Befehle
+/// belagerter eigener Welten ([`lead_sieges`]).
+fn lead_siege(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    mut ai: ResMut<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    lead_sieges(
+        &view.situation(config.seed),
+        &mut ai,
+        &mut queue,
+        config.player,
+    );
 }
 
 /// Tagesbeginn: Führung der Flotten ([`lead_fleets`]).
@@ -82,7 +130,12 @@ fn lead_military(
     mut ai: ResMut<AiState>,
     mut queue: ResMut<CommandQueue>,
 ) {
-    lead_fleets(&view.situation(), &mut ai, &mut queue, config.player);
+    lead_fleets(
+        &view.situation(config.seed),
+        &mut ai,
+        &mut queue,
+        config.player,
+    );
 }
 
 /// Jede KI-Gemeinschaft, in ID-Reihenfolge, gründet eine Kolonie, sobald sie darf.

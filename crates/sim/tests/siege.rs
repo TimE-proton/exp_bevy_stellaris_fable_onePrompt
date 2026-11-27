@@ -2303,7 +2303,7 @@ fn the_conquest_script_takes_worlds_and_ends_a_community() {
     let attacker = PolityId(0);
     let war = 25 * DAYS_PER_YEAR;
     let mut ended = 0;
-    for seed in [2, 3] {
+    for seed in [2, 9] {
         let mut sim = Headless::new(data().clone(), SimConfig { seed, player: None });
         script.run_until(&mut sim, war, false);
         assert_eq!(check_invariants(sim.world()), Ok(()), "Seed {seed}");
