@@ -626,7 +626,9 @@ fn sync_layout(
     scene.built = Some(layout);
 }
 
-/// Anteil der Ladung des Schilds an seiner vollen Ladung.
+/// Anteil der Ladung des Schilds an seiner vollen Ladung (Stufe mal `shield_cap` der
+/// Spieldaten). Nur für die Anzeige in Prozent und die Stärke der Schale; ob der Schild
+/// hält, sagt die Ladung der Karte selbst.
 pub fn shield_share(data: &GameData, watched: &WatchedSiege) -> f32 {
     let defense = &watched.card.defense;
     let full = defense.shield as f64 * data.balance.siege.shield_cap;

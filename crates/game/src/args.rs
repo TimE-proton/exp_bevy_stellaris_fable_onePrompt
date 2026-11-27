@@ -23,7 +23,10 @@ Aufruf: game [Optionen]
   --screenshot DATEI  Im Selbsttest Bildschirmfotos speichern; die Gefechtsübung
                       nummeriert sie (DATEI_1.png, DATEI_2.png, …). Zeigt ein geladener
                       Spielstand eine Belagerung, sieht der Selbsttest (ab 200 Frames) sie
-                      sich in der Orbitansicht an und speichert davon DATEI_2.png
+                      sich in der Orbitansicht an und speichert davon DATEI_2.png.
+                      Ab 60 Frames zeigt DATEI_3.png das Fenster „Belagerung“ (in einer
+                      frischen Partie leer: keine Belagerung), das Schlussfoto DATEI die
+                      Staatsfinanzen und die Verteidigung der eigenen Hauptwelt
   --help              Diese Hilfe";
 
 #[derive(Resource, Clone, Debug, Default, PartialEq)]

@@ -13,7 +13,9 @@ use crate::ui::UiState;
 use crate::ui::format::percent;
 use crate::ui::panels::{self, ACCENT, MUTED, TimeClick, color32, detail as small, split_bar};
 use crate::ui::siege::detail::defense_text;
-use crate::ui::siege::{RESTING, days_text, forecast_text, phase_text, state_text, units};
+use crate::ui::siege::{
+    RESTING, days_text, forecast_text, phase_text, progress_of, resting_forecast, state_text, units,
+};
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use bevy_egui::egui::{self, Align2, Color32, RichText};
@@ -25,6 +27,8 @@ pub const HEADING_EVENTS: &str = "Meldungen";
 pub const RESULT_TITLE: &str = "Ausgang der Belagerung";
 pub const KEEP_WATCHING: &str = "Szene weiter ansehen";
 pub const OVERVIEW: &str = "Übersicht";
+/// Über den Zahlen, sobald die Belagerung zu Ende ist: Sie zeigen den letzten Stand.
+pub const LAST_STATE: &str = "Stand am Ende der Belagerung";
 
 const BAD: Color32 = Color32::from_rgb(235, 110, 95);
 const WARN: Color32 = Color32::from_rgb(240, 190, 80);
@@ -176,7 +180,7 @@ fn top_bar(
             .button(TO_WINDOW)
             .on_hover_text(
                 "Zurück zur Karte, mit dem Fenster „Belagerung“ bei dieser Welt: Dort stehen \
-                 die Befehle.",
+                 alle Zahlen, die Prognose mit ihren Kosten und die Befehle.",
             )
             .clicked()
         {
@@ -223,6 +227,9 @@ fn side_panel(ui: &mut egui::Ui, world: &SiegeWorld, watched: &WatchedSiege) {
             });
             ui.separator();
             ui.label(RichText::new(HEADING_NUMBERS).strong());
+            if watched.ended() {
+                ui.label(small(LAST_STATE).color(MUTED));
+            }
             egui::Grid::new("orbit_lage").num_columns(2).show(ui, |ui| {
                 let mut row = |label: &str, value: String| {
                     ui.label(RichText::new(label).color(MUTED));
@@ -230,7 +237,14 @@ fn side_panel(ui: &mut egui::Ui, world: &SiegeWorld, watched: &WatchedSiege) {
                     ui.end_row();
                 };
                 row("Dauer", days_text(card.days as f64));
-                row("Fortschritt", percent(card.progress as f32));
+                row("Fortschritt", {
+                    let progress = progress_of(card);
+                    if card.phase == Phase::Underground {
+                        progress.text
+                    } else {
+                        percent(progress.share)
+                    }
+                });
                 row("Vorräte der Garnison", days_text(card.stores_days));
                 row(
                     "Verteidiger",
@@ -255,12 +269,17 @@ fn side_panel(ui: &mut egui::Ui, world: &SiegeWorld, watched: &WatchedSiege) {
                 );
                 row(
                     "Flotte",
-                    format!(
-                        "{} · Munition {} · Treibstoff {}",
-                        fleet_text(watched),
-                        percent(card.ammo as f32),
-                        percent(card.fuel as f32)
-                    ),
+                    if watched.ships == 0 {
+                        // Ohne Schiffe im Orbit gibt es keine Füllstände zu nennen.
+                        fleet_text(watched)
+                    } else {
+                        format!(
+                            "{} · Munition {} · Treibstoff {}",
+                            fleet_text(watched),
+                            percent(card.ammo as f32),
+                            percent(card.fuel as f32)
+                        )
+                    },
                 );
                 row(
                     "Schild",
@@ -276,18 +295,25 @@ fn side_panel(ui: &mut egui::Ui, world: &SiegeWorld, watched: &WatchedSiege) {
                 );
             });
             ui.label(small(defense_text(card)));
-            if let Some(report) = day_report(card) {
-                ui.label(small(report));
-            }
-            ui.separator();
-            ui.label(RichText::new(crate::ui::siege::FORECAST).strong());
-            for (course, forecast) in &card.forecasts {
-                let color = if forecast.falls {
-                    Color32::from_rgb(120, 200, 140)
+            // Nach dem Ende gilt weder der Bericht des letzten Tages noch eine Prognose.
+            if !watched.ended() {
+                if let Some(report) = day_report(card) {
+                    ui.label(small(report));
+                }
+                ui.separator();
+                ui.label(RichText::new(crate::ui::siege::FORECAST).strong());
+                if let Some(resting) = resting_forecast(card) {
+                    ui.label(small(resting).color(WARN));
                 } else {
-                    MUTED
-                };
-                ui.label(small(forecast_text(*course, forecast)).color(color));
+                    for (course, forecast) in &card.forecasts {
+                        let color = if forecast.falls {
+                            Color32::from_rgb(120, 200, 140)
+                        } else {
+                            MUTED
+                        };
+                        ui.label(small(forecast_text(*course, forecast)).color(color));
+                    }
+                }
             }
             ui.separator();
             ui.label(RichText::new(HEADING_EVENTS).strong());
@@ -312,7 +338,8 @@ fn side_panel(ui: &mut egui::Ui, world: &SiegeWorld, watched: &WatchedSiege) {
             ui.label(small(
                 "Kamera wie in der Schlachtansicht: W A S D fliegen, E / Q steigen und sinken, \
                  rechte Maustaste halten zum Umsehen, Mausrad für das Tempo, U für die \
-                 Übersicht. Befehle gibt das Fenster „Belagerung“.",
+                 Übersicht. Die Befehle der eigenen Seite stehen im Fenster „Befehle“ unten \
+                 rechts; alles Weitere zeigt das Fenster „Belagerung“ auf der Karte.",
             ));
         });
 }

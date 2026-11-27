@@ -16,7 +16,7 @@ pub use panels::{SimRefs, UiAction};
 
 use crate::battle_view::BattleViewShown;
 use crate::battle_view::campaign::{BattleMarkers, WatchBattle};
-use crate::battle_view::orbit::WatchSiege;
+use crate::battle_view::orbit::{WatchSiege, WatchedSiege};
 use crate::battle_view::practice::{PracticeSetup, StartPractice};
 use crate::endings::{self, Endings};
 use crate::history::PriceHistory;
@@ -210,6 +210,8 @@ pub struct PracticeParams<'w> {
     siege_markers: Res<'w, SiegeMarkers>,
     endings: ResMut<'w, Endings>,
     endgame: Option<Res<'w, Endgame>>,
+    /// Die Belagerung, die die Orbitansicht gerade zeigt.
+    watched_siege: Option<Res<'w, WatchedSiege>>,
 }
 
 pub struct UiPlugin;
@@ -283,36 +285,64 @@ fn draw_ui(
         .endgame
         .as_ref()
         .map_or(PlayerFate::Active, |endgame| endgame.player);
-    match (app_state.get(), &sim) {
+    let refs = sim.as_ref().map(|sim| SimRefs {
+        data: &data,
+        galaxy: &sim.galaxy,
+        polities: &sim.polities,
+        clock: &sim.clock,
+        config: &sim.config,
+        chronicle: &sim.chronicle,
+        economy: &sim.economy,
+        finance: &sim.finance,
+        logistics: &sim.logistics,
+        fleets: &sim.fleets,
+        battles: &sim.battles,
+        research: &sim.research,
+        diplomacy: &sim.diplomacy,
+        sieges: &sim.sieges,
+        history: &history,
+        pending: queue.as_deref().map_or(&[], |queue| &queue.pending),
+    });
+    ui_state.siege.in_orbit = false;
+    match (app_state.get(), &refs) {
         (AppState::InGame, _) if practice.battle_view.0 => {
             // In der Schlachtansicht und der Orbitansicht zeichnen diese ihre eigenen
-            // Tafeln; von der Partie bleiben das Menü und die Meldung vom Ende einer
-            // Gemeinschaft.
+            // Tafeln; von der Partie bleiben das Menü, die Meldung vom Ende einer
+            // Gemeinschaft und, über einer Belagerung, die Befehle der eigenen Seite.
             panels::battle_menu(&mut root, &mut ui_state, &mut actions);
+            if let (Some(refs), Some(watched)) = (&refs, &practice.watched_siege)
+                && !watched.ended()
+            {
+                let siege = &mut ui_state.siege;
+                siege.in_orbit = true;
+                siege.cache.refresh(refs);
+                let card = siege
+                    .cache
+                    .cards()
+                    .iter()
+                    .find(|card| card.planet == watched.planet)
+                    .cloned();
+                if let Some(card) = card {
+                    siege::detail::orders_window(
+                        root.ctx(),
+                        root.ctx().content_rect(),
+                        refs,
+                        &card,
+                        siege,
+                        &mut actions,
+                    );
+                }
+            }
             endings::window(root.ctx(), &mut practice.endings);
         }
-        (AppState::InGame | AppState::GameOver, Some(sim)) => {
-            let refs = SimRefs {
-                data: &data,
-                galaxy: &sim.galaxy,
-                polities: &sim.polities,
-                clock: &sim.clock,
-                config: &sim.config,
-                chronicle: &sim.chronicle,
-                economy: &sim.economy,
-                finance: &sim.finance,
-                logistics: &sim.logistics,
-                fleets: &sim.fleets,
-                battles: &sim.battles,
-                research: &sim.research,
-                diplomacy: &sim.diplomacy,
-                sieges: &sim.sieges,
-                history: &history,
-                pending: queue.as_deref().map_or(&[], |queue| &queue.pending),
-            };
+        (AppState::InGame | AppState::GameOver, Some(refs)) => {
+            if let Some(text) = ui_state.siege.follow_embark(refs) {
+                // Weniger Nachschub an Bord als verlangt: Das soll nicht ungelesen bleiben.
+                notice.error(text);
+            }
             panels::in_game(
                 &mut root,
-                &refs,
+                refs,
                 &mut ui_state,
                 &speed,
                 &selection,

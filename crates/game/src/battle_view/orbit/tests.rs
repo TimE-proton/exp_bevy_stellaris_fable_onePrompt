@@ -11,6 +11,7 @@ use super::*;
 use crate::testing::{TestGame, conquest};
 use crate::time_control::SPEEDS;
 use crate::ui::siege as window;
+use crate::ui::siege::detail::{ASSAULT, ORDERS_WINDOW};
 use sim::ids::PolityId;
 use sim::siege::siege_cards;
 
@@ -162,6 +163,26 @@ fn the_scene_only_fires_where_the_core_reports_fire() {
     siege.card.control = false;
     assert_eq!(show_rates(&siege, today), [0.0; 4]);
     siege.card.control = true;
+    // Hält er ihn, meldet der Kern für den Tag aber keinen Beschuss (kein Feuer befohlen,
+    // leere Magazine), fällt auch kein Schuss: Die Szene zeigt den Bericht, nicht die
+    // bloße Anwesenheit der Flotte.
+    let mut silent = watched(conquest::BOMBARDMENT);
+    assert!(silent.card.control);
+    let report = &mut silent.card.view.siege.report;
+    report.ammo = 0.0;
+    report.shield_absorbed = 0.0;
+    report.defender_bombed = 0.0;
+    report.fire_damage = 0.0;
+    report.stations_lost = 0.0;
+    report.guns_lost = 0.0;
+    let rates = show_rates(&silent, today);
+    assert_eq!(
+        rates[0], 0.0,
+        "kein gemeldeter Beschuss, kein Schuss: {rates:?}"
+    );
+    // Jedes einzelne Zeichen von Beschuss im Bericht genügt wieder.
+    silent.card.view.siege.report.ammo = 1.0;
+    assert!(show_rates(&silent, today)[0] > 0.0);
     // Nach dem Ende der Belagerung zeigt die Szene nichts mehr.
     siege.result = Some(SiegeResult {
         fell: true,
@@ -235,6 +256,46 @@ fn the_orbit_view_opens_from_the_siege_window_and_leads_back() {
         "Pause hält die Partie an"
     );
     assert_eq!(game.resource::<OrbitScene>().time, time, "und die Szene");
+    // Die Befehle der eigenen Seite stehen in der Ansicht selbst: Ein Klick auf „Sturm“
+    // geht als Befehl an die Simulation, ohne die Ansicht zu verlassen.
+    assert!(game.window_rect(ORDERS_WINDOW).is_some());
+    assert!(game.text(window::detail::ORDERS_ATTACKER).is_some());
+    let land = format!(
+        "{}: {}",
+        window::LAND,
+        game.resource::<WatchedSiege>().card.planet_name
+    );
+    assert!(game.button(&land).is_some() || game.disabled_button(&land).is_some());
+    assert!(game.button(window::LIFT).is_some());
+    let assault = |game: &TestGame| {
+        game.resource::<Sieges>()
+            .siege(planet)
+            .expect("Belagerung")
+            .orders
+            .assault
+    };
+    let before = assault(&game);
+    let at = game.checkbox(ASSAULT).expect("Kästchen „Sturm“");
+    game.click(at);
+    game.frames(2);
+    let waiting = game
+        .resource::<sim::command::CommandQueue>()
+        .pending
+        .iter()
+        .any(|entry| {
+            matches!(
+                entry.command,
+                sim::command::SimCommand::SetSiegeOrders { planet: named, orders }
+                    if named == planet && orders.assault != before
+            )
+        });
+    assert!(waiting, "der Befehl wartet auf den nächsten Takt");
+    assert_eq!(view(&game), ViewState::Siege, "die Ansicht bleibt");
+    game.key(KeyCode::Space);
+    game.frames(6);
+    game.key(KeyCode::Space);
+    game.frames(2);
+    assert_eq!(assault(&game), !before, "die Simulation hat ihn ausgeführt");
     // Zum Fenster „Belagerung“: zurück auf die Karte, das Fenster bei dieser Welt.
     game.click_on(TO_WINDOW);
     game.frames(4);
@@ -299,6 +360,14 @@ fn the_fall_of_the_world_ends_the_view_with_a_result_and_a_pause() {
     game.click_on(KEEP_WATCHING);
     game.frames(12);
     assert!(game.window_rect(RESULT_TITLE).is_none());
+    // Nach dem Ende zeigt die Tafel den letzten Stand als solchen: keine Prognose mehr,
+    // und keine Befehle.
+    assert!(game.text(super::hud::LAST_STATE).is_some());
+    assert!(
+        game.text(window::FORECAST).is_none(),
+        "keine Prognose nach dem Ende"
+    );
+    assert!(game.window_rect(ORDERS_WINDOW).is_none());
     assert_eq!(view(&game), ViewState::Siege);
     game.click_on(BACK);
     game.frames(4);
@@ -410,5 +479,85 @@ fn fotostaende() {
         conquest::LAST_WORLD,
         Some(defender),
         None,
+    );
+}
+
+#[test]
+fn a_new_state_of_the_card_is_noted_and_a_landing_counted() {
+    let mut siege = watched(conquest::BOMBARDMENT);
+    let date = Date::from_day(siege.card.view.siege.report.day);
+    assert_eq!(siege.landings, 0);
+    assert!(siege.events.is_empty());
+    // Derselbe Stand noch einmal: nichts Neues.
+    let same = siege.card.clone();
+    siege.take(date, same, 8);
+    assert_eq!((siege.landings, siege.events.len()), (0, 0));
+    // Eine Welle ist gelandet: Die Truppe am Boden wächst, der Tag der Landung ist neu.
+    let mut landed = siege.card.clone();
+    landed.troops.army += 4.0;
+    landed.view.siege.landed_day = Some(siege.card.view.siege.report.day + 1);
+    siege.take(date, landed.clone(), 8);
+    assert_eq!(siege.landings, 1, "die Szene schickt ihre Boote");
+    assert!(
+        siege
+            .events
+            .iter()
+            .any(|(_, text)| text.starts_with("Landung:")),
+        "{:?}",
+        siege.events
+    );
+    assert_eq!(siege.card, landed);
+    // Ein verlorenes Schiff wird gemeldet und gezählt; eine Landung ist das nicht.
+    siege.take(date, landed, 7);
+    assert_eq!((siege.landings, siege.ships), (1, 7));
+    assert!(
+        siege
+            .events
+            .iter()
+            .any(|(_, text)| text.contains("verliert ein Schiff"))
+    );
+}
+
+#[test]
+fn the_result_only_quotes_entries_that_name_this_world() {
+    use sim::chronicle::ChronicleEntry;
+    let (_, state) = conquest::state(conquest::BOMBARDMENT);
+    let last = card(conquest::BOMBARDMENT);
+    let entry = |text: String, kind: ChronicleKind| ChronicleEntry {
+        tick: state.clock.tick,
+        kind,
+        polity: None,
+        system: Some(last.system),
+        text,
+    };
+    let mut chronicle = Chronicle::default();
+    let name = &last.planet_name;
+    // Eine Folge steht in der Chronik vor dem Ereignis; daneben eine Meldung über die
+    // Nachbarwelt „… II“ und eine von vor drei Tagen.
+    chronicle.entries.push_back(entry(
+        format!("Auf {name} verfällt ein Bauauftrag."),
+        ChronicleKind::Economy,
+    ));
+    chronicle
+        .entries
+        .push_back(entry(format!("{name}I wird besetzt."), ChronicleKind::War));
+    chronicle.entries.push_back(entry(
+        format!("Die Belagerung von {name} ist aufgehoben."),
+        ChronicleKind::War,
+    ));
+    chronicle.entries.push_back(ChronicleEntry {
+        tick: state.clock.tick - 3 * TICKS_PER_DAY,
+        ..entry(format!("Über {name}: Phase 2."), ChronicleKind::War)
+    });
+    let result = result_of(&state.galaxy, &chronicle, &state.clock, &last);
+    assert!(!result.fell, "die Welt gehört noch dem Verteidiger");
+    assert_eq!(result.headline, format!("{RESULT_OVER}: {name}"));
+    assert_eq!(
+        result.lines,
+        vec![
+            format!("Die Belagerung von {name} ist aufgehoben."),
+            format!("Auf {name} verfällt ein Bauauftrag."),
+        ],
+        "die Entscheidung voran, nichts über die Nachbarwelt, nichts Altes"
     );
 }

@@ -3,7 +3,8 @@
 
 use super::{
     BAD, CAPITULATE, Confirm, FORECAST, GOOD, LAND, LIFT, Role, SiegeUi, WARN, days_text,
-    forecast_cost, forecast_text, gated, phase_text, polity_name, state_text, units,
+    forecast_cost, forecast_text, gated, phase_text, polity_name, progress_of, resting_forecast,
+    state_text, units,
 };
 use crate::battle_view::orbit::WATCH;
 use crate::map::Selection;
@@ -23,6 +24,12 @@ pub const HOLD_FIRE: &str = "Geschütze schweigen";
 pub const CONFIRM_LIFT: &str = "Ja, aufheben";
 pub const CONFIRM_CAPITULATE: &str = "Ja, übergeben";
 pub const CANCEL: &str = "Abbrechen";
+/// Titel des Fensters mit den Befehlen über der Orbitansicht.
+pub const ORDERS_WINDOW: &str = "Befehle";
+pub const ASK_LIFT: &str = "Die Belagerung wirklich aufheben?";
+pub const ASK_CAPITULATE: &str = "Die Welt wirklich übergeben?";
+pub const ASK_LAST_WORLD: &str = "Es ist die letzte eigene Welt: Mit der Übergabe endet die \
+     eigene Gemeinschaft, und die Partie läuft als Beobachterpartie weiter. Wirklich übergeben?";
 
 const PHASES: [Phase; 5] = [
     Phase::Approach,
@@ -245,7 +252,13 @@ fn landing(
             planet: card.planet,
             strength: super::troops::commanded(strength, ready),
         };
-        let check = state.cache.check(sim, &command);
+        // Solange eine Welle dieser Flotte vorgemerkt ist, gibt es keine zweite: Beide
+        // gälten im selben Takt, und die zweite fände die Truppen nicht mehr an Bord.
+        let check = if super::troops::move_waiting(sim, picked) {
+            Err(crate::ui::fleets::WAITING.to_string())
+        } else {
+            state.cache.check(sim, &command)
+        };
         if gated(
             ui,
             LAND,
@@ -276,6 +289,15 @@ fn confirmed(
     (confirm, command): (Confirm, SimCommand),
 ) {
     let check = state.cache.check(sim, &command);
+    // Eine Rückfrage, die im vorigen Frame nicht auf dem Schirm stand (Fenster zu, andere
+    // Ansicht), ist verfallen: Sie soll nicht Tage später noch auf ein „Ja“ warten.
+    let frame = ui.ctx().cumulative_frame_nr();
+    if state.confirm.is_some() && frame > state.confirm_frame + 1 {
+        state.confirm = None;
+    }
+    if state.confirm == Some(confirm) {
+        state.confirm_frame = frame;
+    }
     ui.horizontal_wrapped(|ui| {
         if state.confirm == Some(confirm) && check.is_ok() {
             ui.label(RichText::new(question).color(WARN));
@@ -299,6 +321,7 @@ fn confirmed(
                 hover,
             ) {
                 state.confirm = Some(confirm);
+                state.confirm_frame = frame;
             }
             if let Err(reason) = &check {
                 ui.label(small(reason).color(MUTED));
@@ -325,7 +348,7 @@ fn attacker_orders(
         actions,
         LIFT,
         CONFIRM_LIFT,
-        "Die Belagerung wirklich aufheben?",
+        ASK_LIFT,
         "Die Flotten geben die Welt frei. Truppen am Boden schiffen sich wieder ein, soweit \
          an Bord Platz ist; dazu braucht der Abzug die Orbitalhoheit.",
         (
@@ -404,6 +427,16 @@ pub fn garrison_orders(
     });
 }
 
+/// Die Rückfrage vor der Übergabe. Mit der letzten Welt endet die Gemeinschaft: Das sagt
+/// die Rückfrage vorher.
+pub fn capitulate_question(worlds: usize) -> &'static str {
+    if worlds <= 1 {
+        ASK_LAST_WORLD
+    } else {
+        ASK_CAPITULATE
+    }
+}
+
 fn defender_orders(
     ui: &mut egui::Ui,
     sim: &SimRefs,
@@ -413,6 +446,7 @@ fn defender_orders(
 ) {
     ui.label(RichText::new(ORDERS_DEFENDER).color(ACCENT));
     garrison_orders(ui, sim, card.planet, state, actions);
+    let worlds = sim.galaxy.planets_of(card.defender).count();
     confirmed(
         ui,
         sim,
@@ -420,7 +454,7 @@ fn defender_orders(
         actions,
         CAPITULATE,
         CONFIRM_CAPITULATE,
-        "Die Welt wirklich übergeben?",
+        capitulate_question(worlds),
         "Die Welt geht an den Belagerer, sobald er eine Besatzungstruppe am Boden oder im \
          Orbit hat. Nach einer Übergabe wird nicht geplündert.",
         (
@@ -477,6 +511,81 @@ pub fn defense_text(card: &SiegeCard) -> String {
     )
 }
 
+/// Die Flotten im Orbit mit Feuerkraft und Füllständen; liegt keine dort, gibt es auch
+/// keine Füllstände zu nennen.
+pub fn orbit_text(names: &[&str], card: &SiegeCard) -> String {
+    if names.is_empty() {
+        return "keine".to_string();
+    }
+    format!(
+        "{} · Feuerkraft {} · Munition {} · Treibstoff {}",
+        names.join(", "),
+        grouped(card.firepower),
+        percent(card.ammo as f32),
+        percent(card.fuel as f32)
+    )
+}
+
+/// Wie eine Zone steht, und in welcher Farbe: Für den Belagerer ist eine genommene Zone
+/// ein Erfolg, für den Verteidiger ein Verlust.
+pub fn zone_state(role: Role, taken: bool, contested: bool) -> (&'static str, Color32) {
+    if taken {
+        let color = match role {
+            Role::Attacker => GOOD,
+            Role::Defender => BAD,
+            Role::Onlooker => Color32::from_rgb(200, 205, 215),
+        };
+        ("genommen", color)
+    } else if contested {
+        ("umkämpft", WARN)
+    } else {
+        ("gehalten", MUTED)
+    }
+}
+
+/// Die Befehle der Seite, die der Spieler führt.
+fn orders(
+    ui: &mut egui::Ui,
+    sim: &SimRefs,
+    card: &SiegeCard,
+    state: &mut SiegeUi,
+    actions: &mut Vec<UiAction>,
+) {
+    let player = sim.config.player;
+    match (Role::of(player, card), player) {
+        (Role::Attacker, Some(player)) => attacker_orders(ui, sim, player, card, state, actions),
+        (Role::Defender, Some(_)) => defender_orders(ui, sim, card, state, actions),
+        _ => {
+            ui.label(small("Befehle gibt hier, wer belagert oder belagert wird.").color(MUTED));
+        }
+    }
+}
+
+/// Die Befehle als eigenes kleines Fenster über der Orbitansicht: Feuer, Sturm, Landung,
+/// Aufheben oder die Befehle der Garnison, während die Szene weiterläuft. Beobachter
+/// bekommen kein Fenster.
+pub fn orders_window(
+    ctx: &egui::Context,
+    area: egui::Rect,
+    sim: &SimRefs,
+    card: &SiegeCard,
+    state: &mut SiegeUi,
+    actions: &mut Vec<UiAction>,
+) {
+    if Role::of(sim.config.player, card) == Role::Onlooker {
+        return;
+    }
+    egui::Window::new(ORDERS_WINDOW)
+        .resizable(false)
+        .pivot(egui::Align2::RIGHT_BOTTOM)
+        .default_pos([area.right() - 12.0, area.bottom() - 12.0])
+        .constrain_to(area)
+        .show(ctx, |ui| {
+            ui.set_width(400.0);
+            orders(ui, sim, card, state, actions);
+        });
+}
+
 pub fn siege_detail(
     ui: &mut egui::Ui,
     sim: &SimRefs,
@@ -493,10 +602,11 @@ pub fn siege_detail(
             sim.galaxy.system(card.system).name,
             role.label()
         ));
-        if ui
-            .button(SHOW_ON_MAP)
-            .on_hover_text("Wählt die Welt und führt die Karte dorthin.")
-            .clicked()
+        if !state.in_orbit
+            && ui
+                .button(SHOW_ON_MAP)
+                .on_hover_text("Wählt die Welt und führt die Karte dorthin.")
+                .clicked()
         {
             actions.push(UiAction::Select(Selection {
                 system: Some(card.system),
@@ -504,14 +614,16 @@ pub fn siege_detail(
             }));
             actions.push(UiAction::Focus(card.system));
         }
-        if ui
-            .button(RichText::new(WATCH).color(ACCENT))
-            .on_hover_text(
-                "Zeigt die Belagerung in der Orbitansicht: die Welt, die Flotten im Orbit, \
-                 Schild, Beschuss, Landung und den Kampf am Boden. Sie läuft mit der Zeit \
-                 der Partie weiter.",
-            )
-            .clicked()
+        if !state.in_orbit
+            && ui
+                .button(RichText::new(WATCH).color(ACCENT))
+                .on_hover_text(
+                    "Zeigt die Belagerung in der Orbitansicht: die Welt, die Flotten im \
+                     Orbit, Schild, Beschuss, Landung und den Kampf am Boden. Sie läuft mit \
+                     der Zeit der Partie weiter; die Befehle stehen dort in einem eigenen \
+                     kleinen Fenster.",
+                )
+                .clicked()
         {
             actions.push(UiAction::WatchSiege(card.planet));
         }
@@ -543,6 +655,12 @@ pub fn siege_detail(
         ui.label(small(text).color(WARN));
     }
 
+    // Die Befehle stehen vor Zahlen und Prognose: In einem kleinen Spielfenster sind sie
+    // so schon beim Öffnen zu sehen.
+    ui.add_space(4.0);
+    orders(ui, sim, card, state, actions);
+    ui.add_space(4.0);
+
     egui::Grid::new(("belagerung_lage", card.planet.0))
         .num_columns(2)
         .show(ui, |ui| {
@@ -553,17 +671,15 @@ pub fn siege_detail(
             ui.label(days_text(card.days as f64));
             ui.end_row();
             label(ui, "Fortschritt");
+            let progress = progress_of(card);
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::ProgressBar::new(card.progress as f32)
+                    egui::ProgressBar::new(progress.share)
                         .desired_width(160.0)
                         .desired_height(10.0)
                         .fill(ACCENT),
                 );
-                ui.label(percent(card.progress as f32)).on_hover_text(
-                    "Der Anteil der Garnison vom Beginn, der nicht mehr steht, oder der \
-                     Anteil der genommenen Zonen, je nachdem, was weiter ist.",
-                );
+                ui.label(&progress.text).on_hover_text(progress.hint);
             });
             ui.end_row();
             label(ui, "Vorräte der Garnison");
@@ -615,17 +731,7 @@ pub fn siege_detail(
                 .filter_map(|id| sim.fleets.get(*id))
                 .map(|fleet| fleet.name.as_str())
                 .collect();
-            ui.label(format!(
-                "{} · Feuerkraft {} · Munition {} · Treibstoff {}",
-                if names.is_empty() {
-                    "keine".to_string()
-                } else {
-                    names.join(", ")
-                },
-                grouped(card.firepower),
-                percent(card.ammo as f32),
-                percent(card.fuel as f32)
-            ));
+            ui.label(orbit_text(&names, card));
             ui.end_row();
         });
 
@@ -635,13 +741,10 @@ pub fn siege_detail(
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Zonen").color(MUTED));
             for (index, zone) in siege.zones.iter().enumerate() {
-                let (state, color) = if zone.taken {
-                    ("genommen", BAD)
-                } else if front == Some(index) && siege.army > 0.0 {
-                    ("umkämpft", WARN)
-                } else {
-                    ("gehalten", MUTED)
-                };
+                // Welche Zone umkämpft ist, sagt die Lage des Kerns (`front`); hier wird
+                // sie nur benannt.
+                let (state, color) =
+                    zone_state(role, zone.taken, front == Some(index) && siege.army > 0.0);
                 ui.label(
                     RichText::new(format!(
                         "{} {} ({state}, Miliz {})",
@@ -658,6 +761,12 @@ pub fn siege_detail(
 
     ui.add_space(4.0);
     ui.label(RichText::new(FORECAST).color(ACCENT));
+    if let Some(resting) = resting_forecast(card) {
+        // Ohne Orbitalhoheit gelten die drei Wege nicht: ein Satz statt dreier Zahlen,
+        // die der Verlauf widerlegte.
+        ui.label(RichText::new(resting).color(WARN));
+        return;
+    }
     for (course, forecast) in &card.forecasts {
         let color = if forecast.falls {
             GOOD
@@ -675,13 +784,4 @@ pub fn siege_detail(
         )
         .color(MUTED),
     );
-
-    ui.add_space(4.0);
-    match (role, player) {
-        (Role::Attacker, Some(player)) => attacker_orders(ui, sim, player, card, state, actions),
-        (Role::Defender, Some(_)) => defender_orders(ui, sim, card, state, actions),
-        _ => {
-            ui.label(small("Befehle gibt hier, wer belagert oder belagert wird.").color(MUTED));
-        }
-    }
 }

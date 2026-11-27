@@ -362,18 +362,44 @@ pub enum TimeClick {
     Level(usize),
 }
 
+/// Wie viele Planeten noch frei sind, in der Kopfleiste: „12/90 frei“.
+pub fn free_label(free: usize, total: usize) -> String {
+    format!("{free}/{total} frei")
+}
+
+/// Beschriftung des Pausenknopfs, solange die Zeit läuft und solange sie steht.
+pub const RUNNING_LABEL: &str = "⏸ Pause";
+pub const PAUSED_LABEL: &str = "▶ PAUSIERT";
+
 /// Pause und Geschwindigkeitsstufen, wie sie in der Kopfleiste der Partie und in der
 /// Orbitansicht stehen.
 pub fn time_controls(ui: &mut egui::Ui, speed: &SimSpeed) -> Option<TimeClick> {
     let mut clicked = None;
-    let pause_label = if speed.paused {
-        "▶ Weiter"
+    // Der Knopf sagt selbst, dass die Zeit steht, und ist in beiden Zuständen gleich
+    // breit: So bricht die Leiste beim Anhalten nicht um, und nichts darunter springt.
+    let text = if speed.paused {
+        RichText::new(PAUSED_LABEL).color(ACCENT).strong()
     } else {
-        "⏸ Pause"
+        RichText::new(RUNNING_LABEL)
     };
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let widest = [PAUSED_LABEL, RUNNING_LABEL]
+        .into_iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    let size = egui::vec2(widest + 2.0 * ui.spacing().button_padding.x, 0.0);
     if ui
-        .selectable_label(speed.paused, pause_label)
-        .on_hover_text("Leertaste")
+        .add(egui::Button::selectable(speed.paused, text).min_size(size))
+        .on_hover_text(if speed.paused {
+            "Die Zeit steht. Leertaste oder ein Klick lässt sie weiterlaufen."
+        } else {
+            "Leertaste"
+        })
         .clicked()
     {
         clicked = Some(TimeClick::Toggle);
@@ -387,9 +413,6 @@ pub fn time_controls(ui: &mut egui::Ui, speed: &SimSpeed) -> Option<TimeClick> {
         {
             clicked = Some(TimeClick::Level(level));
         }
-    }
-    if speed.paused {
-        ui.label(RichText::new("PAUSIERT").color(ACCENT).strong());
     }
     clicked
 }
@@ -477,13 +500,17 @@ fn top_bar(
             .iter()
             .filter(|planet| planet.owner.is_none())
             .count();
-        ui.label(
-            RichText::new(format!(
-                "{free} von {} Planeten frei",
-                sim.galaxy.planets.len()
-            ))
-            .color(if free == 0 { ACCENT } else { MUTED }),
-        );
+        // Kurz gehalten: Die Leiste soll bei 1600 Pixeln Breite auch im Krieg, mit langem
+        // Namen und großen Zahlen in einer Zeile bleiben.
+        let total = sim.galaxy.planets.len();
+        ui.label(RichText::new(free_label(free, total)).color(if free == 0 {
+            ACCENT
+        } else {
+            MUTED
+        }))
+        .on_hover_text(format!(
+            "{free} von {total} Planeten sind noch frei (unbesiedelt)."
+        ));
     };
     split_bar(ui, left, right);
 }
@@ -1101,17 +1128,28 @@ pub fn help_window(ctx: &egui::Context, open: &mut bool, battle: bool) {
         });
 }
 
+/// Wo der Hinweis steht: unten in der Mitte dessen, was Leisten und Tafeln frei lassen.
+pub fn notice_place(screen: egui::Rect, free: egui::Rect) -> (egui::Pos2, Align2) {
+    let free = free.intersect(screen);
+    (
+        egui::pos2(free.center().x, free.bottom() - 10.0),
+        Align2::CENTER_BOTTOM,
+    )
+}
+
 pub fn notice(root: &mut egui::Ui, notice: &Notice) {
     if notice.seconds_left <= 0.0 || notice.text.is_empty() {
         return;
     }
-    // Unter der Kopfleiste, auch wenn sie in einem schmalen Fenster zwei Zeilen hat.
-    let top = (root.available_rect_before_wrap().top() + 21.0).max(44.0);
+    // Am unteren Rand der freien Fläche, mittig zwischen den Seitentafeln: Oben läge der
+    // Hinweis auf den Titelzeilen und Reitern der Fenster, die dort beginnen.
+    let (at, pivot) = notice_place(root.ctx().content_rect(), root.available_rect_before_wrap());
     egui::Area::new("hinweis".into())
         // Über allen Fenstern: Ein Klick in ein Fenster hebt es sonst über den Hinweis, und
         // eine Ablehnung bliebe ungelesen.
         .order(egui::Order::Foreground)
-        .anchor(Align2::CENTER_TOP, [0.0, top])
+        .pivot(pivot)
+        .fixed_pos(at)
         .interactable(false)
         .show(root.ctx(), |ui| {
             let color = if notice.is_error {
@@ -1511,6 +1549,80 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 4, "nur {checked} Rezepte geprüft");
+    }
+
+    #[test]
+    fn pausing_does_not_move_the_top_bar() {
+        use crate::ui::testing::Screen;
+
+        // Der Pausenknopf ist in beiden Zuständen gleich breit und sagt selbst, dass die
+        // Zeit steht: Daneben steht kein weiteres Wort, das die Leiste verlängerte.
+        let width_of = |paused: bool| {
+            let speed = SimSpeed { paused, level: 2 };
+            let mut screen = Screen::new(1600.0, 200.0);
+            let mut width = 0.0;
+            let painted = screen.settle(|ui| {
+                ui.horizontal(|ui| {
+                    time_controls(ui, &speed);
+                    width = ui.min_rect().width();
+                });
+            });
+            assert_eq!(painted.text(PAUSED_LABEL).is_some(), paused);
+            assert_eq!(painted.text(RUNNING_LABEL).is_some(), !paused);
+            width
+        };
+        assert_eq!(width_of(true), width_of(false));
+
+        // In der Leiste der Partie steht damit jeder Knopf an derselben Stelle, ob die
+        // Zeit läuft oder steht, auch im Krieg und mit einem langen Namen.
+        let mut fixture = fixture();
+        let me = sim::ids::PolityId(0);
+        let other = sim::ids::PolityId(1);
+        fixture.state.polities.get_mut(me).name = "Karawane von Meridian".to_string();
+        fixture.state.diplomacy.wars.insert((me, other));
+        let history = PriceHistory::default();
+        let refs = fixture.refs(&history);
+        assert!(refs.diplomacy.is_at_war(me));
+        let selection = Selection::default();
+        for width in [1600.0, 1280.0] {
+            let place = |paused: bool| {
+                let speed = SimSpeed { paused, level: 2 };
+                let mut state = UiState::default();
+                let mut screen = Screen::new(width, 720.0);
+                let painted = screen.settle(|ui| {
+                    in_game(
+                        ui,
+                        &refs,
+                        &mut state,
+                        &speed,
+                        &selection,
+                        &[],
+                        &mut Vec::new(),
+                    )
+                });
+                assert!(painted.text("IM KRIEG").is_some());
+                // Bei 1600 Pixeln bleibt die Leiste auch so in einer Zeile.
+                let menu = painted.text("Menü").expect("Menü");
+                assert_eq!(menu.top() < 20.0, width == 1600.0, "{menu:?}");
+                ["Flotten", "Belagerung", "Menü", "Übersicht"].map(|label| {
+                    let rect = painted.text(label).expect(label);
+                    (rect.left().round(), rect.top().round())
+                })
+            };
+            assert_eq!(place(true), place(false), "bei {width} Pixeln Breite");
+        }
+    }
+
+    #[test]
+    fn the_notice_stands_at_the_bottom_of_the_free_area() {
+        // Unten in der Mitte dessen, was Leisten und Tafeln frei lassen: nicht auf den
+        // Titelzeilen der Fenster, die unter der Kopfleiste beginnen.
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
+        let free = egui::Rect::from_min_max(egui::pos2(430.0, 33.0), egui::pos2(1600.0, 780.0));
+        let (at, pivot) = notice_place(screen, free);
+        assert_eq!(pivot, Align2::CENTER_BOTTOM);
+        assert_eq!(at, egui::pos2(1015.0, 770.0));
+        assert!(at.y > 56.0 + 400.0, "weit unter den Titelzeilen");
     }
 
     #[test]

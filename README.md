@@ -157,6 +157,19 @@ cargo lint
 `cargo test` und `cargo clippy` decken Kern und Spiel ab; das Headless-Programm ist nur
 eine dünne Kommandozeile über `sim::harness` und wird mit `--workspace` mitgeprüft.
 
+Das Spiel prüft sich mit `--selftest` selbst (`cargo run -p game -- --selftest 240 --seed 3
+--screenshot bild.png`): Es startet eine Partie, lässt sie laufen und endet mit einem
+Fehler, wenn die Kartenkamera nicht zeichnete, nichts von der Karte in ihrem Sichtfeld
+lag oder ein verlangtes Foto nicht entstand. Ab 60 Frames zeigt es die Fenster
+nacheinander, damit keines das andere verdeckt: erst „Belagerung“ (`bild_3.png`), dann
+„Staatsfinanzen“ mit der Verteidigung und links die Tafel der eigenen Hauptwelt
+(Schlussfoto `bild.png`). Eine frische Partie hat keine Belagerung: Das Fenster ist dann
+leer, und die Ausgabe sagt „keine Belagerung in Sicht“. Mit einem geladenen Stand mitten
+in einer Belagerung (`--load`, etwa aus `cargo headless run --preset eroberung … --save`)
+besucht der Selbsttest ab 200 Frames auch die Orbitansicht (`bild_2.png`). Ob eine Tafel
+etwas verdeckt, prüft er nicht; dafür sind die Fotos da. `--practice --selftest` prüft
+die Gefechtsübung.
+
 ## Bedienung
 
 | Eingabe | Wirkung |
@@ -188,7 +201,7 @@ Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 5) lass
 mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist.
 
 Befehle gelten mit dem nächsten Takt der Simulation. Steht die Zeit, sind sie vorgemerkt,
-und ein Hinweis oben im Fenster sagt es. Was vorgemerkt ist, zählt für die Knöpfe schon:
+und ein Hinweis unten in der Mitte des Fensters sagt es. Was vorgemerkt ist, zählt für die Knöpfe schon:
 Ein Befehl, den es nur einmal geben kann (Rückzug, Vereinigen, Streichen), wird nicht noch
 einmal angeboten, und eine Werft zeigt ihre vorgemerkten Bestellungen. Lehnt die
 Simulation einen Befehl ab, steht der Grund im Hinweis.
@@ -295,26 +308,47 @@ eigene Flotte oder Welt liegt (wie bei den Gefechten); Beobachter sehen jede.
 
 **Belagerungen.** Die Liste nennt je Belagerung Welt, Belagerer, Verteidiger, Phase,
 Dauer, Fortschritt und Lage. Ein Klick auf die Welt zeigt sie im Einzelnen: die fünf
-Phasen als Leiste (Anmarsch, Einschließung, Beschuss, Bodenkrieg, Untergrund), Dauer und
-Fortschritt, die Vorräte der Garnison und den Nachschub der Landungstruppe in Tagen, die
-Anlagen der Welt (Stationen, aktive Geschütze, Schild mit Ladung, Bunker), die Truppen
-beider Seiten, die Flotten im Orbit mit Feuerkraft, Munition und Treibstoff und die
-Zonen. Hält der Belagerer den Orbit nicht, steht dort „ruht, Orbit umstritten“. Unter
-„Prognose“ stehen die drei Wege (Aushungern, Sturm, Flächenbeschuss) in ganzen Sätzen:
-ob die Welt fällt, in wie vielen Tagen, und sonst, woran es liegt (Treibstoff, Munition,
-Schild, Stationen, fehlende Truppen, eine Landung, die abgeschlagen würde), dazu die
-Verluste beider Seiten, der Rumpf der Schiffe und die Beute.
+Phasen als Leiste (Anmarsch, Einschließung, Beschuss, Bodenkrieg, Untergrund), gleich
+darunter die Befehle der eigenen Seite, dann Dauer und Fortschritt, die Vorräte der
+Garnison und den Nachschub der Landungstruppe in Tagen, die Anlagen der Welt (Stationen,
+aktive Geschütze, Schild mit Ladung, Bunker), die Truppen beider Seiten, die Flotten im
+Orbit mit Feuerkraft, Munition und Treibstoff und die Zonen. Reiter und Liste stehen
+fest; was darunter nicht in das Fenster passt, rollt mit einem sichtbaren Rollbalken. Im
+Untergrund (Phase 5) nennt „Fortschritt“ nicht die genommene Oberfläche, sondern wie
+viel der Garnison gebrochen ist und was im Untergrund noch sitzt. Unter „Prognose“
+stehen die drei Wege (Aushungern, Sturm, Flächenbeschuss) in ganzen Sätzen: ob die Welt
+fällt, in wie vielen Tagen, und sonst, woran es liegt (Treibstoff, Munition, Schild,
+Stationen, fehlende Truppen, eine Landung, die abgeschlagen würde), dazu die Verluste
+beider Seiten, der Rumpf der Schiffe und die Beute. Hält der Belagerer den Orbit nicht,
+steht dort „ruht, Orbit umstritten“, und statt der drei Wege steht ein Satz: Die
+Prognose gilt erst wieder mit der Orbitalhoheit; was eine Truppe am Boden ohne sie noch
+erreicht, rechnet sie nicht voraus.
 
 | Wer | Befehle im Fenster |
 |---|---|
-| Belagerer | Feuerstufe (kein Feuer, stützen, gezielt, flächig), „Sturm“, Schwerpunkt, „Nach dem Fall plündern“; „Landen“ setzt Verbände der gewählten Flotte an Land (Stärke am Regler); „Belagerung aufheben“ fragt erst nach |
-| Verteidiger | Haltung der Garnison (vorwärts, Tiefe), „Geschütze schweigen“; „Welt übergeben“ fragt erst nach |
+| Belagerer | Feuerstufe (kein Feuer, stützen, gezielt, flächig), „Sturm“, Schwerpunkt, „Nach dem Fall plündern“; „Landen“ setzt Verbände der gewählten Flotte an Land (Stärke am Regler; solange eine Welle vorgemerkt ist, gibt es keine zweite); „Belagerung aufheben“ fragt erst nach |
+| Verteidiger | Haltung der Garnison (vorwärts, Tiefe), „Geschütze schweigen“; „Welt übergeben“ fragt erst nach und sagt dabei, wenn es die letzte Welt ist und die Gemeinschaft damit endet |
+
+Eine Rückfrage gilt nur, solange sie auf dem Schirm steht: Wird das Fenster geschlossen
+oder die Ansicht gewechselt, ist sie verfallen.
 
 **Flotten und Truppen.** Die Liste nennt je eigener Flotte Ort, Truppen an Bord und ihr
 Ziel. Liegt die gewählte Flotte über einer fremden Welt, beginnt „Belagern“ die
 Belagerung; über einer eigenen Welt gehen mit „Einschiffen“ reguläre Verbände samt
 Nachschub für die gewählten Tage an Bord, und „An Land setzen“ gibt sie der Garnison
 zurück. Dieselben Knöpfe stehen bei der gewählten Flotte im Fenster „Flotten“.
+
+Der Nachschub wird am Markt des Systems gekauft, soweit Ware und der Etat für
+Verteidigung und Beschaffung reichen; der Markt gibt je Kauf nur einen Teil seines
+Bestands her. Neben „Einschiffen“ steht deshalb vor dem Klick, ob der verlangte
+Nachschub heute zu haben ist, und sonst, für wie viele Tage es reicht und ob es am Markt
+oder am Etat liegt (die Simulation rechnet die Einschiffung dazu auf einer Kopie). Kommt
+weniger an Bord als verlangt, sagt es danach ein Hinweis, und er bleibt an der Flotte
+stehen.
+
+Hat eine Flotte den Auftrag, die Belagerung hat aber nicht begonnen, steht dort „wartet
+auf die Orbitalhoheit“ mit dem Grund (die Flotte hat keinen Treibstoff, steht im Gefecht,
+sammelt sich, oder eine feindliche Flotte liegt im System) und „Auftrag aufheben“.
 
 Ein gesperrter Knopf nennt den Grund, mit dem die Simulation den Befehl ablehnen würde,
 daneben oder im Schwebetext. Gefragt wird sie dazu einmal je Tag und Lage, nicht in
@@ -328,6 +362,9 @@ gegen die der nächsten Stufe), dazu reguläre Verbände und Depot mit ihren Gre
 Unterhalt im Monat heute und unter dem Plan, was der Ausbau noch kostet und welche
 Garnison eine besetzte Welt dieser Größe ruhig hält. Die Felder der Spalte „Plan“ ändern
 das Ausbauziel; „Plan festsetzen“ schickt es ab, „Verwerfen“ nimmt die Änderung zurück.
+Die Spalte „Ausbau“ misst am gezeigten Plan. Der Regler für reguläre Verbände rastet auf
+halbe Verbände; ein Plan der Simulation, der nicht auf diesem Raster liegt (die Besatzung
+einer eroberten Welt), wird gezeigt, wie er ist, und gilt nicht als geändert.
 Darunter stehen Haltung und Feuerverbot der Garnison. Bezahlt wird aus der Zeile
 „Verteidigung“ des Haushalts, im Rang gleich nach der Flotte.
 
@@ -376,10 +413,14 @@ nennt Phase, „Lage“ (Dauer, Fortschritt, Vorräte, Truppen, Flotte, Schild),
 „Prognose“ und unter „Meldungen“, was sich geändert hat, seit die Ansicht offen ist
 (Phasenwechsel, Verluste, Landungen, genommene Zonen). Hält der Belagerer den Orbit
 nicht, sagt ein Hinweis, dass die Belagerung ruht, und „Gefecht ansehen“ führt in das
-laufende Gefecht. „Zur Karte“ verlässt die Ansicht, „Belagerungsfenster“ führt zurück
-zu den Befehlen, „Übersicht“ (Taste U) holt Welt und Flotte ins Bild. Fällt die Welt
-oder wird die Belagerung aufgehoben, hält die Partie an, und „Ausgang der Belagerung“
-nennt in den Worten der Chronik, was geschah.
+laufende Gefecht. Wer belagert oder belagert wird, hat seine Befehle in der Ansicht
+selbst: Das kleine Fenster „Befehle“ unten rechts trägt Feuerstufe, „Sturm“, „Landen“
+und „Belagerung aufheben“ oder die Befehle der Garnison, sodass man eine Landung
+befehlen und ihr zusehen kann. „Zur Karte“ verlässt die Ansicht, „Belagerungsfenster“
+führt zur Karte mit dem Fenster „Belagerung“ bei dieser Welt, „Übersicht“ (Taste U) holt
+Welt und Flotte ins Bild. Fällt die Welt oder wird die Belagerung aufgehoben, hält die
+Partie an, und „Ausgang der Belagerung“ nennt in den Worten der Chronik, was geschah;
+die Tafel links zeigt danach den „Stand am Ende der Belagerung“, ohne Prognose.
 
 **Ende einer Gemeinschaft.** Verliert eine Gemeinschaft ihre letzte Welt oder geht sie
 in einer anderen auf, meldet es das Fenster „Eine Gemeinschaft endet“ mit dem Eintrag
@@ -388,7 +429,7 @@ Gemeinschaften führt sie durchgestrichen als „beendet“. Trifft es die eigen
 Gemeinschaft, hält die Partie an, und „Die eigene Gemeinschaft hat geendet“ sagt, was
 geschah. Mit „Als Beobachter weiter“ läuft die Partie als Beobachterpartie weiter:
 Karte, Fenster und Chronik bleiben offen, Befehle sind gesperrt, und die Kopfleiste
-nennt den Grund. Die ausführlichen Abschlussbilder kommen mit Meilenstein 6.
+nennt den Grund.
 
 ### Gefechte der Partie ansehen
 

@@ -20,7 +20,7 @@ use crate::session::{Notice, SessionEpoch};
 use crate::state::{AppState, ViewState};
 use crate::time_control::SimSpeed;
 use crate::ui::UiState;
-use crate::ui::siege::{may_see, units};
+use crate::ui::siege::{may_see, names, units};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
@@ -101,6 +101,21 @@ impl WatchedSiege {
         if self.events.len() > KEPT_EVENTS {
             self.events.remove(0);
         }
+    }
+
+    /// Übernimmt einen neuen Stand der Karte: hält als Meldungen fest, was sich geändert
+    /// hat, und zählt eine Landung, damit die Szene ihre Boote schickt. Die Aufstellung
+    /// der Szene setzt der Aufrufer.
+    pub fn take(&mut self, date: Date, card: SiegeCard, ships: u32) {
+        let (notes, landed) = changes(&self.card, &card, (self.ships, ships));
+        for note in notes {
+            self.note(date, note);
+        }
+        if landed {
+            self.landings += 1;
+        }
+        self.ships = ships;
+        self.card = card;
     }
 }
 
@@ -353,7 +368,7 @@ pub fn result_of(
     let mut entries: Vec<_> = chronicle
         .entries
         .iter()
-        .filter(|entry| entry.tick >= since && entry.text.contains(&last.planet_name))
+        .filter(|entry| entry.tick >= since && names(&entry.text, &last.planet_name))
         .collect();
     entries.sort_by_key(|entry| {
         !(entry.kind == ChronicleKind::War
@@ -444,16 +459,8 @@ fn follow(watched: Option<ResMut<WatchedSiege>>, world: SiegeWorld, mut speed: R
             let ships: u32 = ships_by_class(&world.data, &world.fleets, &card)
                 .iter()
                 .sum();
-            let (notes, landed) = changes(&watched.card, &card, (watched.ships, ships));
-            for note in notes {
-                watched.note(date, note);
-            }
-            if landed {
-                watched.landings += 1;
-            }
-            watched.ships = ships;
             watched.layout = Layout::of(&world.data, &world.polities, &world.fleets, &card);
-            watched.card = card;
+            watched.take(date, card, ships);
         }
         None => {
             let result = result_of(&world.galaxy, &world.chronicle, &world.clock, &watched.card);

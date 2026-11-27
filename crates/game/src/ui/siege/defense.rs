@@ -31,8 +31,14 @@ pub fn level_text(level: f64) -> String {
 /// Wie weit der Ausbau einer Anlage ist: gelieferte Gütersätze gegen die der nächsten
 /// Stufe (Stufe n braucht n Sätze), oder dass der Plan erfüllt ist.
 pub fn progress_text(card: &DefenseCard, works: Works) -> String {
+    progress_under(card, &card.plan, works)
+}
+
+/// Wie [`progress_text`], gemessen an `plan`: An einem Plan, den der Spieler gerade
+/// ändert, steht nicht „erfüllt“, solange er mehr verlangt, als steht.
+pub fn progress_under(card: &DefenseCard, plan: &DefensePlan, works: Works) -> String {
     let level = works.level(&card.defense).floor() as u8;
-    let planned = works.planned(&card.plan);
+    let planned = works.planned(plan);
     if planned <= level {
         return "erfüllt".to_string();
     }
@@ -42,6 +48,17 @@ pub fn progress_text(card: &DefenseCard, works: Works) -> String {
         decimal(card.defense.delivered[works.index()].min(next as f64), 1),
         if next == 1 { "Satz" } else { "Sätzen" }
     )
+}
+
+/// Die Stellung des Reglers für Reguläre: halbe Verbände, am oberen Ende die Grenze
+/// selbst, auch wenn sie nicht auf dem Raster liegt.
+pub fn regulars_step(value: f32, most: f32) -> f32 {
+    let most = most.max(0.0);
+    if value >= most - 0.25 {
+        most
+    } else {
+        ((value * 2.0).round() / 2.0).clamp(0.0, most)
+    }
 }
 
 /// Die Miliz der Welt: An sie ist die Zahl der Regulären gebunden.
@@ -147,7 +164,7 @@ pub fn defense_editor(
                          braucht n Gütersätze."
                     ));
                 plan = with_level(plan.clone(), works, level);
-                ui.label(small(progress_text(&card, works)).color(MUTED))
+                ui.label(small(progress_under(&card, &plan, works)).color(MUTED))
                     .on_hover_text(
                         "Gütersätze, die für die nächste Stufe schon geliefert sind. Der \
                          Markt gibt je Kauf nur einen Teil seines Bestands her.",
@@ -161,14 +178,21 @@ pub fn defense_editor(
                  Zahl ist an die Miliz der Welt gebunden.",
             );
             let most = card.regulars_cap.max(plan.regulars as f64) as f32;
-            ui.add(
-                egui::DragValue::new(&mut plan.regulars)
-                    .range(0.0..=most)
-                    .speed(0.1)
-                    .custom_formatter(|value, _| crate::ui::format::decimal(value, 1))
-                    .custom_parser(|text| text.replace(',', ".").parse().ok()),
-            );
-            plan.regulars = (plan.regulars * 2.0).round() / 2.0;
+            let dragged = ui
+                .add(
+                    egui::DragValue::new(&mut plan.regulars)
+                        .range(0.0..=most)
+                        .speed(0.1)
+                        .custom_formatter(|value, _| crate::ui::format::decimal(value, 1))
+                        .custom_parser(|text| text.replace(',', ".").parse().ok()),
+                )
+                .changed();
+            // Nur was der Spieler selbst einstellt, rastet auf halbe Verbände. Der Plan
+            // des Kerns liegt nicht immer auf dem Raster (eine besetzte Welt führt die
+            // Stärke ihrer Besatzung); ihn zu runden, hieße ihn ungefragt zu ändern.
+            if dragged {
+                plan.regulars = regulars_step(plan.regulars, most);
+            }
             ui.label(small(militia_text(&card)).color(MUTED));
             ui.end_row();
             ui.label(DEPOT);

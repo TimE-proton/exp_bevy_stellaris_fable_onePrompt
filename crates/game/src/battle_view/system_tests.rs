@@ -1157,4 +1157,94 @@ mod campaign {
             result.sides[0].note
         );
     }
+
+    #[test]
+    fn a_side_dissolved_during_the_battle_is_read_from_the_books_of_the_core() {
+        use crate::battle_view::campaign::{DISSOLVED_NOTE, dissolved_sides};
+        use sim::fleet::{Departed, Departure};
+        let gone = |battle: u32, side: u16, cause: Departure| Departed {
+            battle: BattleId(battle),
+            side,
+            fleet: None,
+            tick: 0,
+            cause,
+            destination: None,
+        };
+        // Gelesen wird, wen der Kern als aufgelöst führt: nur dieses Gefecht, nur diese
+        // Ursache.
+        let books = Battles {
+            departed: vec![
+                gone(7, 0, Departure::LeftField),
+                gone(7, 1, Departure::Dissolved),
+                gone(8, 2, Departure::Dissolved),
+                gone(7, 3, Departure::NoOpponent),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(dissolved_sides(&books, BattleId(7)), vec![1]);
+        assert_eq!(dissolved_sides(&books, BattleId(8)), vec![2]);
+        assert!(dissolved_sides(&books, BattleId(9)).is_empty());
+
+        // Im laufenden Spiel: Der Kern vermerkt während des gezeigten Gefechts, dass die
+        // Gemeinschaft des Gegners geendet hat. Die Ansicht übernimmt es beim Öffnen und
+        // mit jedem Takt.
+        let (mut game, me, _, id) = war();
+        let (system, enemy_side) = {
+            let battle = game.resource::<Battles>().get(id).unwrap();
+            let side = battle
+                .combatants
+                .iter()
+                .position(|side| side.owner != me)
+                .expect("Gegner");
+            (battle.system, side)
+        };
+        let place = game.resource::<Galaxy>().system(system).name.clone();
+        game.send(FocusSystem(system));
+        game.frames(4);
+        game.click_on(&format!("{WATCH}: {place}"));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        assert!(game.resource::<WatchedBattle>().dissolved.is_empty());
+        game.world_mut()
+            .resource_mut::<Battles>()
+            .departed
+            .push(Departed {
+                battle: id,
+                side: enemy_side as u16,
+                fleet: None,
+                tick: 0,
+                cause: Departure::Dissolved,
+                destination: None,
+            });
+        run(&mut game, 1, 12);
+        assert_eq!(
+            game.resource::<WatchedBattle>().dissolved,
+            vec![enemy_side],
+            "mit dem Takt übernommen"
+        );
+        // Zurück zur Karte und wieder hinein: Auch beim Öffnen steht es in den Büchern.
+        assert!(
+            game.resource::<Battles>().get(id).is_some(),
+            "das Gefecht läuft noch"
+        );
+        game.world_mut()
+            .resource_mut::<NextState<ViewState>>()
+            .set(ViewState::Galaxy);
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Galaxy);
+        assert!(game.world().get_resource::<WatchedBattle>().is_none());
+        game.send(WatchBattle(id));
+        game.frames(4);
+        assert_eq!(view(&game), ViewState::Battle);
+        assert_eq!(game.resource::<WatchedBattle>().dissolved, vec![enemy_side]);
+        // Am Ende vermerkt das Ergebnis die Seite als aufgelöst, nicht als geschlagen.
+        watch_to_the_end(&mut game);
+        let result = game
+            .resource::<BattleFeed>()
+            .info
+            .result
+            .clone()
+            .expect("Ergebnis");
+        assert_eq!(result.sides[enemy_side].note, DISSOLVED_NOTE);
+    }
 }

@@ -12,6 +12,8 @@ use crate::testing::TestGame;
 use crate::time_control::SimSpeed;
 use crate::ui::testing::{Painted, Screen};
 use sim::GameData;
+use sim::chronicle::ChronicleEntry;
+use sim::clock::TICKS_PER_DAY;
 use sim::command::{CommandQueue, CommandSource, QueuedCommand};
 use sim::harness::{WarScript, conquest_war, run_scripted};
 use sim::siege::arms::Works;
@@ -192,6 +194,14 @@ fn forecasts_and_limits_read_as_plain_sentences() {
         "eigene Verluste 4,0 Verbände · Verluste der Verteidiger 0,5 · Rumpf der schweren \
          Schiffe −14 % · Beute −30 %"
     );
+    // Wo nichts verloren geht, steht kein Minus vor der Null.
+    assert_eq!(
+        forecast_cost(&falls),
+        "eigene Verluste 0,0 Verbände · Verluste der Verteidiger 12,2 · Rumpf der schweren \
+         Schiffe 0 % · Beute 0 %"
+    );
+    assert_eq!(loss_text(0.004), "0 %");
+    assert_eq!(loss_text(0.006), "−1 %");
     let resting = Forecast {
         days: 0,
         limited_by: Some(Limit::NoControl),
@@ -407,6 +417,20 @@ fn the_window_lists_the_siege_and_shows_its_detail() {
             );
         }
     }
+    // Auch im kleinen Fenster stehen die Befehle beim Öffnen da, ohne zu rollen: Reiter
+    // und Liste bleiben fest, die Befehle kommen vor Zahlen und Prognose.
+    let mut ui = open();
+    let mut screen = Screen::new(1280.0, 720.0);
+    let painted = window(&mut screen, &scene, &mut ui);
+    for text in [TAB_SIEGES, ORDERS_ATTACKER, ASSAULT, LAND, LIFT] {
+        let rect = painted
+            .text(text)
+            .unwrap_or_else(|| panic!("„{text}“ fehlt bei 1280×720"));
+        assert!(rect.bottom() <= 720.0, "{text}: {rect:?}");
+    }
+    let orders = painted.text(ORDERS_ATTACKER).unwrap();
+    let numbers = painted.text("Vorräte der Garnison").unwrap();
+    assert!(orders.top() < numbers.top(), "Befehle vor den Zahlen");
     // Im großen Fenster stehen Prognose und Befehle ohne Rollen da.
     let mut ui = open();
     let mut screen = Screen::new(1600.0, 900.0);
@@ -441,14 +465,35 @@ fn a_resting_siege_says_so_and_never_claims_the_world_is_invested() {
         "in der Liste und im Einzelnen"
     );
     assert_eq!(painted.text("eingeschlossen"), None);
-    // Alle drei Wege scheitern am umstrittenen Orbit.
-    let reason = limit_text(Limit::NoControl);
-    let told = painted
-        .texts
-        .iter()
-        .filter(|(text, _)| text.contains(reason))
-        .count();
-    assert_eq!(told, 3);
+    // Statt dreier Wege, die der Verlauf widerlegte, steht ein Satz: Die Prognose gilt
+    // erst wieder mit der Orbitalhoheit.
+    let resting = resting_forecast(&card).expect("ruht");
+    assert!(resting.starts_with(limit_text(Limit::NoControl)));
+    assert!(resting.contains("gilt erst wieder mit der Orbitalhoheit"));
+    assert!(!resting.contains("Truppe am Boden"), "niemand ist gelandet");
+    assert!(painted.text(&resting).is_some(), "„{resting}“ fehlt");
+    for (course, forecast) in &card.forecasts {
+        assert_eq!(painted.text(&forecast_text(*course, forecast)), None);
+    }
+    // Mit einer Truppe am Boden sagt der Satz, dass sie weiterkämpft und dass die
+    // Prognose das nicht vorausrechnet.
+    let mut landed = card.clone();
+    landed.troops.army = 12.0;
+    let text = resting_forecast(&landed).expect("ruht");
+    assert!(
+        text.contains("Die Truppe am Boden kämpft") && text.contains("rechnet die Prognose nicht")
+    );
+    // Läuft die Belagerung oder ist sie entschieden, gelten die drei Wege.
+    assert_eq!(resting_forecast(&Scene::new(Some(ME)).card()), None);
+    let decided = SiegeCard {
+        handover: Some(Outcome::Stormed),
+        ..card.clone()
+    };
+    assert_eq!(resting_forecast(&decided), None);
+    // Liegt keine Flotte mehr im Orbit, nennt die Zeile keine Füllstände.
+    assert_eq!(super::detail::orbit_text(&[], &card), "keine");
+    let named = super::detail::orbit_text(&["1. Flotte"], &card);
+    assert!(named.starts_with("1. Flotte · Feuerkraft ") && named.contains("Treibstoff"));
 }
 
 #[test]
@@ -1263,4 +1308,577 @@ fn the_defence_panel_does_not_widen_the_left_panel() {
         own, foreign,
         "die Tafel der Verteidigung macht die linke Tafel breiter"
     );
+}
+
+#[test]
+fn names_are_matched_as_whole_words() {
+    assert!(names("Zeloth I ist gestürmt.", "Zeloth I"));
+    assert!(names("Über Zeloth I: Phase 3.", "Zeloth I"));
+    assert!(names("Belagerung von Zeloth I", "Zeloth I"));
+    assert!(!names(
+        "Meldung über Zeloth II, eine andere Welt.",
+        "Zeloth I"
+    ));
+    assert!(!names("AltZeloth I fällt", "Zeloth I"));
+    assert!(
+        names("Zeloth II und Zeloth I", "Zeloth I"),
+        "ein späterer Treffer zählt"
+    );
+    assert!(!names("irgendetwas", ""));
+
+    // Ein Eintrag über die Nachbarwelt „… II“ führt nicht zur Belagerung von „… I“, und
+    // einer aus der Zeit vor ihrem Beginn auch nicht.
+    let scene = Scene::new(Some(ME));
+    let card = scene.card();
+    let refs = scene.refs();
+    let cards = vec![card.clone()];
+    let entry = scene
+        .state
+        .chronicle
+        .entries
+        .iter()
+        .find(|entry| siege_of_entry(&refs, &cards, entry) == Some(card.planet))
+        .expect("ein Eintrag der Belagerung")
+        .clone();
+    let neighbour = ChronicleEntry {
+        text: format!("Meldung über {}I, eine andere Welt.", card.planet_name),
+        ..entry.clone()
+    };
+    assert!(neighbour.text.contains(&card.planet_name));
+    assert_eq!(siege_of_entry(&refs, &cards, &neighbour), None);
+    let earlier = ChronicleEntry {
+        tick: (scene.state.clock.day() - card.days - 5) * TICKS_PER_DAY,
+        ..entry.clone()
+    };
+    assert_eq!(
+        siege_of_entry(&refs, &cards, &earlier),
+        None,
+        "eine frühere Belagerung derselben Welt"
+    );
+    let elsewhere = ChronicleEntry {
+        system: Some(SystemId(card.system.0 + 1)),
+        ..entry.clone()
+    };
+    assert_eq!(siege_of_entry(&refs, &cards, &elsewhere), None);
+    assert_eq!(siege_of_entry(&refs, &cards, &entry), Some(card.planet));
+}
+
+#[test]
+fn own_sieges_come_first_and_a_new_game_forgets_the_old_choices() {
+    let scene = Scene::new(Some(ME));
+    let card = scene.card();
+    // Eine fremde Belagerung im selben System (dort liegt die eigene Flotte) steht in
+    // der Liste des Kerns vor der eigenen; die Oberfläche zeigt die eigene zuerst.
+    let others: Vec<PolityId> = scene
+        .state
+        .polities
+        .alive()
+        .map(|polity| polity.id)
+        .filter(|id| *id != card.attacker && *id != card.defender)
+        .take(2)
+        .collect();
+    let foreign = SiegeCard {
+        planet: PlanetId(card.planet.0 + 1),
+        attacker: others[0],
+        defender: others[1],
+        ..card.clone()
+    };
+    let cards = vec![foreign.clone(), card.clone()];
+    let seen = visible(&scene.refs(), &cards);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].planet, card.planet, "die eigene zuerst");
+    assert_eq!(seen[1].planet, foreign.planet);
+
+    // Was nur für die alte Partie galt, überlebt den Wechsel nicht: gewählte Welt und
+    // Flotte, ein angefangener Plan, eine offene Rückfrage, Hinweise.
+    let mut ui = SiegeUi {
+        open: true,
+        tab: SiegeTab::Troops,
+        chosen: Some(card.planet),
+        fleet: Some(card.fleets[0]),
+        strength: 7.5,
+        supply_days: 90,
+        confirm: Some(Confirm::Lift(card.planet)),
+        plan_planet: Some(card.planet),
+        plan_edit: Some((card.planet, DefensePlan::default())),
+        embark_note: Some(super::troops::EmbarkNote {
+            fleet: card.fleets[0],
+            troops: 1.0,
+            text: "alt".into(),
+        }),
+        ..Default::default()
+    };
+    ui.forget_game();
+    assert!(ui.open, "ob das Fenster offen ist, bleibt");
+    assert_eq!((ui.chosen, ui.fleet, ui.confirm), (None, None, None));
+    assert_eq!((ui.plan_planet, ui.plan_edit.clone()), (None, None));
+    assert_eq!(ui.embark_note, None);
+    assert_eq!(ui.tab, SiegeTab::Sieges);
+    assert_eq!((ui.strength, ui.supply_days), (1.0, 30));
+}
+
+#[test]
+fn a_waiting_garrison_order_is_the_base_of_the_next_click() {
+    let card = Scene::new(Some(ME)).card();
+    let mut scene = Scene::new(Some(card.defender));
+    let mut ui = open();
+    let mut screen = Screen::new(1600.0, 900.0);
+    // Bei stehender Zeit ist „Tiefe“ schon vorgemerkt: Der Klick auf das Feuerverbot
+    // nimmt die Haltung nicht zurück.
+    scene.wait(SimCommand::SetGarrisonOrders {
+        planet: card.planet,
+        posture: Posture::Deep,
+        hold_fire: false,
+    });
+    assert_eq!(
+        super::detail::effective_garrison(&scene.refs(), card.planet),
+        (Posture::Deep, false)
+    );
+    let actions = click(&mut screen, &scene, &mut ui, super::detail::HOLD_FIRE);
+    assert_eq!(
+        commands(&actions),
+        vec![SimCommand::SetGarrisonOrders {
+            planet: card.planet,
+            posture: Posture::Deep,
+            hold_fire: true,
+        }]
+    );
+    // Ohne Vorgemerktes gilt, was der Kern führt; Befehle für andere Welten zählen nicht.
+    scene.pending.clear();
+    scene.wait(SimCommand::SetGarrisonOrders {
+        planet: PlanetId(card.planet.0 + 1),
+        posture: Posture::Deep,
+        hold_fire: true,
+    });
+    assert_eq!(
+        super::detail::effective_garrison(&scene.refs(), card.planet),
+        (Posture::Forward, false)
+    );
+}
+
+#[test]
+fn landing_and_embarking_are_locked_with_the_reason_of_the_core() {
+    // Ohne Truppen an Bord lehnt der Kern die Landung ab: Der Knopf tut nichts, und sein
+    // Grund steht daneben, mit deutschen Zahlen.
+    let mut scene = Scene::new(Some(ME));
+    let card = scene.card();
+    let fleet = card.fleets[0];
+    scene.state.sieges.embarked.remove(&fleet);
+    let mut ui = open();
+    let mut screen = Screen::new(1600.0, 900.0);
+    let land = SimCommand::LandTroops {
+        fleet,
+        planet: card.planet,
+        strength: 1.0,
+    };
+    let refs = scene.refs();
+    let reason = command_block(&siege_refs(&refs), ME, &land, refs.clock.tick).expect("Grund");
+    let actions = click(&mut screen, &scene, &mut ui, LAND);
+    assert!(commands(&actions).is_empty(), "gesperrt: {actions:?}");
+    let painted = window(&mut screen, &scene, &mut ui);
+    let told = sentence(reason.clone());
+    assert!(painted.text(&told).is_some(), "„{told}“ fehlt");
+    assert!(
+        reason.contains("0.0") && told.contains("0,0"),
+        "{reason} / {told}"
+    );
+
+    // Eine Welle wartet schon: Auch mit anderer Stärke am Regler gibt es keine zweite.
+    let mut scene = Scene::new(Some(ME));
+    scene.wait(SimCommand::LandTroops {
+        fleet,
+        planet: card.planet,
+        strength: 1.0,
+    });
+    let mut ui = open();
+    ui.strength = 2.0;
+    let actions = click(&mut screen, &scene, &mut ui, LAND);
+    assert!(commands(&actions).is_empty(), "eine Welle wartet schon");
+    let painted = window(&mut screen, &scene, &mut ui);
+    assert!(painted.text(crate::ui::fleets::WAITING).is_some());
+    assert!(super::troops::move_waiting(&scene.refs(), fleet));
+    assert!(!super::troops::move_waiting(
+        &scene.refs(),
+        FleetId(fleet.0 + 77)
+    ));
+
+    // Stehen auf der Hauptwelt keine Regulären bereit, lehnt der Kern das Einschiffen ab.
+    let mut home = Scene::new(Some(ME));
+    let capital = home.state.polities.get(ME).capital.expect("Hauptwelt");
+    let system = home.state.galaxy.planet(capital).system;
+    let ship = home
+        .state
+        .fleets
+        .list
+        .iter_mut()
+        .find(|f| f.id == fleet)
+        .unwrap();
+    ship.system = system;
+    home.state.sieges.assign.remove(&fleet);
+    home.state.sieges.embarked.remove(&fleet);
+    home.state.sieges.defense_mut(capital).regulars = 0.0;
+    let mut ui = SiegeUi {
+        tab: SiegeTab::Troops,
+        fleet: Some(fleet),
+        strength: 2.0,
+        ..open()
+    };
+    let actions = click(&mut screen, &home, &mut ui, EMBARK);
+    assert!(commands(&actions).is_empty(), "gesperrt: {actions:?}");
+    assert_eq!(ui.embark_asked, None);
+    let painted = window(&mut screen, &home, &mut ui);
+    let told = painted
+        .texts
+        .iter()
+        .any(|(text, _)| text.contains("reguläre Verbände bereit."));
+    assert!(told, "der Grund des Kerns steht neben dem Knopf");
+}
+
+/// Eine Flotte der ersten Gemeinschaft über ihrer Hauptwelt, ohne Auftrag und ohne
+/// Truppen an Bord.
+fn at_home() -> (Scene, FleetId, PlanetId) {
+    let mut home = Scene::new(Some(ME));
+    let fleet = home.card().fleets[0];
+    let capital = home.state.polities.get(ME).capital.expect("Hauptwelt");
+    let system = home.state.galaxy.planet(capital).system;
+    let ship = home
+        .state
+        .fleets
+        .list
+        .iter_mut()
+        .find(|f| f.id == fleet)
+        .unwrap();
+    ship.system = system;
+    home.state.sieges.assign.remove(&fleet);
+    home.state.sieges.embarked.remove(&fleet);
+    (home, fleet, capital)
+}
+
+#[test]
+fn embarking_says_beforehand_how_much_supply_there_is_and_afterwards_what_came_aboard() {
+    use super::troops::{
+        EmbarkAsked, OfferKey, SupplyLimit, offer_text, short_supply_text, supply_limit,
+        supply_limits, supply_offer,
+    };
+    let (mut home, fleet, capital) = at_home();
+    let system = home.state.galaxy.planet(capital).system;
+    let key = OfferKey {
+        fleet,
+        planet: capital,
+        strength: 2.0,
+        supply_days: 105,
+    };
+    // Was der Probelauf des Kerns nennt, ist das Kleinste aus Wunsch, Etat und Markt:
+    // Die Begründung der Tafel rechnet mit denselben Zahlen.
+    let refs = home.refs();
+    let offer = supply_offer(&refs, key).expect("der Kern schifft ein");
+    let (affordable, available) = supply_limits(&refs, ME, system);
+    let expected = (key.strength * 105.0).min(affordable).min(available);
+    assert!(
+        (offer - expected).abs() <= 1e-6 * expected.max(1.0),
+        "Probelauf {offer}, nachgerechnet {expected}"
+    );
+    // Der Probelauf ändert nichts an der Partie.
+    assert_eq!(super::troops::aboard(&refs, fleet), (0.0, 0.0));
+    // Was der Kern ablehnte, hat kein Angebot.
+    let refused = OfferKey {
+        strength: 10_000.0,
+        ..key
+    };
+    assert_eq!(supply_offer(&refs, refused), None);
+
+    // Ein leerer Markt: nichts zu haben, und die Tafel sagt es vor dem Klick.
+    for (good, _) in &home.data.balance.siege.day_bundle_ids.clone() {
+        home.state.economy.markets[system.index()].stock[good.index()] = 0.0;
+    }
+    let refs = home.refs();
+    assert_eq!(supply_offer(&refs, key), Some(0.0));
+    assert_eq!(supply_limit(&refs, ME, system), SupplyLimit::Market);
+    let mut ui = SiegeUi {
+        tab: SiegeTab::Troops,
+        fleet: Some(fleet),
+        strength: 2.0,
+        supply_days: 105,
+        ..open()
+    };
+    let mut screen = Screen::new(1600.0, 900.0);
+    let painted = window(&mut screen, &home, &mut ui);
+    let name = &home.state.galaxy.system(system).name;
+    let warning = offer_text(2.0, 105, 0.0, SupplyLimit::Market, name).unwrap_err();
+    assert!(warning.starts_with("Heute gäbe es nur Nachschub für 0 Tage statt für 105 Tage."));
+    assert!(warning.contains(name.as_str()));
+    assert!(painted.text(&warning).is_some(), "„{warning}“ fehlt");
+    // Dieselbe Stellung der Regler fragt den Kern nicht in jedem Frame neu.
+    let asked = ui.cache.asked;
+    window(&mut screen, &home, &mut ui);
+    assert_eq!(ui.cache.asked, asked);
+
+    // Der Klick schifft trotzdem ein; die Tafel merkt sich, wonach sie sehen muss.
+    let actions = click(&mut screen, &home, &mut ui, EMBARK);
+    assert_eq!(commands(&actions), vec![key.command()]);
+    assert_eq!(
+        ui.embark_asked,
+        Some(EmbarkAsked {
+            key,
+            before: (0.0, 0.0),
+            tick: home.state.clock.tick
+        })
+    );
+    // Solange der Befehl wartet, gibt es nichts zu melden.
+    home.wait(key.command());
+    assert_eq!(ui.follow_embark(&home.refs()), None);
+    assert!(ui.embark_asked.is_some());
+    // Der Kern führt ihn aus: Verbände an Bord, kein Nachschub. Jetzt kommt der Hinweis,
+    // einmal als Einblendung und bleibend an der Flotte.
+    home.pending.clear();
+    home.state.clock.tick += 1;
+    home.state.sieges.embarked.entry(fleet).or_default().troops = 2.0;
+    let note = ui.follow_embark(&home.refs()).expect("Hinweis");
+    assert_eq!(
+        note,
+        "Eingeschifft: 2,0 Verbände, aber nur mit Nachschub für 0 Tage statt für 105 Tage. \
+         Markt und Etat gaben nicht mehr her."
+    );
+    assert_eq!(ui.embark_asked, None);
+    assert_eq!(ui.follow_embark(&home.refs()), None, "nur einmal");
+    let painted = window(&mut screen, &home, &mut ui);
+    assert!(
+        painted.text(&note).is_some(),
+        "der Hinweis steht an der Flotte"
+    );
+    // Ändert sich, was an Bord ist, ist der Hinweis überholt.
+    home.state.sieges.embarked.entry(fleet).or_default().troops = 1.0;
+    ui.follow_embark(&home.refs());
+    assert_eq!(ui.embark_note, None);
+
+    // Kam alles Verlangte an Bord, gibt es keinen Hinweis; ebenso ohne Nachschubwunsch.
+    assert_eq!(short_supply_text(2.0, 105.0, 105), None);
+    assert_eq!(short_supply_text(2.0, 104.6, 105), None);
+    assert_eq!(short_supply_text(2.0, 0.0, 0), None);
+    assert!(
+        short_supply_text(2.0, 40.0, 105)
+            .unwrap()
+            .contains("für 40 Tage statt für 105 Tage")
+    );
+    assert_eq!(
+        offer_text(2.0, 30, 60.0, SupplyLimit::Budget, "X"),
+        Ok("Nachschub für 30 Tage ist heute zu haben.".to_string())
+    );
+    assert!(
+        offer_text(2.0, 30, 20.0, SupplyLimit::Budget, "X")
+            .unwrap_err()
+            .contains("Etat für Verteidigung und Beschaffung")
+    );
+    // Ein abgelehnter Befehl hinterlässt nichts: Er wartet nicht mehr, nichts kam an Bord.
+    let (home, fleet, _) = at_home();
+    let mut ui = open();
+    ui.embark_asked = Some(EmbarkAsked {
+        key: OfferKey { fleet, ..key },
+        before: (0.0, 0.0),
+        tick: home.state.clock.tick - 5,
+    });
+    assert_eq!(ui.follow_embark(&home.refs()), None);
+    assert_eq!(ui.embark_asked, None);
+}
+
+#[test]
+fn a_fleet_waiting_for_the_orbit_says_why_and_can_drop_the_task() {
+    use super::troops::{CANCEL_TASK, WAITS_FOR_ORBIT, waiting_reason};
+    // Die Flotte hat den Auftrag, aber die Belagerung hat (noch) nicht begonnen.
+    let mut scene = Scene::new(Some(ME));
+    let card = scene.card();
+    let fleet = card.fleets[0];
+    scene.state.sieges.active.remove(&card.planet);
+    let ship = |scene: &Scene| scene.state.fleets.get(fleet).expect("Flotte").clone();
+    // Hält sie den Orbit, beginnt die Belagerung mit dem nächsten Tag.
+    let reason = waiting_reason(&scene.refs(), &ship(&scene), card.planet);
+    assert!(reason.contains("beginnt mit dem nächsten Tag"), "{reason}");
+    // Ohne Treibstoff hält sie keine Position: Das steht da, mit dem Weg zurück.
+    for vessel in &mut scene
+        .state
+        .fleets
+        .list
+        .iter_mut()
+        .find(|f| f.id == fleet)
+        .unwrap()
+        .ships
+    {
+        vessel.fuel = 0.0;
+    }
+    let reason = waiting_reason(&scene.refs(), &ship(&scene), card.planet);
+    assert!(reason.contains("keinen Treibstoff"), "{reason}");
+    let mut ui = SiegeUi {
+        tab: SiegeTab::Troops,
+        fleet: Some(fleet),
+        ..open()
+    };
+    let mut screen = Screen::new(1600.0, 900.0);
+    let painted = window(&mut screen, &scene, &mut ui);
+    assert!(painted.text(WAITS_FOR_ORBIT).is_some());
+    assert!(painted.text(&reason).is_some(), "„{reason}“ fehlt");
+    let actions = click(&mut screen, &scene, &mut ui, CANCEL_TASK);
+    assert_eq!(
+        commands(&actions),
+        vec![SimCommand::LiftSiege {
+            planet: card.planet
+        }]
+    );
+    // Im Gefecht und beim Sammeln nennt der Grund eben das.
+    let mut fighting = Scene::new(Some(ME));
+    fighting.state.sieges.active.remove(&card.planet);
+    let vessel = fighting
+        .state
+        .fleets
+        .list
+        .iter_mut()
+        .find(|f| f.id == fleet)
+        .unwrap();
+    vessel.in_battle = true;
+    let reason = waiting_reason(&fighting.refs(), &ship(&fighting), card.planet);
+    assert!(reason.contains("steht im Gefecht"), "{reason}");
+    let vessel = fighting
+        .state
+        .fleets
+        .list
+        .iter_mut()
+        .find(|f| f.id == fleet)
+        .unwrap();
+    vessel.in_battle = false;
+    vessel.regroup_until = Some(u64::MAX);
+    let reason = waiting_reason(&fighting.refs(), &ship(&fighting), card.planet);
+    assert!(reason.contains("sammelt sich"), "{reason}");
+}
+
+#[test]
+fn progress_underground_does_not_read_as_finished() {
+    let card = Scene::new(Some(ME)).card();
+    // Vor dem Untergrund gilt die Zahl des Kerns.
+    let shown = progress_of(&card);
+    assert_eq!(shown.share, card.progress as f32);
+    assert_eq!(shown.text, crate::ui::format::percent(card.progress as f32));
+    // Im Untergrund ist die Oberfläche genommen und die Zahl des Kerns voll, während die
+    // Welt noch hält: Gezeigt wird, was von der Garnison nicht mehr steht.
+    let mut deep = card.clone();
+    deep.phase = sim::siege::Phase::Underground;
+    deep.phase_number = 5;
+    deep.progress = 1.0;
+    deep.troops.militia = 0.0;
+    deep.troops.reserve = 0.0;
+    deep.troops.deep = 4.6;
+    deep.troops.garrison_start = 23.0;
+    let shown = progress_of(&deep);
+    assert!((shown.share - 0.8).abs() < 1e-6, "{shown:?}");
+    assert_eq!(
+        shown.text,
+        "Oberfläche genommen · Garnison zu 80 % gebrochen · im Untergrund noch 4,6 Verbände"
+    );
+    assert!(!shown.text.contains("100 %"));
+    // Eine genommene Zone ist für den Belagerer ein Erfolg, für den Verteidiger ein
+    // Verlust.
+    use super::detail::zone_state;
+    assert_eq!(zone_state(Role::Attacker, true, false), ("genommen", GOOD));
+    assert_eq!(zone_state(Role::Defender, true, false), ("genommen", BAD));
+    assert_eq!(zone_state(Role::Onlooker, true, true).0, "genommen");
+    assert_eq!(zone_state(Role::Attacker, false, true), ("umkämpft", WARN));
+    assert_eq!(zone_state(Role::Defender, false, false).0, "gehalten");
+}
+
+#[test]
+fn a_question_nobody_sees_any_more_expires() {
+    use super::detail::{ASK_CAPITULATE, ASK_LAST_WORLD, ASK_LIFT, capitulate_question};
+    let scene = Scene::new(Some(ME));
+    let card = scene.card();
+    let mut ui = open();
+    let mut screen = Screen::new(1600.0, 900.0);
+    click(&mut screen, &scene, &mut ui, LIFT);
+    assert_eq!(ui.confirm, Some(Confirm::Lift(card.planet)));
+    // Solange das Fenster gezeichnet wird, bleibt die Rückfrage stehen.
+    let painted = window(&mut screen, &scene, &mut ui);
+    assert!(painted.text(ASK_LIFT).is_some());
+    assert_eq!(ui.confirm, Some(Confirm::Lift(card.planet)));
+    // Einige Frames ohne das Fenster (geschlossen, Orbitansicht): Beim nächsten Zeichnen
+    // ist sie verfallen, und „Ja, aufheben“ steht nicht mehr da.
+    for _ in 0..3 {
+        screen.settle(|_| {});
+    }
+    let painted = window(&mut screen, &scene, &mut ui);
+    assert_eq!(ui.confirm, None);
+    assert_eq!(painted.text(CONFIRM_LIFT), None);
+    assert!(painted.text(LIFT).is_some());
+    // Die Rückfrage vor der Übergabe nennt die Folge, wenn es die letzte Welt ist.
+    assert_eq!(capitulate_question(3), ASK_CAPITULATE);
+    assert_eq!(capitulate_question(1), ASK_LAST_WORLD);
+    assert!(ASK_LAST_WORLD.contains("endet die eigene Gemeinschaft"));
+}
+
+#[test]
+fn a_plan_off_the_grid_is_not_an_edit_and_the_build_column_follows_the_shown_plan() {
+    // Der Kern führt für eine besetzte Welt die Stärke ihrer Besatzung als Plan; sie
+    // liegt nicht auf halben Verbänden. Die Tafel zeigt sie, ohne sie zu runden: nichts
+    // ist geändert, nichts festzusetzen, nichts zu verwerfen.
+    let mut scene = Scene::new(Some(ME));
+    let capital = scene.state.polities.get(ME).capital.expect("Hauptwelt");
+    let regulars = scene.state.sieges.defense(capital).plan.regulars.floor() + 0.2446;
+    scene.state.sieges.defense_mut(capital).plan.regulars = regulars;
+    let refs = scene.refs();
+    let card = defense_card(&siege_refs(&refs), capital).expect("Karte");
+    assert_eq!(card.plan.regulars, regulars);
+    let mut ui = SiegeUi::default();
+    let mut screen = Screen::new(1600.0, 900.0);
+    let (painted, _) = editor(&mut screen, &scene, &mut ui, capital, None);
+    assert_eq!(ui.plan_edit, None, "ohne Zutun kein geänderter Plan");
+    assert_eq!(painted.text(defense::DISCARD), None);
+    assert!(
+        !painted
+            .texts
+            .iter()
+            .any(|(text, _)| text.contains("dem geänderten Plan")),
+        "die Tafel spricht von einem geänderten Plan"
+    );
+    let (_, actions) = editor(&mut screen, &scene, &mut ui, capital, Some(SET_PLAN));
+    assert!(commands(&actions).is_empty());
+    // „Verwerfen“ stellt auch einen solchen Plan genau wieder her.
+    let more = defense::with_level(card.plan.clone(), Works::Guns, card.plan.guns + 1);
+    ui.plan_edit = Some((capital, more));
+    editor(
+        &mut screen,
+        &scene,
+        &mut ui,
+        capital,
+        Some(defense::DISCARD),
+    );
+    assert_eq!(ui.plan_edit, None);
+    let (painted, _) = editor(&mut screen, &scene, &mut ui, capital, None);
+    assert_eq!(ui.plan_edit, None);
+    assert_eq!(painted.text(defense::DISCARD), None);
+    // Der Regler selbst rastet auf halbe Verbände und am Ende auf die Grenze.
+    assert_eq!(defense::regulars_step(3.3, 22.74), 3.5);
+    assert_eq!(defense::regulars_step(3.2, 22.74), 3.0);
+    assert_eq!(defense::regulars_step(22.6, 22.74), 22.74);
+    assert_eq!(defense::regulars_step(-1.0, 22.74), 0.0);
+
+    // Die Spalte „Ausbau“ misst am gezeigten Plan: Ein höheres Ziel ist nicht „erfüllt“.
+    let works = Works::ALL
+        .into_iter()
+        .find(|works| {
+            works.planned(&card.plan) as f64 <= works.level(&card.defense).floor()
+                && card.level_caps[works.index()] as f64 > works.level(&card.defense).floor()
+        })
+        .expect("eine Anlage, deren Plan erfüllt ist und die höher ginge");
+    assert_eq!(defense::progress_text(&card, works), "erfüllt");
+    let level = works.level(&card.defense).floor() as u8;
+    let higher = defense::with_level(card.plan.clone(), works, level + 1);
+    let told = defense::progress_under(&card, &higher, works);
+    assert!(told.contains(" von ") && told != "erfüllt", "{told}");
+    ui.plan_edit = Some((capital, higher));
+    let (painted, _) = editor(&mut screen, &scene, &mut ui, capital, None);
+    let row = painted.text(works.label()).unwrap().center().y;
+    let cells: Vec<&str> = painted
+        .texts
+        .iter()
+        .filter(|(_, rect)| (rect.center().y - row).abs() < 4.0)
+        .map(|(text, _)| text.as_str())
+        .collect();
+    assert!(cells.contains(&told.as_str()), "{cells:?}");
+    assert!(!cells.contains(&"erfüllt"), "{cells:?}");
 }

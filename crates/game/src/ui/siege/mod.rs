@@ -9,7 +9,7 @@
 
 pub(crate) mod defense;
 pub(crate) mod detail;
-mod troops;
+pub(crate) mod troops;
 
 use super::fleets::{WAITING, is_waiting, sentence};
 use super::format::{decimal, percent};
@@ -22,7 +22,7 @@ use sim::fleet::Fleets;
 use sim::galaxy::Galaxy;
 use sim::ids::{FleetId, PlanetId, PolityId, SystemId};
 use sim::siege::{
-    Course, DefensePlan, Forecast, Limit, SiegeCard, SiegeRefs, command_block, siege_cards,
+    Course, DefensePlan, Forecast, Limit, Phase, SiegeCard, SiegeRefs, command_block, siege_cards,
 };
 use std::hash::{Hash, Hasher};
 
@@ -76,6 +76,14 @@ pub struct SiegeUi {
     pub strength: f32,
     pub supply_days: u32,
     pub confirm: Option<Confirm>,
+    /// Frame, in dem die Rückfrage zuletzt auf dem Schirm stand. Eine Rückfrage, die der
+    /// Spieler nicht mehr sieht (Fenster zu, andere Ansicht), verfällt.
+    pub confirm_frame: u64,
+    /// Einschiffung, deren Nachschub noch nachzusehen ist, und was dabei zu kurz kam.
+    pub embark_asked: Option<troops::EmbarkAsked>,
+    pub embark_note: Option<troops::EmbarkNote>,
+    /// Das Fenster steht gerade über der Orbitansicht: Wege zur Karte entfallen.
+    pub in_orbit: bool,
     /// Welt, deren Verteidigungsplan das Fenster „Staatsfinanzen“ zum Ändern zeigt.
     pub plan_planet: Option<PlanetId>,
     /// Der Plan, an dem der Spieler gerade dreht, solange er ihn nicht festgesetzt hat.
@@ -93,6 +101,10 @@ impl Default for SiegeUi {
             strength: 1.0,
             supply_days: 30,
             confirm: None,
+            confirm_frame: 0,
+            embark_asked: None,
+            embark_note: None,
+            in_orbit: false,
             plan_planet: None,
             plan_edit: None,
             cache: Cache::default(),
@@ -145,6 +157,9 @@ pub struct Cache {
     stamp: Option<u64>,
     cards: Vec<SiegeCard>,
     checks: Vec<(SimCommand, Option<String>)>,
+    /// Was der Kern beim Einschiffen an Nachschub kaufte, je Flotte, Welt und Stellung
+    /// der Regler: Verbandstage, oder `None`, wenn er die Einschiffung ablehnte.
+    offers: Vec<(troops::OfferKey, Option<f64>)>,
     /// Wie oft der Kern gefragt wurde (Karten und Probeläufe); für Tests.
     pub asked: u32,
 }
@@ -175,6 +190,7 @@ fn stamp(sim: &SimRefs) -> u64 {
     for (fleet, force) in &sim.sieges.embarked {
         fleet.hash(&mut hasher);
         force.troops.to_bits().hash(&mut hasher);
+        force.supply.to_bits().hash(&mut hasher);
     }
     if let Some(player) = sim.config.player {
         for fleet in sim.fleets.of(player) {
@@ -204,6 +220,7 @@ impl Cache {
         }
         self.stamp = Some(now);
         self.checks.clear();
+        self.offers.clear();
         self.cards = if sim.sieges.active.is_empty() {
             Vec::new()
         } else {
@@ -247,6 +264,22 @@ impl Cache {
             Some(reason) => Err(sentence(reason)),
             None => Ok(()),
         }
+    }
+
+    /// Nachschub in Verbandstagen, den diese Einschiffung heute bekäme: Der Kern führt sie
+    /// dazu auf einer Kopie aus ([`troops::supply_offer`]), einmal je Tag, Lage und
+    /// Stellung der Regler.
+    pub fn offer(&mut self, sim: &SimRefs, key: troops::OfferKey) -> Option<f64> {
+        if let Some((_, known)) = self.offers.iter().find(|(asked, _)| *asked == key) {
+            return *known;
+        }
+        self.asked += 1;
+        let offer = troops::supply_offer(sim, key);
+        if self.offers.len() >= KEPT_CHECKS {
+            self.offers.clear();
+        }
+        self.offers.push((key, offer));
+        offer
     }
 }
 
@@ -418,12 +451,96 @@ pub fn forecast_text(course: Course, forecast: &Forecast) -> String {
 pub fn forecast_cost(forecast: &Forecast) -> String {
     format!(
         "eigene Verluste {} Verbände · Verluste der Verteidiger {} · Rumpf der schweren \
-         Schiffe −{} · Beute −{}",
+         Schiffe {} · Beute {}",
         units(forecast.own_losses),
         units(forecast.enemy_losses),
-        percent(forecast.hull_loss as f32),
-        percent(forecast.prize_loss as f32)
+        loss_text(forecast.hull_loss),
+        loss_text(forecast.prize_loss)
     )
+}
+
+/// Ein Verlust als Anteil: „−14 %“, und „0 %“ ohne Vorzeichen, wenn nichts verloren geht.
+pub fn loss_text(share: f64) -> String {
+    let text = percent(share as f32);
+    if text == percent(0.0) {
+        text
+    } else {
+        format!("−{text}")
+    }
+}
+
+/// Was die Prognose einer ruhenden Belagerung sagt. Der Tagesrechner rechnet seine drei
+/// Wege mit dem, was im Orbit liegt; hält der Belagerer ihn nicht, gelten sie nicht, und
+/// was eine Truppe am Boden ohne ihn noch erreicht, rechnet er nicht voraus. `None`,
+/// solange die Belagerung läuft oder schon entschieden ist.
+pub fn resting_forecast(card: &SiegeCard) -> Option<String> {
+    if card.control || card.handover.is_some() {
+        return None;
+    }
+    let ground = if card.troops.army > 0.0 {
+        " Die Truppe am Boden kämpft ohne Feuer und Nachschub aus dem Orbit weiter; wie das \
+         ausgeht, rechnet die Prognose nicht voraus."
+    } else {
+        ""
+    };
+    Some(format!(
+        "{} Die Prognose gilt erst wieder mit der Orbitalhoheit.{ground}",
+        limit_text(Limit::NoControl)
+    ))
+}
+
+/// Fortschritt einer Belagerung für die Anzeige: Anteil 0..1 und ein Satz dazu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    pub share: f32,
+    pub text: String,
+    pub hint: &'static str,
+}
+
+/// Der Fortschritt, wie der Kern ihn nennt. Im Untergrund ist die Oberfläche genommen und
+/// sein Wert damit voll, obwohl die Welt noch hält: Dort zeigt die Anzeige, wie viel der
+/// Garnison vom Beginn nicht mehr steht, und nennt, was im Untergrund noch sitzt (beides
+/// Zahlen der Karte).
+pub fn progress_of(card: &SiegeCard) -> Progress {
+    if card.phase != Phase::Underground {
+        return Progress {
+            share: card.progress as f32,
+            text: percent(card.progress as f32),
+            hint: "Der Anteil der Garnison vom Beginn, der nicht mehr steht, oder der Anteil \
+                   der genommenen Zonen, je nachdem, was weiter ist.",
+        };
+    }
+    let troops = &card.troops;
+    let standing = troops.militia + troops.reserve + troops.deep;
+    let share = if troops.garrison_start > 0.0 {
+        (1.0 - standing / troops.garrison_start).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    Progress {
+        share,
+        text: format!(
+            "Oberfläche genommen · Garnison zu {} gebrochen · im Untergrund noch {} Verbände",
+            percent(share),
+            units(troops.deep)
+        ),
+        hint: "Alle Zonen der Oberfläche sind genommen. Die Welt fällt erst, wenn auch der \
+               Untergrund aufgibt oder ausgehungert ist; gezeigt wird der Anteil der \
+               Garnison vom Beginn, der nicht mehr steht.",
+    }
+}
+
+/// Nennt der Text diesen Namen als ganzes Wort? „Zeloth I“ steht nicht in „Zeloth II“:
+/// Vor und nach dem Namen darf kein Buchstabe und keine Ziffer stehen.
+pub fn names(text: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    text.match_indices(name).any(|(at, found)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + found.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Die Lage in einem Wort: die Übergabe steht aus, die Belagerung ruht, oder sie läuft.
@@ -460,7 +577,7 @@ pub fn siege_of_entry(
         .iter()
         .find(|card| {
             card.system == system
-                && entry.text.contains(&card.planet_name)
+                && names(&entry.text, &card.planet_name)
                 && entry.tick / TICKS_PER_DAY + card.days + 1 >= today
                 && may_see(
                     sim.galaxy,
@@ -527,7 +644,7 @@ fn siege_list(
                 ui.label(polity_name(sim, card.defender));
                 ui.label(format!("{} {}", card.phase_number, card.phase_label));
                 ui.label(days_text(card.days as f64));
-                ui.label(percent(card.progress as f32));
+                ui.label(percent(progress_of(card).share));
                 let state = state_text(card);
                 let color = if card.handover.is_some() {
                     GOOD
@@ -564,11 +681,26 @@ fn sieges_tab(ui: &mut egui::Ui, sim: &SimRefs, state: &mut SiegeUi, actions: &m
         state.chosen = Some(cards[0].planet);
     }
     let refs: Vec<&SiegeCard> = cards.iter().collect();
-    siege_list(ui, sim, &refs, &mut state.chosen);
+    // Die Liste bleibt stehen; viele Belagerungen rollen in ihrem eigenen kleinen Bereich.
+    egui::ScrollArea::vertical()
+        .id_salt("belagerungen_liste")
+        .max_height(132.0)
+        .show(ui, |ui| siege_list(ui, sim, &refs, &mut state.chosen));
     ui.separator();
     if let Some(card) = cards.iter().find(|card| Some(card.planet) == state.chosen) {
-        detail::siege_detail(ui, sim, card, state, actions);
+        scrolled(ui, "belagerung_einzeln", |ui| {
+            detail::siege_detail(ui, sim, card, state, actions);
+        });
     }
+}
+
+/// Der rollende Teil des Fensters unter Reitern und Liste, mit einem Rollbalken, der zu
+/// sehen ist, sobald der Inhalt nicht ganz in das Fenster passt.
+fn scrolled(ui: &mut egui::Ui, salt: &str, content: impl FnOnce(&mut egui::Ui)) {
+    ui.scope(|ui| {
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+        egui::ScrollArea::vertical().id_salt(salt).show(ui, content);
+    });
 }
 
 pub fn siege_window(
@@ -579,8 +711,9 @@ pub fn siege_window(
     actions: &mut Vec<UiAction>,
 ) {
     let mut open = state.open;
-    // Wie die anderen Fenster der Partie: Es rollt, wo der Inhalt nicht auf den Schirm
-    // passt, und bleibt unter der Kopfleiste, auch wenn das Spielfenster kleiner wird.
+    // Wie die anderen Fenster der Partie bleibt es unter der Kopfleiste, auch wenn das
+    // Spielfenster kleiner wird. Reiter und Liste stehen fest; es rollt nur, was darunter
+    // nicht auf den Schirm passt.
     let room = window_room(area);
     egui::Window::new(TITLE)
         .open(&mut open)
@@ -589,7 +722,6 @@ pub fn siege_window(
         .default_height((room - 60.0).max(160.0))
         .max_height(room)
         .constrain_to(area)
-        .vscroll(true)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut state.tab, SiegeTab::Sieges, TAB_SIEGES);
@@ -598,7 +730,9 @@ pub fn siege_window(
             ui.separator();
             match state.tab {
                 SiegeTab::Sieges => sieges_tab(ui, sim, state, actions),
-                SiegeTab::Troops => troops::troops_tab(ui, sim, state, actions),
+                SiegeTab::Troops => scrolled(ui, "belagerung_truppen", |ui| {
+                    troops::troops_tab(ui, sim, state, actions);
+                }),
             }
         });
     state.open = open;

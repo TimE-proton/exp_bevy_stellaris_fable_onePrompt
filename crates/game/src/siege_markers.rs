@@ -112,6 +112,12 @@ impl SiegeMarker {
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
 pub struct SiegeMarkers(pub Vec<SiegeMarker>);
 
+/// Ruht die Belagerung? Der Belagerer hält den Orbit nicht, und entschieden ist sie auch
+/// nicht. Die eine Stelle, nach der Schild und Ring der Marke sich richten.
+pub fn is_resting(card: &SiegeCard) -> bool {
+    !card.control && card.handover.is_none()
+}
+
 /// Die Marke zu einer Karte des Kerns, noch ohne Ort im Fenster.
 pub fn marker_of(galaxy: &Galaxy, polities: &Polities, card: &SiegeCard) -> SiegeMarker {
     SiegeMarker {
@@ -122,7 +128,7 @@ pub fn marker_of(galaxy: &Galaxy, polities: &Polities, card: &SiegeCard) -> Sieg
         row: 0,
         phase_number: card.phase_number,
         phase_label: card.phase_label,
-        resting: !card.control && card.handover.is_none(),
+        resting: is_resting(card),
         decided: card.handover.is_some(),
         blockaded: card.blockaded,
         attacker: polities.get(card.attacker).name.clone(),
@@ -232,7 +238,7 @@ fn draw(
         last_system = Some(card.system);
         let center = Vec2::from(galaxy.system(card.system).pos);
         let radius = RING_RADIUS + 3.5 * rings as f32;
-        let resting = !card.control && card.handover.is_none();
+        let resting = is_resting(card);
         let lit = if resting {
             srgb(RESTING_COLOR, 0.9)
         } else {
@@ -346,6 +352,21 @@ mod tests {
             marker.blockaded,
             "die Sperre des Systems steht dabei, wenn es gesperrt ist"
         );
+        // Ob sie ruht, liest die Marke von der Karte des Kerns: Der Belagerer hält den
+        // Orbit nicht, und entschieden ist sie auch nicht.
+        let (data, state) = conquest::state(conquest::BOMBARDMENT);
+        let cards = siege_cards(&SiegeRefs::of_state(state, data), state.clock.day());
+        let mut card = cards[0].clone();
+        assert!(card.control && !is_resting(&card));
+        card.control = false;
+        assert!(is_resting(&card));
+        let resting = marker_of(&state.galaxy, &state.polities, &card);
+        assert!(resting.resting && !resting.decided);
+        assert_eq!(resting.label(), "3 Beschuss · ruht");
+        card.handover = Some(sim::siege::Outcome::Stormed);
+        assert!(!is_resting(&card), "entschieden ruht nicht");
+        let decided = marker_of(&state.galaxy, &state.polities, &card);
+        assert!(decided.decided && !decided.resting);
         // Ruht die Belagerung, sagen es Knopf, Farbe und Schwebetext.
         marker.resting = true;
         assert_eq!(marker.label(), "3 Beschuss · ruht");

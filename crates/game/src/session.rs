@@ -163,6 +163,7 @@ fn report_rejections(
         } else {
             "."
         };
+        let reason = crate::ui::format::german_numbers(reason);
         notice.error(format!("Befehl abgelehnt: {reason}{end}"));
     }
 }

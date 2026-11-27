@@ -33,6 +33,8 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use sim::battle::{Battle, BeamKind};
 use sim::clock::SimClock;
 use sim::galaxy::Galaxy;
+use sim::polity::Polities;
+use sim::state::SimConfig;
 use std::path::{Path, PathBuf};
 
 /// So viele Frames wartet der Selbsttest am Ende höchstens darauf, dass die Engine die
@@ -75,6 +77,19 @@ struct Selftest {
     siege_photo: Option<PathBuf>,
     /// Was an der Orbitansicht nicht stimmte.
     siege_problems: Vec<String>,
+    /// Foto des Fensters „Belagerung“ (ab [`WINDOW_TOUR_MIN_FRAMES`] Frames).
+    window_photo: Option<PathBuf>,
+}
+
+/// Ab so vielen Frames zeigt der Selbsttest die Fenster nacheinander, damit keines das
+/// andere verdeckt: erst „Belagerung“ (mit eigenem Foto), dann „Staatsfinanzen“.
+const WINDOW_TOUR_MIN_FRAMES: u32 = 60;
+
+/// Frames der Fensterrunde bei `total` Frames: Fenster „Belagerung“ öffnen, es
+/// fotografieren, zu „Staatsfinanzen“ und der Tafel der eigenen Hauptwelt wechseln. Alle
+/// liegen nach der Halbzeit und vor dem Schlussfoto (`total − 12`).
+fn window_tour(total: u32) -> Option<(u32, u32, u32)> {
+    (total >= WINDOW_TOUR_MIN_FRAMES).then(|| (total * 5 / 8, total * 11 / 16, total * 3 / 4))
 }
 
 /// Stand des Abstechers in die Orbitansicht.
@@ -99,10 +114,14 @@ const SIEGE_VISIT_LEAVE: u32 = 75;
 impl Selftest {
     /// Das verlangte Foto, solange es (noch) nicht vorliegt.
     fn missing_photo(&self) -> Option<&Path> {
-        [self.photo.as_deref(), self.siege_photo.as_deref()]
-            .into_iter()
-            .flatten()
-            .find(|path| !photo_written(path))
+        [
+            self.photo.as_deref(),
+            self.siege_photo.as_deref(),
+            self.window_photo.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| !photo_written(path))
     }
 
     /// Was am Ende gegen ein „OK“ spricht: eine Kartenkamera, die nicht zeichnet, eine
@@ -156,6 +175,7 @@ impl Plugin for SelftestPlugin {
             siege: SiegeVisit::Pending,
             siege_photo: None,
             siege_problems: Vec::new(),
+            window_photo: None,
         })
         .add_systems(OnEnter(AppState::MainMenu), start)
         .add_systems(Update, drive.run_if(in_state(AppState::InGame)));
@@ -173,10 +193,11 @@ fn drive(
     args: Res<Args>,
     mut test: ResMut<Selftest>,
     mut speed: ResMut<SimSpeed>,
-    selection: Res<Selection>,
+    mut selection: ResMut<Selection>,
     mut ui_state: ResMut<UiState>,
     clock: Res<SimClock>,
     galaxy: Res<Galaxy>,
+    (polities, config): (Res<Polities>, Res<SimConfig>),
     census: MapCensus,
     mut focus: MessageWriter<FocusSystem>,
     mut exit: MessageWriter<AppExit>,
@@ -197,7 +218,46 @@ fn drive(
         focus.write(FocusSystem(system));
         ui_state.tab = LeftTab::Ownership;
         ui_state.exchange_open = true;
-        ui_state.siege.open = true;
+    }
+    // Die neuen Fenster nacheinander, damit keines das andere verdeckt. Ein kurzer Lauf
+    // zeigt nur das letzte Bild der Runde.
+    let own_world = config
+        .player
+        .and_then(|player| polities.get(player).capital)
+        .map(|planet| Selection {
+            system: Some(galaxy.planet(planet).system),
+            planet: Some(planet),
+        });
+    let show_state = |ui_state: &mut UiState, selection: &mut Selection| {
+        // „Staatsfinanzen“ mit der Verteidigung aller Welten und ihrer Haushaltszeile,
+        // links die Tafel der eigenen Hauptwelt mit ihrer Verteidigung.
+        ui_state.exchange_open = false;
+        ui_state.siege.open = false;
+        ui_state.treasury_open = true;
+        ui_state.tab = LeftTab::Overview;
+        if let Some(own_world) = own_world {
+            *selection = own_world;
+        }
+    };
+    match window_tour(total) {
+        Some((open, photo, swap)) => {
+            if test.frame == open {
+                ui_state.exchange_open = false;
+                ui_state.siege.open = true;
+            }
+            if test.frame == photo
+                && let Some(path) = args.screenshot.as_deref()
+            {
+                let path = numbered(path, 3);
+                take_photo(&mut commands, path.clone());
+                test.window_photo = Some(path);
+            }
+            if test.frame == swap {
+                show_state(&mut ui_state, &mut selection);
+            }
+        }
+        None if test.frame == total / 2 + 1 => show_state(&mut ui_state, &mut selection),
+        None => {}
     }
     if test.frame >= total.saturating_sub(12) && !test.shot_taken {
         test.shot_taken = true;
@@ -221,6 +281,7 @@ fn drive(
             exit.write(AppExit::error());
             return;
         }
+        let sieges_shown = siege.markers.0.len();
         let owned = galaxy
             .planets
             .iter()
@@ -235,10 +296,13 @@ fn drive(
             owned,
             galaxy.planets.len(),
             test.visible.unwrap_or(0),
-            if test.siege == (SiegeVisit::Done { seen: true }) {
-                ", Orbitansicht einer Belagerung gezeigt"
-            } else {
-                ""
+            match (
+                test.siege == (SiegeVisit::Done { seen: true }),
+                sieges_shown
+            ) {
+                (true, _) => ", Orbitansicht einer Belagerung gezeigt".to_string(),
+                (false, 0) => ", keine Belagerung in Sicht (Fenster „Belagerung“ leer)".to_string(),
+                (false, count) => format!(", {count} Belagerungen in Sicht"),
             },
         );
         exit.write(AppExit::Success);
@@ -1385,11 +1449,38 @@ mod tests {
     #[test]
     fn the_campaign_selftest_opens_the_siege_window() {
         let mut game = TestGame::start(CAMPAIGN);
+        // Die Fenster kommen nacheinander, damit keines das andere verdeckt: erst
+        // „Belagerung“ allein …
+        let (open, photo, swap) = window_tour(60).expect("Fensterrunde ab 60 Frames");
+        assert!(30 < open && open < photo && photo < swap && swap < 60 - 12);
+        for _ in 0..600 {
+            if game.resource::<Selftest>().frame >= photo {
+                break;
+            }
+            game.frames(1);
+        }
+        assert_eq!(game.resource::<Selftest>().frame, photo);
+        let ui = game.resource::<UiState>();
+        assert!(ui.siege.open && !ui.exchange_open && !ui.treasury_open);
+        assert!(game.window_rect(crate::ui::siege::TITLE).is_some());
+        // … dann „Staatsfinanzen“ mit der Verteidigung, links die Tafel der eigenen
+        // Hauptwelt mit ihrer Verteidigung. So steht es auf dem Schlussfoto.
         let exit = game.run_to_exit(600);
         assert_eq!(exit, AppExit::Success);
-        // Zur Halbzeit öffnet der Selbsttest die datenlastigen Fenster, auch dieses.
-        assert!(game.resource::<UiState>().siege.open);
-        assert!(game.window_rect(crate::ui::siege::TITLE).is_some());
+        let ui = game.resource::<UiState>();
+        assert!(ui.treasury_open && !ui.siege.open && !ui.exchange_open);
+        assert_eq!(ui.tab, LeftTab::Overview);
+        let capital = {
+            let player = game.resource::<SimConfig>().player.expect("Spieler");
+            game.resource::<Polities>().get(player).capital
+        };
+        assert!(capital.is_some());
+        assert_eq!(game.resource::<Selection>().planet, capital);
+        assert!(game.window_rect("Staatsfinanzen").is_some());
+        assert!(game.text(crate::ui::siege::defense::REGULARS).is_some());
+        // Ein kurzer Lauf zeigt nur das Schlussbild.
+        assert_eq!(window_tour(59), None);
+        assert_eq!(window_tour(240), Some((150, 165, 180)));
     }
 
     /// Ein geladener Spielstand mit einer Belagerung der eigenen Gemeinschaft.

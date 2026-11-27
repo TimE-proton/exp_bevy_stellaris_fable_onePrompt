@@ -58,7 +58,9 @@ pub struct Endings {
 }
 
 /// Was die Chronik über das Ende dieser Gemeinschaft sagt: ihr jüngster Eintrag der
-/// letzten Tage, der sie nennt und vom Enden oder Aufgehen spricht.
+/// letzten Tage, der sie als ganzes Wort nennt und vom Enden oder Aufgehen spricht. Die
+/// Chronik des Kerns kennt dafür kein eigenes Feld; ändert er seine Worte, bleibt der
+/// schlichte Satz am Ende, und ein Test mit einer ganzen Partie bemerkt es.
 pub fn end_text(chronicle: &Chronicle, clock: &SimClock, name: &str) -> String {
     let since = clock.tick.saturating_sub(3 * TICKS_PER_DAY);
     chronicle
@@ -67,7 +69,7 @@ pub fn end_text(chronicle: &Chronicle, clock: &SimClock, name: &str) -> String {
         .rev()
         .take_while(|entry| entry.tick >= since)
         .find(|entry| {
-            entry.text.contains(name)
+            crate::ui::siege::names(&entry.text, name)
                 && (entry.text.contains("endet") || entry.text.contains("geht in"))
         })
         .map(|entry| entry.text.clone())
@@ -213,9 +215,6 @@ pub fn window(ctx: &egui::Context, endings: &mut Endings) {
                      offen, die Zeit läuft mit der Leertaste wieder an.",
                 );
                 ui.label(RichText::new(OUT_REASON).color(Color32::from_rgb(235, 110, 95)));
-                ui.label(small(
-                    "Die ausführlichen Abschlussbilder einer Partie kommen mit Meilenstein 6.",
-                ));
             } else {
                 ui.label(small(
                     "Ihre Welten zeigt die Karte in der Farbe der neuen Besitzer; in der \
@@ -317,6 +316,48 @@ mod tests {
         assert!(endings.messages.is_empty());
         assert_eq!(fate_label(PlayerFate::Active), None);
         assert_eq!(fate_label(PlayerFate::Out), Some(OUT_LABEL));
+    }
+
+    #[test]
+    fn the_end_text_is_the_entry_that_names_this_community_as_a_whole_word() {
+        use sim::chronicle::{ChronicleEntry, ChronicleKind};
+        let clock = SimClock {
+            tick: 50 * TICKS_PER_DAY,
+        };
+        let entry = |days_ago: u64, text: &str| ChronicleEntry {
+            tick: clock.tick - days_ago * TICKS_PER_DAY,
+            kind: ChronicleKind::End,
+            polity: None,
+            system: None,
+            text: text.to_string(),
+        };
+        let mut chronicle = Chronicle::default();
+        chronicle
+            .entries
+            .push_back(entry(9, "Liga endet vor langer Zeit."));
+        chronicle
+            .entries
+            .push_back(entry(1, "Die Liga endet: Ihre letzte Welt ist gefallen."));
+        chronicle
+            .entries
+            .push_back(entry(1, "Die Liga gewinnt ein Gefecht."));
+        chronicle
+            .entries
+            .push_back(entry(0, "Die Ligatur endet mit ihrer letzten Welt."));
+        // „Liga“ steht in „Ligatur“, ist dort aber nicht gemeint.
+        assert_eq!(
+            end_text(&chronicle, &clock, "Liga"),
+            "Die Liga endet: Ihre letzte Welt ist gefallen."
+        );
+        assert_eq!(
+            end_text(&chronicle, &clock, "Ligatur"),
+            "Die Ligatur endet mit ihrer letzten Welt."
+        );
+        // Nennt die Chronik das Ende nicht, bleibt der schlichte Satz.
+        assert_eq!(
+            end_text(&chronicle, &clock, "Bund"),
+            "Bund besteht nicht mehr."
+        );
     }
 
     /// Lädt die Partie kurz vor dem Fall der letzten Welt und lässt sie laufen, bis die

@@ -36,6 +36,45 @@ pub fn percent(fraction: f32) -> String {
     format!("{} %", (fraction * 100.0).round() as i32)
 }
 
+/// Schreibt Dezimalzahlen eines Textes mit Komma: „3.0 Verbände“ wird „3,0 Verbände“. Der
+/// Kern nennt in seinen Gründen Zahlen mit Punkt; die Oberfläche schreibt deutsch. Ein
+/// Datum („05.01.2426“), eine Ordnungszahl („1. Flotte“) und Zahlen mit mehr als zwei
+/// Nachkommastellen bleiben, wie sie sind.
+pub fn german_numbers(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if !chars[index].is_ascii_digit() {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        // Ein Stück aus Ziffern und Punkten, das mit einer Ziffer beginnt.
+        let start = index;
+        while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == '.') {
+            index += 1;
+        }
+        // Ein Punkt am Ende gehört zum Satz, nicht zur Zahl.
+        while chars[index - 1] == '.' {
+            index -= 1;
+        }
+        let piece: String = chars[start..index].iter().collect();
+        let after_word = start > 0 && chars[start - 1].is_alphanumeric();
+        match piece.split_once('.') {
+            Some((whole, fraction))
+                if !after_word && !fraction.contains('.') && fraction.len() <= 2 =>
+            {
+                out.push_str(whole);
+                out.push(',');
+                out.push_str(fraction);
+            }
+            _ => out.push_str(&piece),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +89,23 @@ mod tests {
         assert_eq!(grouped(0.0), "0");
         assert_eq!(grouped(999.4), "999");
         assert_eq!(grouped(3000.0), "3.000");
+        // Zahlen aus den Gründen des Kerns: Komma statt Punkt, sonst nichts.
+        assert_eq!(
+            german_numbers("an Bord von 1. Flotte (Karawane) sind nur 3.0 Verbände."),
+            "an Bord von 1. Flotte (Karawane) sind nur 3,0 Verbände."
+        );
+        assert_eq!(
+            german_numbers("nur 0.5 freie Plätze"),
+            "nur 0,5 freie Plätze"
+        );
+        assert_eq!(german_numbers("bis zum 05.01.2426."), "bis zum 05.01.2426.");
+        assert_eq!(
+            german_numbers("3.000 Credits, Version 1.2.3"),
+            "3.000 Credits, Version 1.2.3"
+        );
+        assert_eq!(german_numbers("Stufe 2."), "Stufe 2.");
+        assert_eq!(german_numbers("Yroa-7.5 bleibt"), "Yroa-7,5 bleibt");
+        assert_eq!(german_numbers("Typ A7.5 bleibt"), "Typ A7.5 bleibt");
         assert_eq!(grouped(400_000.0), "400.000");
         assert_eq!(grouped(1_234_567.0), "1.234.567");
         assert_eq!(grouped(-54_000.0), "-54.000");

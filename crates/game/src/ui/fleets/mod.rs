@@ -39,8 +39,10 @@ const BATTLE: Color32 = Color32::from_rgb(235, 110, 95);
 const REGROUP: Color32 = Color32::from_rgb(240, 190, 80);
 pub(super) const WARN: Color32 = REGROUP;
 
-/// Macht aus dem Grund, den der Kern nennt, einen Satz für die Oberfläche.
+/// Macht aus dem Grund, den der Kern nennt, einen Satz für die Oberfläche: großer
+/// Anfang, Punkt am Ende, Zahlen mit Komma.
 pub(crate) fn sentence(reason: String) -> String {
+    let reason = super::format::german_numbers(&reason);
     let mut chars = reason.chars();
     let mut text: String = match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
