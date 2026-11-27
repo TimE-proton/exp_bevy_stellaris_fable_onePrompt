@@ -13,7 +13,7 @@ use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::{DAYS_PER_MONTH, TICKS_PER_DAY};
 use crate::data::{GameData, Sector};
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, procure};
+use crate::economy::{Claim, Economy, procure};
 use crate::finance::shares::seat_of_issuer;
 use crate::finance::{Finance, book_value};
 use crate::galaxy::Galaxy;
@@ -413,6 +413,7 @@ fn forage(
     ) else {
         return 0.0;
     };
+    let before = *treasury;
     let (mut wanted, mut got) = (0.0, 0.0);
     for (good, per_unit) in &balance.day_bundle_ids {
         let essential = data
@@ -429,6 +430,9 @@ fn forage(
         wanted += amount * value;
         got += procure(market, *good, amount, treasury, spread).0 * value;
     }
+    // Auch die Not der Eingeschlossenen ist eine Ausgabe der Verteidigung.
+    let spent = before - *treasury;
+    economy.book_paid(owner, Claim::Defense, spent);
     if wanted > 0.0 {
         (got / wanted).clamp(0.0, 1.0)
     } else {

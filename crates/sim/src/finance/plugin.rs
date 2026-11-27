@@ -16,6 +16,7 @@ use crate::galaxy::Galaxy;
 use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::Logistics;
 use crate::polity::{Polities, SuccessionParams};
+use crate::siege::{Sieges, defense_claim};
 use crate::state::SimConfig;
 use crate::tech::{Research, research_claim};
 use crate::{SimSet, sim_schedule};
@@ -58,6 +59,7 @@ fn monthly_books(
     research: Res<Research>,
     diplomacy: Res<Diplomacy>,
     logistics: Res<Logistics>,
+    sieges: Res<Sieges>,
     mut economy: ResMut<Economy>,
     mut finance: ResMut<Finance>,
     mut flows: ResMut<EquityFlows>,
@@ -142,6 +144,11 @@ fn monthly_books(
         wants.insert(
             Claim::Fleet,
             fleet_claim(&data, &galaxy, &economy, &fleets, polity),
+        );
+        let fleet_owner = |fleet| fleets.get(fleet).map(|fleet| fleet.owner);
+        wants.insert(
+            Claim::Defense,
+            defense_claim(&data, &galaxy, &economy, &fleet_owner, &sieges, polity.id),
         );
         wants.insert(
             Claim::Procurement,

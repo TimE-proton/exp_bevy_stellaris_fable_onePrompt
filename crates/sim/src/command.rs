@@ -192,6 +192,13 @@ pub enum SimCommand {
     Capitulate {
         planet: PlanetId,
     },
+    /// Ausbauziel der stehenden Verteidigung einer eigenen Welt: Stufen der
+    /// Orbitalstationen, Geschütze, des Schilds und der Bunker, reguläre Verbände und
+    /// Tage im Depot. Bezahlt wird aus dem Anspruch „Verteidigung" des Staatshaushalts.
+    SetDefensePlan {
+        planet: PlanetId,
+        plan: siege::DefensePlan,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,6 +745,15 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             &siege::Orbit::new(&mut ctx.fleets, &ctx.research),
             polity,
             *planet,
+        ),
+        SimCommand::SetDefensePlan { planet, plan } => siege::set_defense_plan(
+            &ctx.data,
+            &ctx.galaxy,
+            &ctx.research,
+            &mut ctx.sieges,
+            polity,
+            *planet,
+            plan,
         ),
     }
 }

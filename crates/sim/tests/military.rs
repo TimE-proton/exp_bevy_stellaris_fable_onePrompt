@@ -1434,10 +1434,15 @@ fn an_unaffordable_fleet_empties_the_treasury_and_leaves_arrears() {
     let home = home_of(&sim, me).1;
     let bought = economy(&control).market(home).cash - economy(&sim).market(home).cash;
     assert!(bought > 0);
-    let available = treasury(&control, me) + usual + researched + bought + handout;
+    // Die Verteidigung steht im Rang hinter der Flotte: In der Gegenprobe bekam sie ihren
+    // Sold, hier nichts.
+    let defended = paid_for(&control, me, Claim::Defense);
+    assert!(defended > 0);
+    assert_eq!(paid_for(&sim, me, Claim::Defense), 0);
+    let available = treasury(&control, me) + usual + researched + bought + handout + defended;
     assert_eq!(
         staff(&sim, me) - staff(&control, me),
-        available - usual - researched,
+        available - usual - researched - defended,
         "die ganze Kasse ging an die Besatzungen"
     );
     assert_eq!(paid_for(&sim, me, Claim::Fleet), available);

@@ -268,7 +268,8 @@ fn four_times_the_starting_fleet_runs_a_deficit_within_a_few_years() {
             );
             assert!(
                 strained.handout * 100 < usual_games[index].handout,
-                "Seed {seed}, G{index}: {strained:?}"
+                "Seed {seed}, G{index}: {strained:?} gegen {:?}",
+                usual_games[index]
             );
             assert!(
                 strained.max_arrears > 0.0 || strained.borrowed,

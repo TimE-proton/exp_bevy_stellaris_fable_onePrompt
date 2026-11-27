@@ -18,6 +18,7 @@
 //! sie in die einfachen Daten, mit denen alles Übrige rechnet. Datensätze enden nur über
 //! [`close`].
 
+pub mod arms;
 pub mod conquest;
 pub mod day;
 pub mod month;
@@ -26,6 +27,10 @@ pub mod orders;
 mod plugin;
 pub mod step;
 
+pub use arms::{
+    Shortfall, UNPAID_DECAY, Works, defense_claim, level_caps, planet_upkeep, procure_day,
+    run_arms_month, set_defense_plan, shortfall, upkeep_due,
+};
 pub use conquest::{mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use month::{run_month, stakes_in};

@@ -9,16 +9,18 @@
 //!    was der Staat zum üblichen Steuersatz im Mittel der letzten zwölf Monate einnimmt;
 //!    sie gehen an die Haushalte.
 //! 3. Flotte: Sold der Besatzungen und Ersatzteile für die Wartung.
-//! 4. Beschaffung: Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft wird,
+//! 4. Verteidigung: Sold der Regulären, Unterhalt der Anlagen der Welten, ihre Depots,
+//!    Aushebung und Ausbau (`siege::arms`).
+//! 5. Beschaffung: Werften, Nachschub und Instandsetzung. Bezahlt wird, wenn gekauft wird,
 //!    den ganzen Monat über; beim Abschluss wird dafür der Voranschlag zurückgelegt.
-//! 5. Kontore: Einlagen in Kontore, deren Kasse leer ist. Der Staat erhält dafür Anteile.
+//! 6. Kontore: Einlagen in Kontore, deren Kasse leer ist. Der Staat erhält dafür Anteile.
 //!    Sie stehen hinter Flotte und Beschaffung: Mehrere Kontore brauchen oft zugleich
 //!    Kapital, und stünden sie davor, bliebe in solchen Monaten der Sold aus.
-//! 6. Forschung.
-//! 7. Rücklage: Was übrig ist, füllt sie bis zu ihrem Ziel auf.
-//! 8. Ausschüttung: Erst vom Rest darüber geht ein Anteil an die Haushalte.
+//! 7. Forschung.
+//! 8. Rücklage: Was übrig ist, füllt sie bis zu ihrem Ziel auf.
+//! 9. Ausschüttung: Erst vom Rest darüber geht ein Anteil an die Haushalte.
 //!
-//! Die Ansprüche 1 bis 5 dürfen die Rücklage angreifen, die Forschung nicht: Sie bekommt nur,
+//! Die Ansprüche 1 bis 6 dürfen die Rücklage angreifen, die Forschung nicht: Sie bekommt nur,
 //! was die laufenden Einnahmen des Monats nach den vorrangigen Ansprüchen übrig lassen, und
 //! was schon über der Rücklage lag. Reicht das Geld nicht, wird von hinten gekürzt; was das
 //! heißt, entscheidet jeder Anspruch selbst (Soldrückstand, langsamere Forschung, wartende
@@ -34,7 +36,7 @@
 //! Grundleistungen und Ausschüttung fließen an die Haushalte der Welten. Was Flotte und
 //! Forschung kosten, fehlt deshalb der Ausschüttung und dem Verbrauch der Haushalte.
 //!
-//! Ein neuer Anspruch (etwa die Verteidigung von Welten) bekommt eine Variante von
+//! Ein neuer Anspruch bekommt eine Variante von
 //! [`Claim`] an der Stelle seines Rangs, meldet zum Monatsabschluss seinen Bedarf in
 //! [`Wants`] und gibt aus, was ihm bewilligt wurde: Einkäufe über [`Economy::allowance`]
 //! und [`Economy::spend`], Sold über [`Economy::pay_staff`].
@@ -61,6 +63,9 @@ pub enum Claim {
     Civil,
     /// Sold der Besatzungen und Wartung der Schiffe.
     Fleet,
+    /// Stehende Verteidigung der Welten: Sold der Regulären, Unterhalt der Anlagen,
+    /// Depots, Aushebung und Ausbau.
+    Defense,
     /// Werften, Nachschub und Instandsetzung, bezahlt, wenn gekauft wird.
     Procurement,
     /// Einlagen in Kontore, deren Kasse leer ist; der Staat erhält dafür Anteile.
@@ -75,10 +80,11 @@ pub enum Claim {
 
 impl Claim {
     /// Alle Ansprüche in ihrer Rangfolge.
-    pub const ALL: [Claim; 8] = [
+    pub const ALL: [Claim; 9] = [
         Claim::DebtService,
         Claim::Civil,
         Claim::Fleet,
+        Claim::Defense,
         Claim::Procurement,
         Claim::Markets,
         Claim::Research,
@@ -91,6 +97,7 @@ impl Claim {
             Claim::DebtService => "Schuldendienst",
             Claim::Civil => "Grundleistungen",
             Claim::Fleet => "Flotte",
+            Claim::Defense => "Verteidigung",
             Claim::Procurement => "Beschaffung",
             Claim::Markets => "Kontore",
             Claim::Research => "Forschung",

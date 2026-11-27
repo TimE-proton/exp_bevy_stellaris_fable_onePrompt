@@ -2,8 +2,8 @@
 //! Kriegsschäden und Besatzung, die Spiegelwerte der Regionen, aus denen der Zusammenhalt
 //! rechnet, und die Anteile an den Betrieben belagerter Welten.
 //!
-//! Beschaffung, Aushebung, Ausbau und Sold der stehenden Verteidigung gehören nicht
-//! hierher; sie kommen mit dem Rüstungsetat.
+//! Beschaffung, Aushebung, Ausbau und Sold der stehenden Verteidigung stehen in
+//! [`super::arms`].
 
 use super::step::militia_strength;
 use super::{Sieges, mirror_region};
@@ -63,10 +63,19 @@ pub fn run_month(
             continue;
         };
         if !besieged {
-            defense.militia = match planet.owner {
+            let militia = match planet.owner {
                 Some(_) => militia_strength(planet.population, region.cohesion, balance),
                 None => 0.0,
             };
+            // Das Depot zählt in Tagen für die ganze Garnison: Wächst die Miliz, reichen
+            // dieselben Vorräte kürzer, schrumpft sie, länger. Eine eben erst aufgestellte
+            // Miliz bringt ihre Vorräte mit.
+            let old = defense.militia + defense.regulars;
+            let new = defense.regulars + militia;
+            if defense.militia > 0.0 && new > 0.0 {
+                defense.depot = (defense.depot * old / new).min(balance.depot_days_cap as f64);
+            }
+            defense.militia = militia;
         }
         defense.scar *= 1.0 - balance.scar_decay;
         if defense.scar < HEALED {

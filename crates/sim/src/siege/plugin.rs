@@ -1,4 +1,7 @@
-use super::{OrbitAccess, Sieges, reserve_besiegers, resolve_conquests, run_day, run_month, tidy};
+use super::{
+    OrbitAccess, Sieges, procure_day, reserve_besiegers, resolve_conquests, run_arms_month,
+    run_day, run_month, tidy,
+};
 use crate::ai::AiState;
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
@@ -6,6 +9,7 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::Economy;
 use crate::finance::Finance;
+use crate::fleet::Fleets;
 use crate::galaxy::Galaxy;
 use crate::logistics::Logistics;
 use crate::polity::{Polities, SuccessionParams};
@@ -24,7 +28,11 @@ impl Plugin for SiegePlugin {
             (
                 // Nach den Gefechten des Takts: Wer dort eine Flotte verliert, belagert im
                 // selben Takt nicht mehr. Der Tagesschritt folgt am Tagesbeginn.
-                (siege_watch, siege_day.run_if(day_start))
+                (
+                    siege_watch,
+                    siege_day.run_if(day_start),
+                    siege_procure.run_if(day_start),
+                )
                     .chain()
                     .in_set(SimSet::Siege),
                 // Urteile des Tages werden noch am selben Tag zum Besitzwechsel; danach, am
@@ -111,16 +119,28 @@ fn conquests(clock: Res<SimClock>, mut sieges: ResMut<Sieges>, mut params: Succe
     resolve_conquests(&mut params.borrow(), &mut sieges, clock.tick);
 }
 
-/// Monatsbeginn: Miliz im Frieden, Abklingen von Schäden und Besatzung, Spiegelwerte der
-/// Regionen, Anteile an den Betrieben belagerter Welten.
+/// Monatsbeginn: Sold, Unterhalt, Aushebung und Ausbau aus der Bewilligung der
+/// Verteidigung; dann Miliz im Frieden, Abklingen von Schäden und Besatzung, Spiegelwerte
+/// der Regionen, Anteile an den Betrieben belagerter Welten.
 fn siege_month(
     data: Res<GameData>,
-    galaxy: Res<Galaxy>,
     polities: Res<Polities>,
     logistics: Res<Logistics>,
+    fleets: Res<Fleets>,
+    mut galaxy: ResMut<Galaxy>,
+    mut economy: ResMut<Economy>,
     mut finance: ResMut<Finance>,
     mut sieges: ResMut<Sieges>,
 ) {
+    let fleet_owner = |fleet| fleets.get(fleet).map(|fleet| fleet.owner);
+    run_arms_month(
+        &data,
+        &mut galaxy,
+        &polities,
+        &mut economy,
+        &mut sieges,
+        &fleet_owner,
+    );
     run_month(
         &data,
         &galaxy,
@@ -129,4 +149,18 @@ fn siege_month(
         &logistics,
         &mut sieges,
     );
+}
+
+/// Tagesbeginn, nach dem Tagesschritt der Belagerungen: Die Welten füllen ihre Depots
+/// aus der Bewilligung der Verteidigung.
+fn siege_procure(
+    data: Res<GameData>,
+    galaxy: Res<Galaxy>,
+    fleets: Res<Fleets>,
+    mut economy: ResMut<Economy>,
+    mut sieges: ResMut<Sieges>,
+) {
+    procure_day(&data, &galaxy, &mut economy, &mut sieges, &|system| {
+        fleets.is_blockaded(system)
+    });
 }

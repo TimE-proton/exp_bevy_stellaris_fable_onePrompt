@@ -10,7 +10,7 @@ use crate::chronicle::Chronicle;
 use crate::clock::TICKS_PER_DAY;
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
-use crate::economy::{Economy, Money, purchase, to_credits};
+use crate::economy::{Claim, Economy, Money, purchase, to_credits, to_money};
 use crate::finance::Finance;
 use crate::galaxy::{Galaxy, Planet};
 use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
@@ -196,14 +196,18 @@ pub fn set_garrison_orders(
     Ok(())
 }
 
-/// RÜSTUNGSETAT: Was eine Gemeinschaft heute für Rüstung ausgeben darf, in Tausendstel
-/// Credits. Die eine Stelle, an der die Grenze gilt: Jeder Einkauf der Belagerung, der
-/// nach der Vorgabe aus dem Rüstungsetat bezahlt wird, fragt hier. Noch gibt es keinen
-/// Monatsetat; verfügbar ist die ganze Staatskasse. Sobald der Staatshaushalt den
-/// Ansprüchen an die Kasse ihre Anteile zuweist, steht hier der Rest des Monatsetats
-/// (`Sieges::budget`), und der Aufrufer bucht ab, was er ausgegeben hat.
+/// Was eine Gemeinschaft heute für den Nachschub ihrer Truppen ausgeben darf, in
+/// Tausendstel Credits: der Rest der Bewilligung der Verteidigung, und ist der verbraucht,
+/// die freie Kasse wie die Beschaffung. Solange noch kein Haushaltsmonat eröffnet ist,
+/// gilt die Kasse. Die eine Stelle, an der die Grenze gilt; der Aufrufer verbucht, was er
+/// ausgegeben hat, beim Anspruch [`Claim::Defense`].
 pub fn armament_allowance(economy: &Economy, _sieges: &Sieges, polity: PolityId) -> Money {
-    economy.treasury(polity).max(0)
+    let opened = economy.budget(polity).is_some_and(|budget| budget.opened);
+    if opened {
+        economy.allowance(polity, Claim::Defense) + economy.allowance(polity, Claim::Procurement)
+    } else {
+        economy.treasury(polity).max(0)
+    }
 }
 
 /// Kauft Nachschub für `wanted` Verbandstage am Markt des Systems: je Verbandstag einen
@@ -245,11 +249,15 @@ fn buy_supply(
         sets = sets.min(market.available(*good) / amount);
     }
     let sets = sets.max(0.0);
+    let before = *treasury;
     if sets > 0.0 {
         for (good, amount) in bundle {
             purchase(market, *good, sets * amount, treasury, spread);
         }
     }
+    let spent = before - *treasury;
+    economy.want(polity, Claim::Defense, to_money(affordable * cost));
+    economy.book_paid(polity, Claim::Defense, spent);
     sets
 }
 
