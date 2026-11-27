@@ -469,15 +469,102 @@ impl<'a> Orbit<'a> {
         galaxy: &Galaxy,
         diplomacy: &Diplomacy,
         battles: &Battles,
-        defenses: &[PlanetDefense],
+        sieges: &Sieges,
     ) {
         update_blockades(galaxy, self.fleets, diplomacy, battles);
-        self.veto_blockades(galaxy, defenses);
+        self.veto_blockades(galaxy, &sieges.defenses);
+        let held = self.held_systems(galaxy, diplomacy, sieges);
+        self.close_systems(held);
+    }
+
+    /// Systeme, die eine Belagerung sperrt: Der Belagerer hält den Orbit über einer Welt
+    /// ohne Stationen; und war das System schon gesperrt, hält die Sperre, solange seine
+    /// Flotte dort noch kämpft (ein Entsatz muss sie erst schlagen).
+    pub fn held_systems(
+        &self,
+        galaxy: &Galaxy,
+        diplomacy: &Diplomacy,
+        sieges: &Sieges,
+    ) -> Vec<SystemId> {
+        sieges
+            .active
+            .iter()
+            .filter(|(planet, _)| sieges.defense(**planet).stations <= 0.0)
+            .filter_map(|(planet, siege)| {
+                let system = galaxy.planet(*planet).system;
+                let holds =
+                    self.control(diplomacy, &sieges.assign, *planet, system, siege.attacker)
+                        || (sieges.closed.contains(&system)
+                            && self.fights_on(&sieges.assign, *planet, system, siege.attacker));
+                holds.then_some(system)
+            })
+            .collect()
     }
 
     /// Ist das System für den Handel gesperrt?
     pub fn is_blockaded(&self, system: SystemId) -> bool {
         self.fleets.is_blockaded(system)
+    }
+
+    /// Alle gesperrten Systeme, aufsteigend.
+    pub fn blockaded(&self) -> &[SystemId] {
+        &self.fleets.blockaded
+    }
+
+    /// Liegt noch eine dem Planeten zugeordnete Flotte des Belagerers mit Treibstoff im
+    /// System, auch wenn sie gerade kämpft oder sich sammelt? Dann ruht die Belagerung
+    /// nur, wenn der Orbit umstritten ist; sonst ist sie gebrochen.
+    pub fn lingers(
+        &self,
+        assign: &BTreeMap<FleetId, PlanetId>,
+        planet: PlanetId,
+        system: SystemId,
+        attacker: PolityId,
+    ) -> bool {
+        self.linger(assign, planet, system, attacker, false)
+    }
+
+    /// Wie [`Orbit::lingers`], aber nur Flotten, die im Gefecht stehen.
+    pub fn fights_on(
+        &self,
+        assign: &BTreeMap<FleetId, PlanetId>,
+        planet: PlanetId,
+        system: SystemId,
+        attacker: PolityId,
+    ) -> bool {
+        self.linger(assign, planet, system, attacker, true)
+    }
+
+    fn linger(
+        &self,
+        assign: &BTreeMap<FleetId, PlanetId>,
+        planet: PlanetId,
+        system: SystemId,
+        attacker: PolityId,
+        fighting: bool,
+    ) -> bool {
+        assign
+            .iter()
+            .filter(|(_, target)| **target == planet)
+            .filter_map(|(fleet, _)| self.fleets.get(*fleet))
+            .any(|fleet| {
+                fleet.alive
+                    && fleet.owner == attacker
+                    && fleet.system == system
+                    && fleet.is_docked()
+                    && fleet.min_fuel() > 0.0
+                    && (!fighting || fleet.in_battle)
+            })
+    }
+
+    /// Wer einen Planeten einschließt, sperrt sein System für Handel und Nachschub, gleich
+    /// mit welchem Auftrag seine Flotte dort liegt.
+    pub fn close_systems(&mut self, systems: impl IntoIterator<Item = SystemId>) {
+        for system in systems {
+            if let Err(at) = self.fleets.blockaded.binary_search(&system) {
+                self.fleets.blockaded.insert(at, system);
+            }
+        }
     }
 }
 
@@ -1116,30 +1203,15 @@ mod tests {
         scene.fleets.list[0].stance = Stance::Blockade;
         let (galaxy, diplomacy) = (scene.galaxy.clone(), scene.diplomacy.clone());
         let mut orbit = Orbit::new(&mut scene.fleets, &scene.research);
-        orbit.refresh_blockades(
-            &galaxy,
-            &diplomacy,
-            &Battles::default(),
-            &scene.sieges.defenses,
-        );
+        orbit.refresh_blockades(&galaxy, &diplomacy, &Battles::default(), &scene.sieges);
         assert!(orbit.is_blockaded(scene.system));
         // Eine Station der Welt, die das System prägt, hält es offen.
         scene.sieges.defenses[scene.planet.index()].stations = 0.4;
-        orbit.refresh_blockades(
-            &galaxy,
-            &diplomacy,
-            &Battles::default(),
-            &scene.sieges.defenses,
-        );
+        orbit.refresh_blockades(&galaxy, &diplomacy, &Battles::default(), &scene.sieges);
         assert!(!orbit.is_blockaded(scene.system));
         // Ist sie zerstört, steht die Sperre wieder.
         scene.sieges.defenses[scene.planet.index()].stations = 0.0;
-        orbit.refresh_blockades(
-            &galaxy,
-            &diplomacy,
-            &Battles::default(),
-            &scene.sieges.defenses,
-        );
+        orbit.refresh_blockades(&galaxy, &diplomacy, &Battles::default(), &scene.sieges);
         assert!(orbit.is_blockaded(scene.system));
         // Die Station einer fremden Welt im System hilft dem Systembesitzer nicht.
         let other = galaxy
@@ -1148,12 +1220,7 @@ mod tests {
             .map(|planet| planet.id);
         if let Some(other) = other {
             scene.sieges.defenses[other.index()].stations = 1.0;
-            orbit.refresh_blockades(
-                &galaxy,
-                &diplomacy,
-                &Battles::default(),
-                &scene.sieges.defenses,
-            );
+            orbit.refresh_blockades(&galaxy, &diplomacy, &Battles::default(), &scene.sieges);
             assert!(orbit.is_blockaded(scene.system));
         }
     }

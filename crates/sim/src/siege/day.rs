@@ -297,6 +297,45 @@ fn open(
     );
 }
 
+/// Chronik der Blockaden: Beginn und Ende der Sperre eines Systems, gemessen am Stand
+/// des letzten Tagesbeginns.
+fn tell_blockades(
+    galaxy: &Galaxy,
+    polities: &Polities,
+    sieges: &mut Sieges,
+    orbit: &Orbit,
+    chronicle: &mut Chronicle,
+    tick: u64,
+) {
+    let now: std::collections::BTreeSet<SystemId> = orbit.blockaded().iter().copied().collect();
+    if now == sieges.closed {
+        return;
+    }
+    let owner = |system: SystemId| galaxy.system_owner(system).map(|owner| polities.get(owner));
+    for system in now.difference(&sieges.closed) {
+        let name = &galaxy.system(*system).name;
+        let (polity, text) = match owner(*system) {
+            Some(owner) => (
+                Some(owner.id),
+                format!("Blockade: Das System {name} ({}) ist gesperrt.", owner.name),
+            ),
+            None => (None, format!("Blockade: Das System {name} ist gesperrt.")),
+        };
+        chronicle.push(tick, ChronicleKind::War, polity, Some(*system), text);
+    }
+    for system in sieges.closed.difference(&now) {
+        let name = &galaxy.system(*system).name;
+        chronicle.push(
+            tick,
+            ChronicleKind::War,
+            owner(*system).map(|owner| owner.id),
+            Some(*system),
+            format!("Die Blockade des Systems {name} ist aufgehoben."),
+        );
+    }
+    sieges.closed = now;
+}
+
 /// Lebenslauf am Tagesbeginn: die Stelle, an der Datensätze entstehen, und an der endet,
 /// was der Belagerer nicht mehr hält.
 fn lifecycle(
@@ -339,14 +378,12 @@ fn lifecycle(
         .active
         .iter()
         .filter(|(planet, siege)| {
+            let system = galaxy.planet(**planet).system;
+            // Macht ein Entsatz den Orbit nur streitig, ruht die Belagerung; gebrochen
+            // ist sie, wenn keine Flotte des Belagerers mehr über dem Planeten liegt.
             siege.army <= 0.0
-                && !orbit.control(
-                    diplomacy,
-                    &sieges.assign,
-                    **planet,
-                    galaxy.planet(**planet).system,
-                    siege.attacker,
-                )
+                && !orbit.control(diplomacy, &sieges.assign, **planet, system, siege.attacker)
+                && !orbit.lingers(&sieges.assign, **planet, system, siege.attacker)
         })
         .map(|(planet, _)| *planet)
         .collect();
@@ -388,8 +425,12 @@ fn lifecycle(
             );
         }
     }
-    // Stationen halten ihr System offen, auch gegen die Blockade der Flottenebene.
+    // Stationen halten ihr System offen, auch gegen die Blockade der Flottenebene. Wer
+    // einen Planeten einschließt, sperrt sein System, gleich mit welchem Auftrag.
     orbit.veto_blockades(galaxy, &sieges.defenses);
+    let held = orbit.held_systems(galaxy, diplomacy, sieges);
+    orbit.close_systems(held);
+    tell_blockades(galaxy, polities, sieges, orbit, chronicle, tick);
     for (index, region) in finance.regions.iter_mut().enumerate() {
         region.besieged = sieges.active.contains_key(&PlanetId::from_index(index));
     }
@@ -579,6 +620,46 @@ fn resolve_siege(
     effects.disruption
 }
 
+/// Chronik der Phasen: Jeder Wechsel der Phase einer Belagerung wird einmal genannt. Die
+/// erste Phase steht schon im Eintrag über ihren Beginn.
+fn tell_phase(
+    galaxy: &Galaxy,
+    sieges: &mut Sieges,
+    chronicle: &mut Chronicle,
+    planet: PlanetId,
+    tick: u64,
+) {
+    let Sieges {
+        active, defenses, ..
+    } = sieges;
+    let (Some(siege), Some(defense)) = (active.get_mut(&planet), defenses.get(planet.index()))
+    else {
+        return;
+    };
+    let phase = siege.phase(defense);
+    if siege.phase_told == phase.number() {
+        return;
+    }
+    let first = siege.phase_told == 0;
+    siege.phase_told = phase.number();
+    if first {
+        return;
+    }
+    let target = galaxy.planet(planet);
+    chronicle.push(
+        tick,
+        ChronicleKind::War,
+        Some(siege.attacker),
+        Some(target.system),
+        format!(
+            "Belagerung von {}: Phase {} von 5, {}.",
+            target.name,
+            phase.number(),
+            phase.label()
+        ),
+    );
+}
+
 /// Tagesschritt der Belagerung: Lebenslauf der Datensätze, dann je Belagerung in der
 /// Reihenfolge der Planeten der Tagesrechner mit seiner Wirkung auf Schiffe, Wirtschaft
 /// und Finanzen, zuletzt der Stillstand der Wirtschaft auf jeder Welt. Urteile stehen
@@ -611,6 +692,7 @@ pub fn run_day(
         if target > 0.0 {
             disrupted.insert(planet, target);
         }
+        tell_phase(galaxy, sieges, chronicle, planet, tick);
     }
     // Stillstand: sofort auf den Stand des Tages, danach klingt er von selbst ab.
     let decay = 1.0 - data.balance.siege.disrupt_decay;
@@ -707,48 +789,56 @@ mod tests {
     }
 
     #[test]
-    fn relief_lifts_the_siege_and_the_besieger_starts_over_when_it_leaves() {
+    fn a_contested_orbit_rests_the_siege_and_a_besieger_who_leaves_breaks_it() {
         let mut scene = Scene::new();
         scene.day();
         scene.day();
-        let militia = scene.state.sieges.defense(scene.planet).militia;
         let depot = scene.state.sieges.defense(scene.planet).depot;
-        // Die Flotte des Verteidigers kehrt zurück: keine Orbitalhoheit mehr.
+        // Die Flotte des Verteidigers kehrt zurück: keine Orbitalhoheit mehr. Solange der
+        // Belagerer über dem Planeten liegt, ruht die Belagerung nur.
         let away = scene.fleet_system(1);
         scene.place(1, scene.system);
         scene.day();
-        assert!(scene.state.sieges.siege(scene.planet).is_none());
-        assert!(!scene.state.finance.region(scene.planet).besieged);
-        let stats = &scene.state.sieges.stats;
-        assert_eq!((stats.begun, stats.lifted, stats.days), (1, 1, 2));
-        // Die Miliz steht wieder als Miliz der Welt, die Vorräte bleiben, wie sie sind.
-        assert_eq!(scene.state.sieges.defense(scene.planet).militia, militia);
+        scene.day();
+        let siege = scene.siege();
+        assert_eq!(siege.started_day, 1);
+        assert!(scene.state.finance.region(scene.planet).besieged);
+        // Ohne Orbitalhoheit zehrt nichts an den Vorräten, und die Miliz bleibt in ihren
+        // Zonen: Ein gescheiterter Entsatz füllt die Garnison nicht auf.
         assert_eq!(scene.state.sieges.defense(scene.planet).depot, depot);
-        // Die Zuordnung bleibt: Die Flotte liegt noch im System und will belagern.
+        let stats = &scene.state.sieges.stats;
+        assert_eq!((stats.begun, stats.lifted), (1, 0));
         assert_eq!(
             scene.state.sieges.assign.get(&FleetId(0)),
             Some(&scene.planet)
         );
+        // Zieht der Entsatz ab, geht dieselbe Belagerung weiter.
+        scene.place(1, away);
+        scene.day();
+        assert_eq!(scene.siege().started_day, 1);
+        assert!(scene.state.sieges.defense(scene.planet).depot < depot);
+        assert_eq!(scene.state.sieges.stats.begun, 1);
+
+        // Verlässt der Belagerer das System, fällt seine Zuordnung: Die Belagerung ist
+        // gebrochen, und die Miliz steht wieder als Miliz der Welt.
+        let militia = scene.siege().zone_militia();
+        scene.place(0, away);
+        scene.day();
+        assert!(scene.state.sieges.assign.is_empty());
+        assert!(scene.state.sieges.active.is_empty());
+        assert!(!scene.state.finance.region(scene.planet).besieged);
+        assert_eq!(scene.state.sieges.stats.lifted, 1);
+        assert_eq!(scene.state.sieges.defense(scene.planet).militia, militia);
         let lifted = scene
             .state
             .chronicle
             .entries
             .iter()
-            .filter(|entry| entry.text.contains("aufgehoben"))
+            .filter(|entry| {
+                entry.text.contains("Die Belagerung") && entry.text.contains("aufgehoben")
+            })
             .count();
         assert_eq!(lifted, 1);
-        // Zieht der Entsatz ab, beginnt die Belagerung von vorn.
-        scene.place(1, away);
-        scene.day();
-        assert_eq!(scene.siege().started_day, 4);
-        assert_eq!(scene.state.sieges.stats.begun, 2);
-
-        // Verlässt der Belagerer das System, fällt seine Zuordnung, und die Belagerung endet.
-        scene.place(0, away);
-        scene.day();
-        assert!(scene.state.sieges.assign.is_empty());
-        assert!(scene.state.sieges.active.is_empty());
-        assert_eq!(scene.state.sieges.stats.lifted, 2);
     }
 
     #[test]

@@ -261,21 +261,20 @@ fn buy_supply(
     sets
 }
 
-/// Schifft reguläre Verbände einer eigenen Welt auf eine eigene Flotte in deren System
-/// ein, mit Nachschub für `supply_days` Tage, soweit Markt und Staatskasse ihn hergeben.
-pub fn embark_troops(
+/// Prüft, ob [`embark_troops`] die Verbände einschiffen würde, ohne etwas zu ändern, und
+/// gibt das System zurück, an dessen Markt der Nachschub gekauft wird.
+pub fn check_embark(
     data: &GameData,
     galaxy: &Galaxy,
     diplomacy: &Diplomacy,
-    economy: &mut Economy,
-    sieges: &mut Sieges,
+    sieges: &Sieges,
     orbit: &Orbit,
     polity: PolityId,
     fleet: FleetId,
     planet: PlanetId,
     strength: f64,
     supply_days: u16,
-) -> Result<(), String> {
+) -> Result<SystemId, String> {
     let balance = &data.balance.siege;
     let target = known(galaxy, planet)?;
     let squadron = orbit.own(polity, fleet)?;
@@ -338,11 +337,41 @@ pub fn embark_troops(
             free.max(0.0)
         ));
     }
+    Ok(target.system)
+}
+
+/// Schifft reguläre Verbände einer eigenen Welt auf eine eigene Flotte in deren System
+/// ein, mit Nachschub für `supply_days` Tage, soweit Markt und Staatskasse ihn hergeben.
+pub fn embark_troops(
+    data: &GameData,
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    economy: &mut Economy,
+    sieges: &mut Sieges,
+    orbit: &Orbit,
+    polity: PolityId,
+    fleet: FleetId,
+    planet: PlanetId,
+    strength: f64,
+    supply_days: u16,
+) -> Result<(), String> {
+    let system = check_embark(
+        data,
+        galaxy,
+        diplomacy,
+        sieges,
+        orbit,
+        polity,
+        fleet,
+        planet,
+        strength,
+        supply_days,
+    )?;
     let supply = buy_supply(
         data,
         economy,
         sieges,
-        target.system,
+        system,
         polity,
         strength * supply_days as f64,
     );

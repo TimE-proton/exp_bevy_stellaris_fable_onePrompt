@@ -185,6 +185,7 @@ pub fn form(
         population_start: facts.population.max(0.0),
         stakes,
         report: SiegeReport::default(),
+        phase_told: 0,
     }
 }
 

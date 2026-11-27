@@ -26,6 +26,7 @@ pub mod orbit;
 pub mod orders;
 mod plugin;
 pub mod step;
+pub mod view;
 
 pub use arms::{
     Shortfall, UNPAID_DECAY, Works, defense_claim, level_caps, planet_upkeep, procure_day,
@@ -44,6 +45,10 @@ pub use step::{
     DayEffects, Landing, Projection, build_zones, forecast, form, hull_shares, land,
     militia_strength, resolve, stations_after_duel, trace,
 };
+pub use view::{
+    DefenseCard, DefenseStrength, SiegeCard, SiegeRefs, TroopStrength, command_block, defense_card,
+    siege_card, siege_cards, siege_view,
+};
 
 use crate::ai::AiState;
 use crate::data::{GameData, SiegeBalance};
@@ -51,7 +56,7 @@ use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money};
 use crate::finance::Finance;
 use crate::galaxy::Galaxy;
-use crate::ids::{FleetId, PlanetId, PolityId};
+use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
 use crate::polity::Polities;
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -176,6 +181,11 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Nummer der Phase, 1 bis 5.
+    pub fn number(self) -> u8 {
+        self as u8 + 1
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Phase::Approach => "Anmarsch",
@@ -387,6 +397,9 @@ pub struct Siege {
     /// Anteile am Wert der Betriebe der Welt je Gemeinschaft; monatlich aufgefrischt.
     pub stakes: BTreeMap<PolityId, f64>,
     pub report: SiegeReport,
+    /// Nummer der Phase (1 bis 5), die die Chronik zuletzt genannt hat.
+    #[serde(default)]
+    pub phase_told: u8,
 }
 
 impl Siege {
@@ -763,6 +776,10 @@ pub struct Sieges {
     /// ([`reserve_besiegers`]): genau die, die sie wieder freigibt.
     #[serde(default)]
     pub held: BTreeSet<FleetId>,
+    /// Systeme, die am letzten Tagesbeginn gesperrt waren: Daraus liest die Chronik
+    /// Beginn und Ende einer Blockade, und eine Einschließung hält daran durch ein Gefecht.
+    #[serde(default)]
+    pub closed: BTreeSet<SystemId>,
 }
 
 impl Sieges {
@@ -1041,6 +1058,40 @@ pub fn check_records(
     Ok(())
 }
 
+/// Belagerungen und Gemeinschaften: Belagerer und Verteidiger bestehen, keine Welt einer
+/// beendeten Gemeinschaft wird belagert, und was die Belagerung je Gemeinschaft führt
+/// (Etat, Plan), gehört einer lebenden.
+pub fn check_parties(galaxy: &Galaxy, polities: &Polities, sieges: &Sieges) -> Result<(), String> {
+    let alive = |polity: PolityId| {
+        polities
+            .list
+            .get(polity.index())
+            .is_some_and(|polity| polity.alive)
+    };
+    for (planet, siege) in &sieges.active {
+        let name = &galaxy.planet(*planet).name;
+        if !alive(siege.attacker) {
+            return Err(format!("{name}: Der Belagerer besteht nicht mehr"));
+        }
+        if !alive(siege.defender) {
+            return Err(format!(
+                "{name}: Belagerung einer Welt, deren Gemeinschaft geendet hat"
+            ));
+        }
+    }
+    if let Some(gone) = sieges
+        .budget
+        .keys()
+        .chain(sieges.plans.keys())
+        .find(|polity| !alive(**polity))
+    {
+        return Err(format!(
+            "Die Belagerung führt Etat oder Plan der beendeten Gemeinschaft {gone}"
+        ));
+    }
+    Ok(())
+}
+
 /// Invarianten der Belagerung: Stärken und Vorräte endlich und nicht negativ, Listen so
 /// lang wie die Galaxie, der Stillstand der Wirtschaft und die Spiegelwerte der Regionen
 /// in 0..1; Datensätze passen zu Besitz und Kriegslage ([`check_records`]), Zuordnungen
@@ -1080,6 +1131,11 @@ pub fn check(world: &World) -> Result<(), String> {
         galaxy,
         world.resource::<Diplomacy>(),
         finance,
+        world.resource::<Sieges>(),
+    )?;
+    check_parties(
+        galaxy,
+        world.resource::<Polities>(),
         world.resource::<Sieges>(),
     )?;
     orbit::check(world)

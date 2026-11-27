@@ -252,7 +252,7 @@ fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest
         sieges.stats.ended += 1;
     }
     // Wem ein System gehört, kann sich geändert haben: Blockaden neu bestimmen.
-    orbit.refresh_blockades(galaxy, diplomacy, battles, &sieges.defenses);
+    orbit.refresh_blockades(galaxy, diplomacy, battles, sieges);
     weary(finance, to, balance.wear_planet.0);
     if !transfer.eliminated {
         weary(finance, old, balance.wear_planet.1);
