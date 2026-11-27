@@ -186,7 +186,9 @@ pub fn new_game(world: &mut World, config: SimConfig) {
 /// Gefechtspause mehr.
 /// Format 5: Staatshaushalt, Führung der Flotten durch die Gemeinschaften, Waffenruhe
 /// und der letzte Stand beendeter Gefechte gehören zum Spielstand.
-pub const SAVE_FORMAT: u32 = 5;
+/// Format 6: Belagerungen, Verteidigung der Welten, Truppen an Bord, das Ende von
+/// Gemeinschaften und die Feldzüge der KI gehören zum Spielstand.
+pub const SAVE_FORMAT: u32 = 6;
 
 /// Spielstand auf der Platte (RON).
 #[derive(Clone, Debug, Serialize, Deserialize)]

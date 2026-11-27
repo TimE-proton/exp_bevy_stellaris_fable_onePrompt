@@ -209,7 +209,7 @@ Gemeinschaft die Zahl ihrer Schiffe und darunter jeden laufenden Krieg.
 Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
 siehe unten.
 
-Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 5) lassen sich nicht
+Spielstände aus einer älteren Fassung des Spiels (Speicherformat unter 6) lassen sich nicht
 mehr laden. Das Spiel sagt es beim Laden und lässt die laufende Partie, wie sie ist.
 
 Befehle gelten mit dem nächsten Takt der Simulation. Steht die Zeit, sind sie vorgemerkt,
