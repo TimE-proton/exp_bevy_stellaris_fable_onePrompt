@@ -7,11 +7,13 @@
 mod defs;
 mod ship_loader;
 mod ships;
+mod siege_loader;
 mod tech_loader;
 
 pub use defs::*;
 pub use ship_loader::arc_covers;
 pub use ships::*;
+pub use siege_loader::siege_day_bound;
 
 use crate::hash::Fnv64;
 use crate::ids::GoodId;
@@ -453,6 +455,9 @@ impl GameData {
                 "prefixes und suffixes dürfen nicht leer sein".into(),
             ));
         }
+
+        // Belagerung
+        siege_loader::resolve_siege(self)?;
         Ok(())
     }
 }

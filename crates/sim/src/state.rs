@@ -18,6 +18,7 @@ use crate::hash::Fnv64;
 use crate::ids::PolityId;
 use crate::logistics::{Logistics, setup_logistics};
 use crate::polity::{Polities, found_polities};
+use crate::siege::{Sieges, setup_sieges};
 use crate::tech::{Research, setup_research};
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,7 @@ sim_state! {
     logistics: Logistics,
     fleets: Fleets,
     battles: Battles,
+    sieges: Sieges,
     diplomacy: Diplomacy,
     endgame: Endgame,
     queue: CommandQueue,
@@ -143,6 +145,7 @@ impl SimState {
         crate::fleet::succession::size_for_polities(&mut fleets, &mut battles, polities.list.len());
         let diplomacy = setup_diplomacy(data, &polities);
         let endgame = Endgame::new(galaxy.planets.len());
+        let sieges = setup_sieges(data, &galaxy, &polities);
         Self {
             config,
             clock: SimClock::default(),
@@ -154,6 +157,7 @@ impl SimState {
             logistics,
             fleets,
             battles,
+            sieges,
             diplomacy,
             endgame,
             queue: CommandQueue::default(),

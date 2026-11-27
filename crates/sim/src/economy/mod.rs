@@ -229,6 +229,9 @@ pub struct PlanetEconomy {
     pub founded_day: u64,
     /// Autonome Regionen führen keine Steuern an das Zentrum ab.
     pub tax_exempt: bool,
+    /// Anteil der Wirtschaft, der durch Bodenkrieg und Besatzung stillsteht (0..1).
+    /// Geschrieben nur von der Belagerung; klingt von selbst ab.
+    pub disruption: f64,
 }
 
 impl PlanetEconomy {
@@ -250,6 +253,7 @@ impl PlanetEconomy {
             income_today: 0.0,
             founded_day: 0,
             tax_exempt: false,
+            disruption: 0.0,
         }
     }
 

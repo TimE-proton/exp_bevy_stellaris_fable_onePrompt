@@ -251,6 +251,7 @@ pub struct Balance {
     pub military: super::ships::MilitaryBalance,
     pub battle: super::ships::BattleBalance,
     pub research: super::ships::ResearchBalance,
+    pub siege: SiegeBalance,
 }
 
 /// Wann eine Partie endet und wie viele neue Gemeinschaften in ihr entstehen dürfen.
@@ -349,6 +350,12 @@ pub struct CohesionBalance {
     pub max_polities: u32,
     /// Mindestbevölkerung (Mio.), damit eine Region einen eigenen Staat ausrufen kann.
     pub independence_min_population: f64,
+    /// Abzug bei voller Besatzung (`Region::occupation` = 1) ohne stationierte Truppen.
+    pub occupation: f64,
+    /// Anteil dieses Abzugs, den eine volle Garnison (`Region::garrison_cover` = 1) auffängt.
+    pub occupation_hold: f64,
+    /// Abzug bei vollen Kriegsschäden (`Region::war_damage` = 1).
+    pub war_damage: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -456,6 +463,246 @@ pub struct LogisticsBalance {
 pub struct FleetBalance {
     pub start_strength: f32,
     pub speed: f32,
+}
+
+/// Technologien, die Ausbaustufen und Kampfweisen der Belagerung freischalten
+/// (Schlüssel aus `techs.ron`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct SiegeGates {
+    /// Bunker über die erste Stufe hinaus.
+    pub bunker: String,
+    /// Volle Feuerunterstützung aus dem Orbit.
+    pub support: String,
+    /// Vorteil im Untergrundkampf.
+    pub tunnel: String,
+    /// Schilde über die erste Stufe hinaus.
+    pub shield: String,
+}
+
+/// Stehende Verteidigung, mit der Heimatwelten beginnen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HomeStart {
+    pub guns: u8,
+    /// Reguläre Verbände.
+    pub regulars: f64,
+    pub depot_days: u16,
+}
+
+/// `balance.ron: siege`: der Kampf um einen Planeten zwischen einer Flotte im Orbit und
+/// der Verteidigung am Boden.
+///
+/// Einheiten: Ein Verband (V) steht für `pop_per_strength` Mio. Menschen. Feuerkraft ist
+/// die Summe der Waffenleistung der Schiffe im Orbit; die Vorräte der Garnison zählen in
+/// Tagen, der Nachschub der Landungstruppe in Verbandstagen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SiegeBalance {
+    // --- Orbit ---
+    /// Feuerkraft-Tage, die eine Stationsstufe aushält.
+    pub station_hp: f64,
+    /// Rumpfschaden je Stationsstufe und Tag an den Schiffen im Orbit.
+    pub station_damage: f64,
+    /// Rumpfschaden je Geschützstufe und Tag an Schiffen im niedrigen Orbit.
+    pub gun_damage: f64,
+    /// Vorratstage, die eine feuernde Geschützstufe je Tag verbraucht.
+    pub gun_depot: f64,
+    /// Geschützstufen, die ein Punkt Beschuss je Tag ausschaltet (gezielt das Doppelte).
+    pub counter_battery: f64,
+    /// Gewicht je Schiffsklasse (Jäger bis Träger), mit dem Stationen und Geschütze
+    /// treffen: Große Schiffe verlieren den größeren Anteil ihres Rumpfs.
+    pub gun_weight: [f64; 6],
+    /// Anteil der Magazine je Tag: Duell mit Stationen, Stützfeuer, gezielter Beschuss,
+    /// Flächenbeschuss.
+    pub ammo: [f64; 4],
+    /// Anteil des Tanks, den eine Flotte je Tag im Orbit verbraucht.
+    pub station_fuel: f64,
+    /// Verbände je Rumpfsegment, die ein Schiff tragen kann.
+    pub berth_per_segment: f64,
+    /// Höchster Nachschub in Tagen, den Truppen beim Einschiffen mitnehmen.
+    pub supply_days_cap: u16,
+    /// Anteil einer Landungswelle, den aktive Geschütze je Stufe abfangen, und Obergrenze.
+    pub landing_loss: f64,
+    pub landing_loss_cap: f64,
+
+    // --- Schild und Beschuss ---
+    /// Ladung je Schildstufe und was davon je Tag nachlädt.
+    pub shield_cap: f64,
+    pub shield_regen: f64,
+    /// Vorratstage, die eine Schildstufe verbraucht, wenn sie einen Tag voll nachlädt.
+    pub shield_depot: f64,
+    /// Wirkung des Beschusses: Rate = min(bombard_cap, Beschuss × bombard_k /
+    /// (Bevölkerung + bombard_pop0)). Große Welten verteilen das Feuer.
+    pub bombard_k: f64,
+    pub bombard_pop0: f64,
+    pub bombard_cap: f64,
+    /// (militärische Wirkung, Begleitschaden) als Vielfaches der Rate.
+    pub precise: (f64, f64),
+    pub area: (f64, f64),
+    /// Unter diesen Anteil der Bevölkerung bei Beginn drückt Beschuss eine Welt nicht.
+    pub pop_floor: f64,
+
+    // --- Boden und Untergrund ---
+    /// Anteil der wirksamen Stärke, den eine Seite der anderen je Tag abnimmt.
+    pub r: f64,
+    /// Faktor auf die Stärke der Landungstruppe in den ersten `beach_days` Tagen.
+    pub beach: f64,
+    pub beach_days: u64,
+    /// Faktor auf die Stärke einer Seite ohne Nachschub bzw. ohne Vorräte.
+    pub unsupplied: f64,
+    /// Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Landungstruppe
+    /// sinken; die Oberfläche bricht, wenn sie unter diesen Anteil ihres Anfangs sinken;
+    /// die Landung ist abgeschlagen, wenn die Truppe unter diesen Anteil ihres Höchststands
+    /// fällt.
+    pub zone_fall: f64,
+    /// Befestigungsfaktor je Zone: Umland, Stadt, Zentrum, Batterie, Schildwerk.
+    pub fort: [f64; 5],
+    /// Bevölkerung (Mio.), ab der eine Welt eine und ab der sie zwei Stadtzonen hat.
+    pub city_from: (f64, f64),
+    /// Anteil des Zentrums und jedes Werks (Batterie, Schildwerk) an Bevölkerung und
+    /// Wirtschaft; den Rest teilen sich Umland und Städte.
+    pub center_share: f64,
+    pub works_share: f64,
+    /// Faktor auf die Miliz der übrigen Zonen, wenn das Zentrum fällt.
+    pub center_shock: f64,
+    /// Größter Aufschlag durch Stützfeuer (ohne, mit Technologie) und Beschuss je Verband
+    /// Verteidiger, ab dem er voll gilt.
+    pub support_max: (f64, f64),
+    pub support_ref: f64,
+    /// Ausfall: Verteidiger greifen eine haltende Truppe an, wenn sie ihr ohne
+    /// Befestigung um diesen Faktor überlegen sind.
+    pub sortie_ratio: f64,
+    /// Anteil von Bevölkerung und Kapital einer Zone, den jeder verlorene Verband kostet.
+    pub damage_per_loss: f64,
+    /// Verbände je Seite, die im Untergrund zugleich kämpfen können.
+    pub tunnel_front: f64,
+    /// Befestigungsfaktor im Untergrund: Sockel und Aufschlag je Bunkerstufe.
+    pub under_base: f64,
+    pub under_per_bunker: f64,
+    /// Faktor im Untergrund für die Seite, die die Tunneltechnologie beherrscht.
+    pub tunnel_tech: f64,
+    /// Reguläre Verbände, die eine Bunkerstufe aufnimmt, und Vorratstage, die sie birgt.
+    pub deep_per_bunker: f64,
+    pub bunker_days: f64,
+
+    // --- Vorräte und Ende ---
+    /// Anteil ihres Bedarfs, den eine eingeschlossene Garnison am Markt vor Ort deckt.
+    pub forage_share: f64,
+    /// Anteil der Verteidiger, der sich je Tag ohne Vorräte auflöst (geteilt durch den
+    /// Durchhaltewillen), und Anteil der Landungstruppe ohne Nachschub.
+    pub starve_rate: f64,
+    pub strand_rate: f64,
+    /// Anteil der Garnison bei Beginn, unter dem eine ausgehungerte Welt aufgibt.
+    pub capitulate_frac: f64,
+    /// Verbrauch einer Landungstruppe an Tagen ohne Gefecht, als Anteil des Kampftags.
+    pub army_idle_supply: f64,
+    /// Größtes Depot, das sich planen lässt, in Tagen.
+    pub depot_days_cap: u16,
+    /// Obergrenze für die Dauer einer Einschließung mit Besatzungstruppe; beim Laden
+    /// gegen Depot, Marktanteil und Auflösungsrate geprüft.
+    pub max_siege_days: u32,
+    /// Güter je Verband und Tag, aus denen das Depot besteht.
+    pub day_bundle: Vec<(String, f64)>,
+
+    // --- Truppen und Anlagen ---
+    /// Miliz = militia_k × √Bevölkerung × Faktor aus dem Zusammenhalt.
+    pub militia_k: f64,
+    /// Zusammenhalt, bei dem dieser Faktor 1 ist, und seine Schranken.
+    pub militia_cohesion: (f64, f64, f64),
+    /// Millionen Menschen je Verband.
+    pub pop_per_strength: f64,
+    /// Güter je ausgehobenem regulären Verband.
+    pub regular_bundle: Vec<(String, f64)>,
+    /// Aushebung je Monat als Anteil der Miliz und Obergrenze der Regulären als
+    /// Vielfaches der Miliz.
+    pub recruit_per_month: f64,
+    pub regulars_cap: f64,
+    /// Besatzungstruppe, die eine Übergabe annimmt, und Garnison, die eine besetzte Welt
+    /// ruhig hält: jeweils mal √Bevölkerung.
+    pub occupy_k: f64,
+    pub hold_k: f64,
+    /// Sold je regulärem Verband und Unterhalt je Ausbaustufe, in Credits je Monat.
+    pub pay: f64,
+    pub level_upkeep: f64,
+    /// Güter je Stufe (Stufe n kostet das n-Fache) und höchste Stufe.
+    pub station: Vec<(String, f64)>,
+    pub station_max: u8,
+    pub gun: Vec<(String, f64)>,
+    pub gun_max: u8,
+    /// Höchste Stufe ohne und mit der Technologie aus `gates`.
+    pub shield: Vec<(String, f64)>,
+    pub shield_max: (u8, u8),
+    pub bunker: Vec<(String, f64)>,
+    pub bunker_max: (u8, u8),
+    pub gates: SiegeGates,
+    /// Anteil des Marktbestands, den der Staat je Kauf höchstens nimmt, und Anteil der
+    /// freien Staatskasse, der je Monat für Rüstung bereitsteht (Frieden, Krieg).
+    pub buy_share: f64,
+    pub budget_share: (f64, f64),
+    pub home_start: HomeStart,
+
+    // --- Wille, Eroberung, Rückwirkung ---
+    /// Durchhaltewille = (will_base + (1 − will_base) × Zusammenhalt/100)
+    /// × (1 − will_stake × Anteil des Belagerers an den Betrieben).
+    pub will_base: f64,
+    pub will_stake: f64,
+    /// Zusammenhalt nach der Eroberung: Sockel, Punkte je vollem Vorbesitz, Abzug je
+    /// vollem Kriegsschaden; Mindestwert nach einer Befreiung.
+    pub conquest_base: f64,
+    pub stake_pts: f64,
+    pub scar_pts: f64,
+    pub liberation: f64,
+    /// Untere und obere Schranke des Zusammenhalts nach der Eroberung.
+    pub conquest_cohesion: (f64, f64),
+    /// Besatzung nach der Eroberung: mindestens dieser Wert, auch bei vollem Vorbesitz.
+    pub occupation_min: f64,
+    /// Faktor auf die Besatzung nach einer Übergabe.
+    pub capitulation_mercy: f64,
+    /// Monatliches Verblassen von Besatzung und Kriegsschäden.
+    pub occupation_decay: f64,
+    pub scar_decay: f64,
+    /// Plünderung: Anteil der Kassen, zusätzlicher Kriegsschaden, Faktor auf die Kurse.
+    pub sack_share: f64,
+    pub sack_scar: f64,
+    pub sack_shock: f64,
+    /// Faktor auf die Kurse der Betriebe einer eroberten Welt.
+    pub conquest_shock: f64,
+    /// Anteil der Bestände und der Kasse der Elite einer gefallenen Hauptwelt, der mit
+    /// ihr in die neue Hauptwelt zieht.
+    pub elite_flight: f64,
+    /// Stillstand der Wirtschaft: Anteil einer umkämpften bzw. besetzten Zone, und wie
+    /// schnell er je Tag abklingt.
+    pub disrupt: (f64, f64),
+    pub disrupt_decay: f64,
+    /// Wert der Beute je Mio. Einwohner, neben dem Buchwert der Betriebe.
+    pub prize_per_million: f64,
+    /// Kriegsmüdigkeit: je eigenem verlorenen Verband; je Mio. Einwohner, die Beschuss
+    /// tötet (Belagerer, Verteidiger); Faktor je vollem Anteil des Belagerers am
+    /// Beschossenen; je Belagerungsmonat (Belagerer, Verteidiger); bei der Eroberung
+    /// (Eroberer, Verlierer).
+    pub wear_loss: f64,
+    pub wear_fire: (f64, f64),
+    pub wear_portfolio: f64,
+    pub wear_month: (f64, f64),
+    pub wear_planet: (f64, f64),
+    /// Unschärfe der Schätzungen über fremde Garnisonen ohne jeden Einblick.
+    pub intel_spread: f64,
+    /// Verlustanteil der Landungswelle, bis zu dem ein Sturm in der Prognose als tragbar gilt.
+    pub storm_loss_limit: f64,
+
+    #[serde(skip)]
+    pub day_bundle_ids: Vec<(GoodId, f64)>,
+    #[serde(skip)]
+    pub regular_bundle_ids: Vec<(GoodId, f64)>,
+    #[serde(skip)]
+    pub station_ids: Vec<(GoodId, f64)>,
+    #[serde(skip)]
+    pub gun_ids: Vec<(GoodId, f64)>,
+    #[serde(skip)]
+    pub shield_ids: Vec<(GoodId, f64)>,
+    #[serde(skip)]
+    pub bunker_ids: Vec<(GoodId, f64)>,
+    /// Aufgelöste Technologien in der Reihenfolge Bunker, Stützfeuer, Tunnel, Schild.
+    #[serde(skip)]
+    pub gate_ids: [u16; 4],
 }
 
 fn one_f32() -> f32 {

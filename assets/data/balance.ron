@@ -242,6 +242,12 @@
             max_polities: 12,
             // Unter dieser Bevölkerung (Mio.) ruft keine Region einen eigenen Staat aus.
             independence_min_population: 150.0,
+            // Besatzung: Abzug auf einer frisch eroberten Welt ohne Vorbesitz des Eroberers.
+            // Eine volle Garnison fängt den Anteil occupation_hold davon auf.
+            occupation: 30.0,
+            occupation_hold: 0.6,
+            // Kriegsschäden: Abzug bei völlig verwüsteter Welt, solange der Verursacher sie hält.
+            war_damage: 25.0,
         ),
     ),
     military: (
@@ -677,5 +683,216 @@
         // häufig wie ein Stufenaufstieg selbst: Dann liegt die Wahrheit im Mittel an
         // keiner bestimmten Stelle der Spanne.
         sighting_per_month: 0.004,
+    ),
+    siege: (
+        // Der Kampf um einen Planeten. Einheiten: Ein Verband (V) steht für
+        // pop_per_strength Mio. Menschen. Feuerkraft ist die Waffenleistung der Schiffe
+        // im Orbit (Startflotte gut 130, ein Schlachtschiff knapp 90). Vorräte der Garnison
+        // zählen in Tagen, der Nachschub der Landungstruppe in Verbandstagen.
+        // Drei Wege führen zum Ziel: aushungern (langsam, die Beute bleibt heil), stürmen
+        // (Wochen, kostet Truppen), beschießen (schnell, kostet Beute).
+
+        // --- Orbit ---
+        // Stationen stehen außerhalb des Schilds. Die Flotte braucht station_hp
+        // Feuerkraft-Tage je Stufe; jede Stufe richtet je Tag station_damage Rumpfschaden an.
+        station_hp: 2500.0,
+        station_damage: 30.0,
+        // Bodengeschütze treffen nur Schiffe im niedrigen Orbit (wer feuert oder landet).
+        // Jede feuernde Stufe verbraucht gun_depot Vorratstage je Tag.
+        gun_damage: 30.0,
+        gun_depot: 0.25,
+        // Geschützstufen, die ein Punkt Beschuss je Tag ausschaltet (gezielt das Doppelte).
+        counter_battery: 0.0003,
+        // Gewicht je Schiffsklasse (Jäger, Korvette, Fregatte, Kreuzer, Schlachtschiff,
+        // Träger): Große Schiffe verlieren den fünffachen Rumpfanteil einer Korvette.
+        gun_weight: (0.0, 0.2, 0.4, 1.0, 1.0, 1.0),
+        // Anteil der Magazine je Tag: Duell mit Stationen, Stützfeuer, gezielt, flächig.
+        ammo: (0.01, 0.01, 0.03, 0.05),
+        // Anteil des Tanks je Tag im Orbit: derselbe, den jede liegende Flotte verbraucht
+        // (military.fuel_per_day; beim Laden geprüft). Die Flottenebene zieht ihn ab, die
+        // Prognose der Belagerung rechnet mit ihm. Verbände je Rumpfsegment an Bord.
+        station_fuel: 0.004,
+        berth_per_segment: 0.5,
+        // So viele Tage Nachschub nehmen Truppen beim Einschiffen höchstens mit.
+        supply_days_cap: 120,
+        // Aktive Geschütze fangen je Stufe diesen Anteil einer Landungswelle ab.
+        landing_loss: 0.04,
+        landing_loss_cap: 0.4,
+
+        // --- Schild und Beschuss ---
+        // Ladung je Schildstufe und tägliche Nachladung; volles Nachladen kostet je Stufe
+        // shield_depot Vorratstage. Beschuss trifft zuerst die Ladung; nur was sie nicht
+        // schluckt, kommt durch. Wer schwächer feuert, als der Schild nachlädt, bricht ihn nie.
+        shield_cap: 3000.0,
+        shield_regen: 100.0,
+        shield_depot: 0.1,
+        // Rate = min(bombard_cap, Beschuss × bombard_k / (Bevölkerung + bombard_pop0)).
+        // Der wichtigste Hebel für das Tempo des Beschusses: Mit 0,05 ist Flächenbeschuss
+        // zwei- bis dreimal so schnell wie ein Sturm ohne ihn und kostet dabei ein Siebtel
+        // bis ein Drittel der Beute.
+        bombard_k: 0.05,
+        bombard_pop0: 50.0,
+        bombard_cap: 0.05,
+        // (militärische Wirkung, Begleitschaden) als Vielfaches der Rate: gezielt 15 : 1,
+        // flächig 3 : 1. Der Begleitschaden trifft Bevölkerung, Kapital und Kurse.
+        precise: (0.6, 0.04),
+        area: (3.0, 1.0),
+        // Beschuss drückt eine Welt nicht unter diesen Anteil ihrer Bevölkerung bei Beginn.
+        pop_floor: 0.05,
+
+        // --- Boden und Untergrund ---
+        // Anteil der wirksamen Stärke, den eine Seite der anderen je Tag abnimmt. Der
+        // wichtigste Hebel für das Tempo am Boden: Bei anderthalbfacher Überlegenheit
+        // dauert ein Sturm rund vier Wochen, bei Gleichstand sechs bis sieben. Wer r
+        // ändert, zieht beach_days und tunnel_front mit (beide wachsen, wenn r fällt).
+        r: 0.015,
+        // Landekopf: Faktor auf die Truppe in den ersten beach_days Tagen, etwa ein Viertel
+        // eines Sturms: Vorwärts aufgestellte Reguläre treffen die Landung in ihrer Schwäche.
+        beach: 0.6,
+        beach_days: 6,
+        // Faktor ohne Nachschub (Truppe) bzw. ohne Vorräte (Garnison).
+        unsupplied: 0.5,
+        // Eine Zone fällt, wenn ihre Verteidiger unter diesen Anteil der Truppe sinken; die
+        // Oberfläche bricht, wenn sie unter diesen Anteil ihres Anfangs sinken; unter diesem
+        // Anteil ihres Höchststands gilt eine Landung als abgeschlagen. Bei einem Zehntel
+        // wird bis etwa zur doppelten Überlegenheit um jede Zone gekämpft, und unberührte
+        // Städte halten meist auch dann noch, wenn das Zentrum gefallen ist.
+        zone_fall: 0.10,
+        // Befestigung: Umland, Stadt, Zentrum, Batterie, Schildwerk.
+        fort: (1.0, 1.3, 1.8, 1.4, 1.5),
+        // Ab so vielen Mio. Einwohnern hat eine Welt eine, ab so vielen zwei Stadtzonen.
+        city_from: (100.0, 1000.0),
+        // Anteil des Zentrums und jedes Werks an Bevölkerung und Wirtschaft.
+        center_share: 0.4,
+        works_share: 0.03,
+        // Fällt das Zentrum, bleibt von der Miliz der übrigen Zonen dieser Anteil.
+        center_shock: 0.5,
+        // Stützfeuer: größter Aufschlag (ohne, mit „Orbitale Feuerleitung"), voll ab
+        // support_ref Punkten Beschuss je Verband Verteidiger.
+        support_max: (0.3, 0.6),
+        support_ref: 5.0,
+        // Ausfall gegen eine haltende Truppe ab dieser Überlegenheit ohne Befestigung.
+        sortie_ratio: 2.0,
+        // Jeder verlorene Verband kostet die Zone diesen Anteil an Bevölkerung und Kapital.
+        damage_per_loss: 0.001,
+        // Untergrund: so viele Verbände je Seite kämpfen zugleich; Befestigung Sockel und
+        // je Bunkerstufe; Faktor für die Seite mit „Tunnelkriegführung". Mit r ergibt die
+        // Front, was ein Sturm im Untergrund höchstens je Tag ausräumt (0,24 Verbände):
+        // 40 Reguläre in drei Bunkerstufen kosten rund fünf Monate und das Dreifache an
+        // Angreifern; die Vorräte dort reichen kaum länger.
+        tunnel_front: 16.0,
+        under_base: 3.0,
+        under_per_bunker: 0.3,
+        tunnel_tech: 1.25,
+        // Reguläre je Bunkerstufe und Vorratstage, die der Untergrund birgt.
+        deep_per_bunker: 15.0,
+        bunker_days: 120.0,
+
+        // --- Vorräte und Ende ---
+        // Diesen Anteil ihres Bedarfs kauft eine eingeschlossene Garnison am Markt vor Ort.
+        forage_share: 0.4,
+        // Ohne Vorräte löst sich je Tag dieser Anteil der Verteidiger auf (geteilt durch
+        // den Durchhaltewillen); eine Truppe ohne Nachschub verliert strand_rate und ist
+        // damit nach gut 90 Tagen unter zone_fall ihres Höchststands, also verloren.
+        starve_rate: 0.02,
+        strand_rate: 0.025,
+        // Unter diesem Anteil der Garnison bei Beginn gibt eine ausgehungerte Welt auf.
+        capitulate_frac: 0.15,
+        // Verbrauch der Truppe an Tagen ohne Gefecht, als Anteil des Kampftags.
+        army_idle_supply: 0.3,
+        // Größtes Depot in Tagen. Daraus folgt die Schranke jeder Einschließung mit
+        // Besatzungstruppe: depot_days_cap / (1 − forage_share)
+        // + ln(1 / capitulate_frac) / starve_rate ≤ max_siege_days (beim Laden geprüft).
+        depot_days_cap: 240,
+        max_siege_days: 500,
+        // Güter je Verband und Tag im Depot.
+        day_bundle: [("nahrung", 0.02), ("munition", 0.01), ("treibstoff", 0.01)],
+
+        // --- Truppen und Anlagen ---
+        // Miliz = militia_k × √Bevölkerung × Zusammenhalt / militia_cohesion.0, der letzte
+        // Faktor zwischen militia_cohesion.1 und militia_cohesion.2.
+        militia_k: 0.7,
+        militia_cohesion: (60.0, 0.3, 1.3),
+        // Millionen Menschen je Verband.
+        pop_per_strength: 0.05,
+        // Güter je ausgehobenem regulären Verband.
+        regular_bundle: [("munition", 1.0), ("waffensysteme", 0.2)],
+        // Aushebung je Monat als Anteil der Miliz; Reguläre höchstens dieses Vielfache.
+        recruit_per_month: 0.1,
+        regulars_cap: 3.0,
+        // Besatzungstruppe für eine Übergabe und Garnison, die eine besetzte Welt ruhig
+        // hält: jeweils mal √Bevölkerung.
+        occupy_k: 0.25,
+        hold_k: 0.5,
+        // Sold je regulärem Verband und Unterhalt je Ausbaustufe, Credits je Monat.
+        pay: 3.0,
+        level_upkeep: 15.0,
+        // Güter je Stufe (Stufe n kostet das n-Fache) und höchste Stufe; bei Schild und
+        // Bunker ohne und mit der Technologie aus gates.
+        station: [("rumpfsegmente", 10.0), ("waffensysteme", 6.0)],
+        station_max: 3,
+        gun: [("waffensysteme", 6.0), ("legierungen", 12.0)],
+        gun_max: 5,
+        shield: [("elektronik", 15.0), ("maschinen", 8.0)],
+        shield_max: (1, 3),
+        bunker: [("legierungen", 30.0), ("maschinen", 4.0)],
+        bunker_max: (1, 3),
+        gates: (bunker: "boden_2", support: "boden_3", tunnel: "boden_4", shield: "boden_5"),
+        // Der Staat nimmt je Kauf höchstens diesen Anteil des Marktbestands; für Rüstung
+        // steht je Monat dieser Anteil der freien Staatskasse bereit (Frieden, Krieg).
+        buy_share: 0.25,
+        budget_share: (0.15, 0.35),
+        // Stehende Verteidigung der Heimatwelten bei Spielbeginn.
+        home_start: (guns: 1, regulars: 10.0, depot_days: 60),
+
+        // --- Wille, Eroberung, Rückwirkung ---
+        // Durchhaltewille = (will_base + (1 − will_base) × Zusammenhalt / 100)
+        // × (1 − will_stake × Anteil des Belagerers an den Betrieben der Welt).
+        will_base: 0.4,
+        will_stake: 0.5,
+        // Zusammenhalt nach der Eroberung = conquest_base + stake_pts × Vorbesitz
+        // − scar_pts × Kriegsschäden; nach einer Befreiung mindestens liberation.
+        conquest_base: 30.0,
+        stake_pts: 30.0,
+        scar_pts: 25.0,
+        liberation: 55.0,
+        // Schranken dieses Zusammenhalts: Auch die verwüstete Welt behält einen Rest, auch
+        // die freundlich übernommene beginnt nicht loyal.
+        conquest_cohesion: (5.0, 70.0),
+        // Besatzung nach der Eroberung = 1 − Vorbesitz des Eroberers, mindestens
+        // occupation_min. Nach einer Übergabe wiegt sie nur den Anteil capitulation_mercy.
+        occupation_min: 0.1,
+        capitulation_mercy: 0.6,
+        // Besatzung und Kriegsschäden verblassen je Monat um diesen Anteil.
+        occupation_decay: 0.015,
+        scar_decay: 0.015,
+        // Plünderung: Anteil der Kassen, zusätzlicher Kriegsschaden, Faktor auf die Kurse.
+        sack_share: 0.3,
+        sack_scar: 0.25,
+        sack_shock: 0.7,
+        // Faktor auf die Kurse der Betriebe einer eroberten Welt.
+        conquest_shock: 0.8,
+        // Fällt eine Hauptwelt, zieht dieser Anteil der Bestände und der Kasse ihrer
+        // Elite mit in die neue Hauptwelt.
+        elite_flight: 0.5,
+        // Stillstand der Wirtschaft: Anteil einer umkämpften bzw. besetzten Zone; klingt
+        // je Tag um disrupt_decay ab.
+        disrupt: (0.8, 0.3),
+        disrupt_decay: 0.1,
+        // Wert der Beute je Mio. Einwohner, neben dem Buchwert der Betriebe.
+        prize_per_million: 30.0,
+        // Kriegsmüdigkeit (0..100; ein Kriegsmonat allein bringt 0,6): je eigenem
+        // verlorenen Verband; je Mio. Einwohner, die Beschuss tötet (Belagerer,
+        // Verteidiger); Faktor je vollem Anteil des Belagerers am Beschossenen; je
+        // Belagerungsmonat (Belagerer, Verteidiger); bei der Eroberung (Eroberer, Verlierer).
+        wear_loss: 0.03,
+        wear_fire: (0.010, 0.005),
+        wear_portfolio: 4.0,
+        wear_month: (0.3, 0.5),
+        wear_planet: (-3.0, 5.0),
+        // Unschärfe der Schätzungen über fremde Garnisonen ohne jeden Einblick.
+        intel_spread: 0.5,
+        // Prognose: Bis zu diesem Verlustanteil der Landungswelle gilt ein Sturm als tragbar.
+        storm_loss_limit: 0.5,
     ),
 )

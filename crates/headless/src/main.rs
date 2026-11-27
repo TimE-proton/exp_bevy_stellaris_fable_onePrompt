@@ -6,6 +6,7 @@ mod budget;
 mod fleets;
 mod research;
 mod script;
+mod siege;
 mod war;
 
 use clap::{Parser, Subcommand};
@@ -105,6 +106,8 @@ enum Command {
     Research(research::ResearchArgs),
     /// Flotten, Schiffe, Vorräte, Werften und Bauaufträge nach einigen Jahren.
     Fleets(fleets::FleetsArgs),
+    /// Belagerung eines Planeten: Tagesbericht und die drei Wege im Vergleich.
+    Siege(siege::SiegeArgs),
 }
 
 pub(crate) fn parse_range(text: &str) -> Result<(u64, u64), String> {
@@ -721,6 +724,7 @@ fn main() -> ExitCode {
                 );
             }
         }
+        Command::Siege(args) => return siege::run(&data, args),
     }
     ExitCode::SUCCESS
 }

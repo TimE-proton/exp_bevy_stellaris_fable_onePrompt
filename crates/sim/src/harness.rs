@@ -388,6 +388,7 @@ pub fn check_invariants(world: &World) -> Result<(), String> {
     {
         return Err(anomaly);
     }
+    crate::siege::check(world)?;
     Ok(())
 }
 

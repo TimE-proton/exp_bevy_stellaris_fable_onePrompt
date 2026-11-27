@@ -548,6 +548,8 @@ impl<'a> Succession<'a> {
             income_today: _,
             founded_day: _,
             tax_exempt,
+            // Was stillsteht, steht unter jedem Besitzer still.
+            disruption: _,
         } = &mut economy.planets[index];
         // Nur eine autonome Region führt keine Steuern ab.
         *tax_exempt = stage == Stage::Autonomous;
@@ -564,6 +566,12 @@ impl<'a> Succession<'a> {
             drain: _,
             owner_seen,
             since_day,
+            // Spiegel der Belagerung: Sie schreibt sie selbst neu, sobald sie den
+            // Besitzwechsel sieht (Aufhebung am selben Takt, Abgleich im Monatsschritt).
+            besieged: _,
+            occupation: _,
+            garrison_cover: _,
+            war_damage: _,
         } = &mut finance.regions[index];
         *bond = cohesion.clamp(0.0, 100.0);
         *standing = stage;
@@ -802,6 +810,7 @@ impl<'a> Succession<'a> {
                 income_today: _,
                 founded_day: _,
                 tax_exempt: _,
+                disruption: _,
             } = &economy.planets[index];
             planets.push(id);
         }
@@ -830,6 +839,10 @@ impl<'a> Succession<'a> {
                 drain: _,
                 owner_seen,
                 since_day: _,
+                besieged: _,
+                occupation: _,
+                garrison_cover: _,
+                war_damage: _,
             } = region;
             if *owner_seen == Some(from) {
                 *owner_seen = owner;
@@ -851,6 +864,9 @@ impl<'a> Succession<'a> {
                 years: _,
                 expropriation: _,
                 target: _,
+                occupation: _,
+                garrison_cover: _,
+                war_damage: _,
             } = factors;
             if *foreign_polity == Some(from) {
                 *foreign_polity = Some(into).filter(|heir| owner != Some(*heir));

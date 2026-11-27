@@ -453,7 +453,8 @@ pub fn expropriate(
 }
 
 /// Risikoabschlag eines Emittenten (0..0,7): Blockade, Krieg, feindliche Flotten,
-/// Unruhe in der Region, Misstrauen gegen den Staat.
+/// Unruhe in der Region, Belagerung der Welt, auf der er sitzt, Misstrauen gegen den
+/// Staat.
 pub fn risk_discount(
     finance: &Finance,
     galaxy: &Galaxy,
@@ -481,11 +482,16 @@ pub fn risk_discount(
         risk += 0.15;
     }
     if let Some(seat) = seat_of_issuer(galaxy, logistics, capitals, issuer) {
-        risk += match finance.regions[seat.index()].stage {
+        let region = &finance.regions[seat.index()];
+        risk += match region.stage {
             Stage::Loyal => 0.0,
             Stage::Restless => 0.08,
             Stage::Autonomous => 0.20,
         };
+        // Um die Welt, auf der der Betrieb sitzt, wird gekämpft.
+        if region.besieged {
+            risk += 0.25;
+        }
     }
     let state = &finance.polities[polity.index()];
     risk += 0.5 * state.expropriation_risk + 0.3 * state.default_memory;
@@ -543,5 +549,67 @@ pub fn shock_polity(
         {
             issuer.shock = (issuer.shock * factor).max(0.2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::Sector;
+    use crate::ids::PolityId;
+    use crate::state::{SimConfig, SimState};
+
+    #[test]
+    fn issuers_seated_on_a_besieged_world_carry_a_risk_discount() {
+        let data = GameData::load_workspace().unwrap();
+        let mut state = SimState::generate(
+            &data,
+            SimConfig {
+                seed: 6,
+                player: None,
+            },
+        );
+        state.galaxy.rebuild_index();
+        let capitals: Vec<Option<PlanetId>> =
+            state.polities.list.iter().map(|p| p.capital).collect();
+        let (home, other) = (capitals[0].unwrap(), capitals[1].unwrap());
+        let firm = |planet| IssuerId::Firm {
+            planet,
+            sector: Sector::Agrar,
+        };
+        let house = state
+            .logistics
+            .houses
+            .iter()
+            .find(|house| house.polity == PolityId(0))
+            .map(|house| IssuerId::House(house.id))
+            .unwrap();
+        let kontor = IssuerId::Kontor(state.galaxy.planet(home).system);
+        let risk = |state: &SimState, issuer| {
+            risk_discount(
+                &state.finance,
+                &state.galaxy,
+                &state.logistics,
+                &state.fleets,
+                &state.diplomacy,
+                &capitals,
+                issuer,
+            )
+        };
+        // Im Frieden und loyal: kein Abschlag.
+        for issuer in [firm(home), firm(other), house, kontor] {
+            assert_eq!(risk(&state, issuer), 0.0, "{issuer:?}");
+        }
+        // Wird die Hauptwelt belagert, tragen ihn alle Betriebe, die dort sitzen: ihre
+        // Firmen, das Kontor ihres Systems und das Handelshaus des Reichs.
+        state.finance.regions[home.index()].besieged = true;
+        for issuer in [firm(home), house, kontor] {
+            assert_eq!(risk(&state, issuer), 0.25, "{issuer:?}");
+        }
+        assert_eq!(risk(&state, firm(other)), 0.0);
+        // Mit Krieg und Unruhe zusammen bleibt der Abschlag in seiner Schranke.
+        state.finance.regions[home.index()].stage = Stage::Autonomous;
+        state.finance.polities[0].expropriation_risk = 0.8;
+        assert_eq!(risk(&state, firm(home)), 0.7);
     }
 }
