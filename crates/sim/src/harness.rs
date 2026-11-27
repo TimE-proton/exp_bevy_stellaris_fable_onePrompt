@@ -890,7 +890,8 @@ impl WarScript {
     ///   sein Sitz ist, solange `a` ihm noch keine Welt genommen hat; danach sein Sitz.
     /// - Jede Flotte schifft zu Hause ein, was an Regulären bereitsteht und an Bord
     ///   passt, fährt mit vollen Tanks im Blockadeauftrag zum Ziel und belagert es. Mit
-    ///   fast leeren Tanks kehrt sie heim und kommt wieder.
+    ///   fast leeren Tanks kehrt sie heim und kommt wieder; ebenso, wenn die Welt reif
+    ///   zur Übernahme ist, aber weder am Boden noch an Bord eine Truppe steht.
     /// - In den ersten zehn Tagen einer Belagerung wird gezielt gefeuert, danach
     ///   geschwiegen. Gelandet und gestürmt wird, sobald die Truppen an Bord der
     ///   Garnison an der Oberfläche anderthalbfach überlegen sind; sonst wartet die
@@ -928,6 +929,34 @@ impl WarScript {
             };
             let world_of = galaxy.planet(target);
             let mut home_left = sieges.defense(home).regulars;
+            // Reif zur Übernahme, aber niemand da, der sie annimmt: Die Garnison ist
+            // zerfallen, am Boden und an Bord steht keine Truppe, und zu Hause warten
+            // Verbände. Dann holt die Flotte sie, statt weiter im Orbit zu liegen.
+            let berths = |fleet: &crate::fleet::Fleet| {
+                fleet
+                    .ships
+                    .iter()
+                    .map(|ship| {
+                        data.hulls[data.designs[ship.design as usize].hull_id as usize].segments
+                            as f64
+                    })
+                    .sum::<f64>()
+                    * balance.berth_per_segment
+            };
+            let troops_aboard: f64 = fleets
+                .of(a)
+                .filter_map(|fleet| sieges.embarked.get(&fleet.id))
+                .map(|force| force.troops)
+                .sum();
+            let ripe = sieges
+                .siege(target)
+                .filter(|siege| siege.attacker == a)
+                .is_some_and(|siege| {
+                    let surface = siege.zone_militia() + siege.reserve(sieges.defense(target));
+                    siege.army <= 0.0 && surface < 1.0
+                })
+                && troops_aboard <= 0.0
+                && home_left >= 1.0;
             for fleet in fleets.of(a) {
                 if !fleet.is_docked() || fleet.in_battle || fleet.is_regrouping() {
                     continue;
@@ -940,8 +969,14 @@ impl WarScript {
                 // Mit fast leeren Tanks geht es heim, von wo auch immer: Ohne Treibstoff
                 // hält niemand einen Orbit.
                 let dry = fleet.min_fuel() < 0.1;
-                if fleet.system == world_of.system && !dry {
-                    if !assigned {
+                let at_home = fleet.system == home_system;
+                if fleet.system == world_of.system && !dry && !at_home {
+                    if ripe && berths(fleet) >= 1.0 {
+                        commands.push(SimCommand::MoveFleet {
+                            fleet: fleet.id,
+                            to: home_system,
+                        });
+                    } else if !assigned {
                         commands.push(SimCommand::BeginSiege {
                             fleet: fleet.id,
                             planet: target,
@@ -949,18 +984,9 @@ impl WarScript {
                     }
                     continue;
                 }
-                if fleet.system == home_system {
+                if at_home {
                     // Einschiffen, was da ist und an Bord passt; mit vollen Tanks los.
-                    let berths: f64 = fleet
-                        .ships
-                        .iter()
-                        .map(|ship| {
-                            data.hulls[data.designs[ship.design as usize].hull_id as usize].segments
-                                as f64
-                        })
-                        .sum::<f64>()
-                        * balance.berth_per_segment;
-                    let strength = (berths - aboard).min(home_left).floor();
+                    let strength = (berths(fleet) - aboard).min(home_left).floor();
                     if strength >= 1.0 {
                         home_left -= strength;
                         commands.push(SimCommand::EmbarkTroops {
@@ -970,7 +996,15 @@ impl WarScript {
                             supply_days: 60,
                         });
                     }
-                    if fleet.min_fuel() >= 0.9 {
+                    if world_of.system == home_system {
+                        // Das Ziel liegt im eigenen Heimatsystem: belagern, wo sie liegt.
+                        if !assigned && !dry {
+                            commands.push(SimCommand::BeginSiege {
+                                fleet: fleet.id,
+                                planet: target,
+                            });
+                        }
+                    } else if fleet.min_fuel() >= 0.9 {
                         commands.push(SimCommand::SetStance {
                             fleet: fleet.id,
                             stance: Stance::Blockade,
@@ -982,7 +1016,13 @@ impl WarScript {
                     }
                     continue;
                 }
-                let to = if dry { home_system } else { world_of.system };
+                // Unterwegs: Wer leer fährt, während zu Hause Truppen warten, holt sie erst.
+                let fetch = aboard <= 0.0 && home_left >= 1.0 && berths(fleet) >= 1.0;
+                let to = if dry || fetch {
+                    home_system
+                } else {
+                    world_of.system
+                };
                 commands.push(SimCommand::MoveFleet {
                     fleet: fleet.id,
                     to,
