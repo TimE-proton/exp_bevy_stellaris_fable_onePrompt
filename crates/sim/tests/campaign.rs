@@ -3,9 +3,8 @@
 //! Seiten die KI.
 
 use sim::GameData;
-use sim::ai::{AiState, CampaignStage, MilitaryMode};
+use sim::ai::{AiState, MilitaryMode};
 use sim::clock::DAYS_PER_YEAR;
-use sim::command::SimCommand;
 use sim::economy::{Claim, to_credits};
 use sim::harness::{
     Headless, ScriptedAct, ScriptedEvent, WarScript, campaign_wars, check_invariants, summarize,
@@ -62,11 +61,6 @@ fn the_ai_besieges_takes_worlds_and_ends_a_community_in_wars_it_leads_itself() {
     assert!(
         stages.iter().all(|days| *days > 0),
         "Sammeln, Marsch und Belagerung kommen vor: {stages:?}"
-    );
-    let _ = (
-        CampaignStage::Muster,
-        CampaignStage::March,
-        CampaignStage::Siege,
     );
     script.run_until(&mut sim, 60 * DAYS_PER_YEAR, false);
     assert_eq!(check_invariants(sim.world()), Ok(()));
@@ -288,5 +282,4 @@ fn ai_sieges_replay_identically_with_every_tick_and_across_saving() {
             .filter(|planet| planet.id != home)
             .all(|planet| sieges(&own).defense(planet.id).plan.depot_days == 0)
     );
-    let _ = SimCommand::LiftSiege { planet: home };
 }
