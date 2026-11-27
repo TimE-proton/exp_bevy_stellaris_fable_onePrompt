@@ -802,18 +802,26 @@ ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
   halten den Orbit und das System offen), Einschließung (die Garnison zehrt von ihren
   Vorräten, der Markt vor Ort streckt sie), Beschuss (gezielt oder flächig), Bodenkrieg
   (gelandete Truppen kämpfen Zone um Zone) und Untergrund (die Oberfläche ist verloren,
-  Reguläre halten die Bunker).
+  Reguläre halten die Bunker). Eine Welt ohne Reguläre im Untergrund fällt aus dem
+  Bodenkrieg; eine fünfte Phase hat sie nicht.
 - **Drei Wege:** aushungern (langsam, die Beute bleibt heil), stürmen (Wochen, kostet
   Truppen), beschießen (schnell, kostet Beute, Zusammenhalt und eigene Kriegsmüdigkeit).
   Unter feindlichem Orbit wird die Garnison nicht versorgt, also endet jede Belagerung.
 - **Befehle:** `BeginSiege`, `SetSiegeOrders` (Feuerstufe, Sturm, Schwerpunkt,
   Plünderung), `LiftSiege`, `EmbarkTroops`, `LandTroops` für den Belagerer;
   `SetGarrisonOrders` und `Capitulate` für den Verteidiger. Wer belagert wird, kann den
-  Frieden nicht selbst schließen.
+  Frieden nicht selbst schließen. Nachschub fährt mit den Truppen: Gehen die letzten
+  Verbände einer Flotte von Bord, geht ihr Nachschub mit (zur Landungstruppe oder ins
+  Depot der eigenen Welt, soweit es ihn fasst); ohne Truppe bleibt keiner an Bord.
 - **Orbit.** Belagern kann eine Flotte, die im System liegt, einsatzbereit ist und
   Treibstoff hat. Im Orbit verbraucht sie, was jede liegende Flotte verbraucht
   (`military.fuel_per_day`). Wer einen Planeten einschließt, sperrt sein System für
-  Handel und Nachschub, gleich mit welchem Auftrag seine Flotte dort liegt. Trifft ein
+  Handel und Nachschub, gleich mit welchem Auftrag seine Flotte dort liegt, wenn der
+  Besitzer des Systems mit ihm im Krieg steht (wie bei der Blockade der Flotten). Liegt
+  die belagerte Welt im eigenen System des Belagerers oder in dem eines Dritten, bleibt
+  das System offen; die Garnison erreicht dessen Markt dann nicht und lebt allein vom
+  Depot. Stationen und Geschütze der Welt können Schiffe zerstören: Sie zählen bei den
+  verlorenen Schiffen und Flotten ihrer Gemeinschaft, und die Chronik nennt sie. Trifft ein
   Entsatz ein, beginnt nach den Regeln der Flotten ein Gefecht, und die Belagerung ruht:
   Niemand zehrt an Vorräten oder Garnison, die Sperre hält, solange die Flotte des
   Belagerers kämpft. Hält er danach den Orbit, geht dieselbe Belagerung weiter; liegt
@@ -823,7 +831,10 @@ ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
   wechselt sie am selben Tag den Besitzer. Die Anteile des alten Staates an ihren
   Betrieben gehen an den neuen; private Halter behalten ihre und zählen fortan als
   fremder Besitz. Die Region ist unruhig und besetzt. Ein Vorbesitz des Eroberers an den
-  Betrieben schwächt die Miliz und mildert die Besatzung. Auf Befehl wird geplündert: Ein
+  Betrieben schwächt die Miliz und mildert die Besatzung. Holt die Gemeinschaft, der die
+  Welt genommen wurde, sie zurück, ist das eine Befreiung, und die Welt zählt im Endspiel
+  wieder so, wie sie vor dem Verlust zählte (eigen, beigetreten oder erzwungen). Auf
+  Befehl wird geplündert: Ein
   Teil der Kassen der Welt geht an die Staatskasse des Eroberers, Geld wird nur
   verschoben. Der Besitzwechsel läuft über den gemeinsamen Pfad der Nachfolge: Fällt
   eine Hauptwelt, zieht die Hauptwelt der Verlierer auf ihre bevölkerungsreichste
@@ -846,18 +857,24 @@ ohne Zufall; Prognose, Tests und Partie rufen dieselbe.
   Technik), reguläre Verbände (höchstens ein Vielfaches der Miliz) und Tage im Depot.
   Bezahlt wird aus dem Anspruch „Verteidigung" des Staatshaushalts (`siege::arms`): am
   Monatsbeginn Sold und Unterhalt an den Staatsdienst, dann Aushebung (Güter und
-  Menschen) und je Anlage eine Stufe, ganz oder gar nicht; täglich ein Dreißigstel
-  dessen, was dem Depot fehlt. Was nicht bezahlt wird, verfällt: Bleibt der Sold aus,
+  Menschen) und der Ausbau; täglich ein Dreißigstel dessen, was dem Depot fehlt (am
+  ersten Tag des Monats erst nach dem Sold). Stufe n einer Anlage braucht n Gütersätze.
+  Der Markt gibt je Kauf nur einen Teil seines Bestands her: Was er liefert, liegt
+  bereit (`PlanetDefense::delivered`), und die Stufe steht, sobald ihr ganzer Satz da
+  ist. Was nicht bezahlt wird, verfällt: Bleibt der Sold aus,
   geht je Monat ein Zwanzigstel der Regulären, Depots füllen sich nicht, Anlagen wachsen
   nicht. Heimatwelten beginnen mit Geschützen, Regulären und Vorräten; ihr Plan nennt,
   was steht.
 - **Lesemodell** (`siege::view`): je Belagerung eine Karte mit Planet, Parteien, Phase
   (1 bis 5 mit Namen), Fortschritt, Vorräten, Anlagen, Truppen und den drei
-  vorausgerechneten Wegen; je Welt die Karte der Verteidigung mit Plan, Grenzen und
+  vorausgerechneten Wegen (ruht die Belagerung in einem Gefecht, nennt die Karte ihre
+  Flotten weiter und als Grund den umstrittenen Orbit); je Welt die Karte der
+  Verteidigung mit Plan, Grenzen und
   Kosten; und `command_block` nennt zu jedem Befehl der Belagerung den Grund, aus dem der
   Kern ihn jetzt ablehnen würde.
 - **Chronik:** Beginn und Ende einer Blockade, Beginn einer Belagerung, jeder Wechsel
-  der Phase, Übergabe, Plünderung, Verlust der Hauptwelt und Ende einer Gemeinschaft.
+  der Phase, Schiffe und Flotten, die an die Verteidigung einer Welt verloren gehen,
+  Übergabe, Plünderung, Verlust der Hauptwelt und Ende einer Gemeinschaft.
 - **KI.** Die militärische Führung lässt Flotten in Ruhe, die einen Planeten belagern
   (`AiState::reserved`). Selbst beginnt die KI noch keine Belagerung und stellt keine
   Verteidigungspläne auf; das Drehbuch `eroberung` führt Belagerungen in ganzen Partien
