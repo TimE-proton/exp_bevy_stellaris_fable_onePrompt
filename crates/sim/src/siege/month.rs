@@ -87,6 +87,7 @@ pub fn run_month(
             defense.occupation = 0.0;
             defense.occupied_from = None;
             defense.occupied_by = None;
+            defense.former_tag = None;
         }
         mirror_region(balance, defense, planet.owner, planet.population, region);
     }

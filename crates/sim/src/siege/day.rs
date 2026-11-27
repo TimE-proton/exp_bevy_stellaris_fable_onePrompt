@@ -112,22 +112,26 @@ pub fn planet_facts(
     }
 }
 
-/// Nimmt `strength` Verbände von Bord der genannten Flotten, in Nummernfolge.
-pub(super) fn take_troops(sieges: &mut Sieges, fleets: &[FleetId], strength: f64) {
+/// Nimmt `strength` Verbände von Bord der genannten Flotten, in Nummernfolge. Gehen die
+/// letzten Verbände einer Flotte von Bord, geht ihr Nachschub mit: Nachschub ohne Truppe
+/// bleibt auf keinem Schiff zurück. Gibt diesen Nachschub in Verbandstagen zurück.
+pub(super) fn take_troops(sieges: &mut Sieges, fleets: &[FleetId], strength: f64) -> f64 {
     let mut open = strength;
+    let mut supply = 0.0;
     for fleet in fleets {
         if open <= 0.0 {
             break;
         }
         if let Some(force) = sieges.embarked.get_mut(fleet) {
             let taken = force.troops.min(open);
-            force.troops -= taken;
             open -= taken;
+            supply += force.leave(taken);
         }
     }
     sieges
         .embarked
         .retain(|_, force| force.troops > 0.0 || force.supply > 0.0);
+    supply
 }
 
 /// Schifft die Truppe am Boden auf die genannten Flotten ein, soweit dort Platz ist, in
@@ -493,9 +497,11 @@ fn resolve_siege(
     logistics: &Logistics,
     sieges: &mut Sieges,
     orbit: &mut Orbit,
+    chronicle: &mut Chronicle,
     planet: PlanetId,
-    day: u64,
+    tick: u64,
 ) -> f64 {
+    let day = tick / TICKS_PER_DAY;
     let balance = &data.balance.siege;
     let system = galaxy.planet(planet).system;
     // Ein fälliger Besitzwechsel lässt die Belagerung ruhen: Sie ist entschieden, bis zur
@@ -541,10 +547,13 @@ fn resolve_siege(
     }
     // Eingeschlossen ist der Planet heute, wenn nach dem Duell des Tages keine Station
     // mehr steht. Solange dann Vorräte da sind und die Oberfläche hält, streckt der Markt
-    // vor Ort sie.
+    // vor Ort sie: der Markt des Systems, das mit der Welt gesperrt ist. Bleibt das System
+    // offen, weil es dem Belagerer oder einem Dritten gehört, liegt sein Markt jenseits
+    // des Rings, und die Garnison lebt allein vom Depot.
     let cut_off = squadron.view.control
         && stations_after_duel(defense.stations as f64, squadron.view.firepower, balance) <= 0.0;
-    let foraged = if cut_off && defense.depot > 0.0 && !siege.surface_lost() {
+    let market = super::orbit::closes(galaxy, diplomacy, system, attacker);
+    let foraged = if cut_off && market && defense.depot > 0.0 && !siege.surface_lost() {
         forage(data, economy, system, defender, siege.defenders(defense))
     } else {
         0.0
@@ -571,9 +580,15 @@ fn resolve_siege(
     // Wer als Besatzung an Land ging, ist nicht mehr an Bord; danach die Schiffe: Rumpf,
     // Munition, Treibstoff, und was mit verlorenen Plätzen an Truppen untergeht.
     if effects.landed > 0.0 {
-        take_troops(sieges, &squadron.fleets, effects.landed);
+        let supply = take_troops(sieges, &squadron.fleets, effects.landed);
+        if let Some(siege) = sieges.active.get_mut(&planet) {
+            siege.army_supply += supply;
+        }
     }
     let toll = orbit.apply(data, sieges, &squadron.fleets, attacker, &effects);
+    if toll.ships_lost > 0 {
+        tell_wrecks(galaxy, polities, chronicle, planet, attacker, &toll, tick);
+    }
     // Die Welt: Menschen, Kapital, Stimmung an der Börse.
     if effects.population < 1.0 {
         galaxy.planet_mut(planet).population *= effects.population;
@@ -618,6 +633,41 @@ fn resolve_siege(
         });
     }
     effects.disruption
+}
+
+/// Chronik der Verluste im Orbit: Schiffe, die Stationen und Geschütze der belagerten Welt
+/// zerstört haben, und Flotten, die dabei ganz verloren gingen.
+fn tell_wrecks(
+    galaxy: &Galaxy,
+    polities: &Polities,
+    chronicle: &mut Chronicle,
+    planet: PlanetId,
+    attacker: PolityId,
+    toll: &super::Toll,
+    tick: u64,
+) {
+    let target = galaxy.planet(planet);
+    let ships = if toll.ships_lost == 1 {
+        "ein Schiff".to_string()
+    } else {
+        format!("{} Schiffe", toll.ships_lost)
+    };
+    let mut text = format!(
+        "Belagerung von {}: {} verliert {} an die Verteidigung der Welt.",
+        target.name,
+        polities.get(attacker).name,
+        ships
+    );
+    for fleet in &toll.fleets_lost {
+        text.push_str(&format!(" Die Flotte {fleet} ist verloren."));
+    }
+    chronicle.push(
+        tick,
+        ChronicleKind::War,
+        Some(attacker),
+        Some(target.system),
+        text,
+    );
 }
 
 /// Chronik der Phasen: Jeder Wechsel der Phase einer Belagerung wird einmal genannt. Die
@@ -677,7 +727,6 @@ pub fn run_day(
     chronicle: &mut Chronicle,
     tick: u64,
 ) {
-    let day = tick / TICKS_PER_DAY;
     lifecycle(
         data, galaxy, polities, diplomacy, economy, finance, logistics, sieges, orbit, chronicle,
         tick,
@@ -686,13 +735,16 @@ pub fn run_day(
     let besieged: Vec<PlanetId> = sieges.active.keys().copied().collect();
     for planet in besieged {
         let target = resolve_siege(
-            data, galaxy, polities, diplomacy, economy, finance, logistics, sieges, orbit, planet,
-            day,
+            data, galaxy, polities, diplomacy, economy, finance, logistics, sieges, orbit,
+            chronicle, planet, tick,
         );
         if target > 0.0 {
             disrupted.insert(planet, target);
         }
-        tell_phase(galaxy, sieges, chronicle, planet, tick);
+        // Ist die Welt heute gefallen, nennt die Chronik ihren Fall, keine neue Phase.
+        if !sieges.pending.iter().any(|due| due.planet == planet) {
+            tell_phase(galaxy, sieges, chronicle, planet, tick);
+        }
     }
     // Stillstand: sofort auf den Stand des Tages, danach klingt er von selbst ab.
     let decay = 1.0 - data.balance.siege.disrupt_decay;
@@ -889,6 +941,113 @@ mod tests {
         scene.blockades_of_the_fleet_layer();
         scene.day();
         assert!(scene.blockaded());
+    }
+
+    #[test]
+    fn a_siege_closes_only_systems_of_the_enemy() {
+        let mut scene = Scene::colony();
+        scene.state.sieges.defense_mut(scene.planet).depot = 30.0;
+        scene.day();
+        assert!(
+            scene.blockaded(),
+            "das System des Verteidigers ist gesperrt"
+        );
+        let stretched = scene.siege().report.depot_used;
+        // Dieselbe Lage, nur liegt im System die größere Welt des Belagerers: Es ist
+        // sein eigenes System, und seine Belagerung sperrt es nicht.
+        let mut scene = Scene::colony();
+        let (planet, system) = (scene.planet, scene.system);
+        let own = scene
+            .state
+            .galaxy
+            .planets_in(system)
+            .find(|other| other.id != planet)
+            .expect("eine zweite Welt im System")
+            .id;
+        let world = scene.state.galaxy.planet_mut(own);
+        world.owner = Some(ME);
+        world.population = 1000.0;
+        assert_eq!(scene.state.galaxy.system_owner(system), Some(ME));
+        scene.state.sieges.defense_mut(planet).depot = 30.0;
+        scene.day();
+        assert!(scene.state.sieges.siege(planet).is_some());
+        assert!(!scene.blockaded());
+        // Der Markt des offenen Systems liegt jenseits des Rings: Die Garnison kauft nichts.
+        assert!(scene.siege().report.depot_used > stretched);
+        let told = scene
+            .state
+            .chronicle
+            .entries
+            .iter()
+            .any(|entry| entry.text.starts_with("Blockade"));
+        assert!(!told, "keine Blockade des eigenen Systems in der Chronik");
+    }
+
+    #[test]
+    fn recomputing_blockades_after_a_conquest_counts_no_second_day() {
+        let mut scene = Scene::colony();
+        scene.order_blockade(0);
+        scene.blockades_of_the_fleet_layer();
+        assert_eq!(scene.state.fleets.tally_of(ME).blockade_days, 1);
+        let state = &mut scene.state;
+        let mut orbit = Orbit::new(&mut state.fleets, &state.research);
+        orbit.refresh_blockades(
+            &state.galaxy,
+            &state.diplomacy,
+            &state.battles,
+            &state.sieges,
+        );
+        assert!(scene.blockaded());
+        assert_eq!(scene.state.fleets.tally_of(ME).blockade_days, 1);
+    }
+
+    #[test]
+    fn a_world_without_underground_falls_without_a_fifth_phase() {
+        let mut scene = Scene::colony();
+        let planet = scene.planet;
+        scene.state.sieges.embarked.insert(
+            FleetId(0),
+            Embarked {
+                troops: 10.0,
+                supply: 300.0,
+            },
+        );
+        scene.day();
+        let orders = crate::siege::SiegeOrders {
+            assault: true,
+            ..Default::default()
+        };
+        crate::siege::set_siege_orders(
+            &scene.state.galaxy,
+            &mut scene.state.sieges,
+            ME,
+            planet,
+            orders,
+        )
+        .unwrap();
+        let sieges = &mut scene.state.sieges;
+        let defense = sieges.defenses[planet.index()].clone();
+        let siege = sieges.active.get_mut(&planet).unwrap();
+        crate::siege::land(siege, &defense, 10.0, scene.day, &scene.data.balance.siege);
+        sieges.embarked.get_mut(&FleetId(0)).unwrap().troops = 0.0;
+        let mut days = 0;
+        while scene.state.galaxy.planet(planet).owner == Some(FOE) {
+            scene.day();
+            days += 1;
+            assert!(days < 200, "die Kolonie fällt nie");
+            if let Some(siege) = scene.state.sieges.siege(planet) {
+                let defense = scene.state.sieges.defense(planet);
+                assert_ne!(siege.phase(defense), Phase::Underground);
+            }
+        }
+        let entries = &scene.state.chronicle.entries;
+        assert!(entries.iter().any(|entry| entry.text.contains("gestürmt")));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.text.contains("Untergrund")),
+            "die Kolonie hat keinen Untergrund"
+        );
     }
 
     #[test]

@@ -114,6 +114,20 @@ fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest
     let stake = foreign.get(&to).copied().unwrap_or(0.0).clamp(0.0, 1.0);
     let defense = sieges.defense(planet);
     let liberated = defense.occupied_from == Some(to);
+    // Der Weg, auf dem die Welt zu ihrem bisherigen Besitzer kam, und der, auf dem sie
+    // zum Eroberer gekommen war, bevor er sie verlor.
+    let (lost_tag, restored_tag) = {
+        let endgame = &succession.endgame;
+        let index = planet.index();
+        (
+            (
+                endgame.path_of(planet),
+                endgame.absorbed_pop.get(index).copied().unwrap_or(0.0),
+                endgame.gap.get(index).copied().unwrap_or(0.0),
+            ),
+            defense.former_tag,
+        )
+    };
     let (lowest, highest) = balance.conquest_cohesion;
     let mut cohesion = (balance.conquest_base + balance.stake_pts * stake
         - balance.scar_pts * defense.scar)
@@ -137,8 +151,10 @@ fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest
     };
     let old = transfer.from;
     if liberated {
-        // Eine zurückgeholte Welt ist wieder eine eigene.
-        succession.endgame.tag(planet, Path::Own, 0.0, 0.0);
+        // Eine zurückgeholte Welt ist wieder, was sie vor dem Verlust war: eigen, oder
+        // einst beigetreten oder erzwungen, mit der Bevölkerung von damals.
+        let (path, population, gap) = restored_tag.unwrap_or((Path::Own, 0.0, 0.0));
+        succession.endgame.tag(planet, path, population, gap);
     }
     let Succession {
         galaxy,
@@ -213,6 +229,7 @@ fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest
         defense.occupation = 0.0;
         defense.occupied_from = None;
         defense.occupied_by = None;
+        defense.former_tag = None;
     } else {
         let mercy = if conquest.outcome == Outcome::Capitulated {
             balance.capitulation_mercy
@@ -222,6 +239,7 @@ fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest
         defense.occupation = (1.0 - stake).clamp(balance.occupation_min, 1.0) * mercy;
         defense.occupied_from = Some(old);
         defense.occupied_by = Some(to);
+        defense.former_tag = Some(lost_tag);
     }
     // Anlagen und Vorräte gehen über, wie sie stehen; der Plan nennt genau das.
     defense.plan = DefensePlan {
@@ -532,8 +550,11 @@ mod tests {
         let balance = scene.data.balance.siege.clone();
         let planet = scene.planet;
         embark(&mut scene, FleetId(0), 5.0);
+        // Die Welt war der Gemeinschaft 1 einst beigetreten: So zählt sie im Endspiel.
+        scene.state.endgame.tag(planet, Path::Joined, 3.0, 0.25);
         until_it_falls(&mut scene, ME);
         assert_eq!(scene.state.sieges.defense(planet).occupied_from, Some(FOE));
+        assert_eq!(scene.state.endgame.path_of(planet), Path::Forced);
         // Der Eroberer zieht ab; die Gemeinschaft 1 kommt mit Truppen zurück.
         let home = scene.state.polities.get(ME).capital.unwrap();
         scene.place(0, scene.state.galaxy.planet(home).system);
@@ -544,6 +565,17 @@ mod tests {
         let defense = scene.state.sieges.defense(planet);
         assert_eq!(defense.occupation, 0.0);
         assert_eq!(defense.occupied_from, None);
+        // Zurückgeholt gilt wieder der Weg, auf dem sie einst gekommen war.
+        let endgame = &scene.state.endgame;
+        assert_eq!(endgame.path_of(planet), Path::Joined);
+        assert_eq!(
+            (
+                endgame.absorbed_pop[planet.index()],
+                endgame.gap[planet.index()]
+            ),
+            (3.0, 0.25)
+        );
+        assert_eq!(defense.former_tag, None);
         let region = scene.state.finance.region(planet);
         assert!(region.cohesion >= balance.liberation);
         assert_eq!(region.occupation, 0.0);

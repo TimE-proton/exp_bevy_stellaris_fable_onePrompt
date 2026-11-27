@@ -4,6 +4,7 @@ use super::{Battles, Fleet, Fleets, Stance, map_speed};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::galaxy::Galaxy;
+use crate::ids::{PolityId, SystemId};
 use crate::tech::Research;
 
 /// Strecke, die eine Flotte an einem Tag zurücklegt, und ob sie damit das nächste System
@@ -98,6 +99,32 @@ pub fn update_blockades(
     diplomacy: &Diplomacy,
     battles: &Battles,
 ) {
+    let (blockaded, besiegers) = blockades(galaxy, fleets, diplomacy, battles);
+    for owner in besiegers {
+        fleets.tally_mut(owner).blockade_days += 1;
+    }
+    fleets.blockaded = blockaded;
+}
+
+/// Bestimmt die Sperren neu, ohne einen Blockadetag zu zählen: für den Fall, dass sich
+/// mitten am Tag ändert, wem ein System gehört. Gezählt wird nur einmal am Tag, in
+/// [`update_blockades`].
+pub fn recompute_blockades(
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    diplomacy: &Diplomacy,
+    battles: &Battles,
+) {
+    fleets.blockaded = blockades(galaxy, fleets, diplomacy, battles).0;
+}
+
+/// Die gesperrten Systeme, aufsteigend, und je Sperre die Gemeinschaft, die sie hält.
+fn blockades(
+    galaxy: &Galaxy,
+    fleets: &Fleets,
+    diplomacy: &Diplomacy,
+    battles: &Battles,
+) -> (Vec<SystemId>, Vec<PolityId>) {
     // Steht die Flotte für ihre Aufgabe bereit: einsatzbereit, oder im Gefecht und noch
     // kämpfend?
     let stands = |fleet: &Fleet| {
@@ -137,10 +164,7 @@ pub fn update_blockades(
             );
         }
     }
-    for owner in besiegers {
-        fleets.tally_mut(owner).blockade_days += 1;
-    }
-    fleets.blockaded = blockaded;
+    (blockaded, besiegers)
 }
 
 #[cfg(test)]

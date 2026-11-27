@@ -34,7 +34,7 @@ pub use battles::{
     advance_battles, combat_modifiers, combatant_setup, crew_morale, loss_share, muster_battles,
     open_battles, order_retreat, relay_orders, retreat_target, withdrawal_route,
 };
-pub use movement::{day_travel, move_fleets, update_blockades};
+pub use movement::{day_travel, move_fleets, recompute_blockades, update_blockades};
 pub use plugin::FleetPlugin;
 pub use supply::{
     fleet_claim, maintain_fleets, maintenance_parts, monthly_upkeep, pay_upkeep,

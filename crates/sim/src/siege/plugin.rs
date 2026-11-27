@@ -1,15 +1,15 @@
 use super::{
-    OrbitAccess, Sieges, procure_day, reserve_besiegers, resolve_conquests, run_arms_month,
+    OrbitAccess, Sieges, open_arms_month, procure_day, reserve_besiegers, resolve_conquests,
     run_day, run_month, tidy,
 };
 use crate::ai::AiState;
 use crate::chronicle::Chronicle;
-use crate::clock::{SimClock, day_start, month_start};
+use crate::clock::{DAYS_PER_MONTH, SimClock, day_start, month_start};
 use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::Economy;
 use crate::finance::Finance;
-use crate::fleet::Fleets;
+use crate::fleet::{Battles, Fleets};
 use crate::galaxy::Galaxy;
 use crate::logistics::Logistics;
 use crate::polity::{Polities, SuccessionParams};
@@ -27,22 +27,33 @@ impl Plugin for SiegePlugin {
             sim_schedule(),
             (
                 // Nach den Gefechten des Takts: Wer dort eine Flotte verliert, belagert im
-                // selben Takt nicht mehr. Der Tagesschritt folgt am Tagesbeginn.
+                // selben Takt nicht mehr. Der Tagesschritt folgt am Tagesbeginn. Am ersten
+                // Tag eines Monats kaufen die Depots erst nach dem Sold (`siege_month`).
                 (
                     siege_watch,
                     siege_day.run_if(day_start),
-                    siege_procure.run_if(day_start),
+                    siege_procure.run_if(later_day_start),
                 )
                     .chain()
                     .in_set(SimSet::Siege),
                 // Urteile des Tages werden noch am selben Tag zum Besitzwechsel; danach, am
-                // Monatsbeginn, die Bücher des Monats.
-                (conquests.run_if(day_start), siege_month.run_if(month_start))
+                // Monatsbeginn, die Bücher des Monats. Zuletzt gibt die Belagerung der
+                // Flotten-KI zurück, was der Tag aus den Zuordnungen genommen hat.
+                (
+                    conquests.run_if(day_start),
+                    siege_month.run_if(month_start),
+                    siege_release.run_if(day_start),
+                )
                     .chain()
                     .in_set(SimSet::Aftermath),
             ),
         );
     }
+}
+
+/// Laufbedingung: erster Takt eines Tages, der nicht der erste eines Monats ist.
+fn later_day_start(clock: Res<SimClock>) -> bool {
+    clock.is_day_start() && !clock.day().is_multiple_of(DAYS_PER_MONTH)
 }
 
 /// Jeder Takt: Zuordnungen und Truppen an Bord folgen den Flotten, Belagerungen ohne
@@ -94,8 +105,10 @@ fn siege_day(
     mut finance: ResMut<Finance>,
     mut sieges: ResMut<Sieges>,
     mut access: OrbitAccess,
+    mut battles: ResMut<Battles>,
     mut chronicle: ResMut<Chronicle>,
 ) {
+    let mut orbit = access.orbit();
     run_day(
         &data,
         &mut galaxy,
@@ -105,10 +118,14 @@ fn siege_day(
         &mut finance,
         &logistics,
         &mut sieges,
-        &mut access.orbit(),
+        &mut orbit,
         &mut chronicle,
         clock.tick,
     );
+    // Was die Verteidigung der Welten zerstört hat, zählt bei den Verlusten der Flotten.
+    for (owner, (ships, fleets)) in orbit.take_wrecks() {
+        battles.count_wrecked(owner, ships, fleets);
+    }
 }
 
 /// Tagesabschluss: Fällige Besitzwechsel werden über den gemeinsamen Pfad vollzogen.
@@ -120,8 +137,9 @@ fn conquests(clock: Res<SimClock>, mut sieges: ResMut<Sieges>, mut params: Succe
 }
 
 /// Monatsbeginn: Sold, Unterhalt, Aushebung und Ausbau aus der Bewilligung der
-/// Verteidigung; dann Miliz im Frieden, Abklingen von Schäden und Besatzung, Spiegelwerte
-/// der Regionen, Anteile an den Betrieben belagerter Welten.
+/// Verteidigung, danach der Depotkauf des Tages aus dem, was davon bleibt; dann Miliz im
+/// Frieden, Abklingen von Schäden und Besatzung, Spiegelwerte der Regionen, Anteile an
+/// den Betrieben belagerter Welten.
 fn siege_month(
     data: Res<GameData>,
     polities: Res<Polities>,
@@ -132,14 +150,14 @@ fn siege_month(
     mut finance: ResMut<Finance>,
     mut sieges: ResMut<Sieges>,
 ) {
-    let fleet_owner = |fleet| fleets.get(fleet).map(|fleet| fleet.owner);
-    run_arms_month(
+    open_arms_month(
         &data,
         &mut galaxy,
         &polities,
         &mut economy,
         &mut sieges,
-        &fleet_owner,
+        &|fleet| fleets.get(fleet).map(|fleet| fleet.owner),
+        &|system| fleets.is_blockaded(system),
     );
     run_month(
         &data,
@@ -151,8 +169,8 @@ fn siege_month(
     );
 }
 
-/// Tagesbeginn, nach dem Tagesschritt der Belagerungen: Die Welten füllen ihre Depots
-/// aus der Bewilligung der Verteidigung.
+/// Tagesbeginn außer am ersten Tag eines Monats, nach dem Tagesschritt der Belagerungen:
+/// Die Welten füllen ihre Depots aus der Bewilligung der Verteidigung.
 fn siege_procure(
     data: Res<GameData>,
     galaxy: Res<Galaxy>,
@@ -163,4 +181,11 @@ fn siege_procure(
     procure_day(&data, &galaxy, &mut economy, &mut sieges, &|system| {
         fleets.is_blockaded(system)
     });
+}
+
+/// Ende des Tagesbeginns: Zuordnungen, die der Tagesschritt oder ein Besitzwechsel
+/// beendet hat (aufgehobene Belagerung, zerstörte Flotte, gefallene Welt), gibt die
+/// Belagerung noch im selben Takt bei der Flotten-KI frei.
+fn siege_release(mut sieges: ResMut<Sieges>, mut ai: ResMut<AiState>) {
+    reserve_besiegers(&mut sieges, &mut ai);
 }

@@ -29,8 +29,8 @@ pub mod step;
 pub mod view;
 
 pub use arms::{
-    Shortfall, UNPAID_DECAY, Works, defense_claim, level_caps, planet_upkeep, procure_day,
-    run_arms_month, set_defense_plan, shortfall, upkeep_due,
+    Shortfall, UNPAID_DECAY, Works, defense_claim, level_caps, open_arms_month, planet_upkeep,
+    procure_day, run_arms_month, set_defense_plan, sets_missing, shortfall, upkeep_due,
 };
 pub use conquest::{mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
@@ -54,6 +54,7 @@ use crate::ai::AiState;
 use crate::data::{GameData, SiegeBalance};
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money};
+use crate::endgame::Path;
 use crate::finance::Finance;
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
@@ -306,6 +307,14 @@ pub struct PlanetDefense {
     /// den Besitzer, endet die Besatzung.
     #[serde(default)]
     pub occupied_by: Option<PolityId>,
+    /// Weg, auf dem die Welt zu der Gemeinschaft gekommen war, der sie genommen wurde
+    /// (`occupied_from`), mit Bevölkerung und Abstand: Holt die sie zurück, gilt er wieder.
+    #[serde(default)]
+    pub former_tag: Option<(Path, f64, f32)>,
+    /// Sätze an Gütern, die für die nächste Stufe jeder Anlage schon geliefert sind, in
+    /// der Reihenfolge von [`Works::ALL`]. Stufe n braucht n Sätze.
+    #[serde(default)]
+    pub delivered: [f64; 4],
 }
 
 /// Stehende Befehle des Belagerers. Was nicht wirken kann, steht in
@@ -458,9 +467,10 @@ impl Siege {
     }
 
     pub fn phase(&self, defense: &PlanetDefense) -> Phase {
-        if self.surface_lost() {
+        // Untergrund heißt die Phase nur, wo unter der Oberfläche noch jemand steht.
+        if self.surface_lost() && self.deep > 0.0 {
             Phase::Underground
-        } else if self.army > 0.0 {
+        } else if self.army > 0.0 || self.surface_lost() {
             Phase::Ground
         } else if defense.stations > 0.0 {
             Phase::Approach
@@ -679,6 +689,37 @@ pub struct Embarked {
     pub supply: f64,
 }
 
+impl Embarked {
+    /// Nimmt bis zu `strength` Verbände von Bord, mit ihrem Anteil am Nachschub; gehen
+    /// die letzten, mit allem Nachschub. Gibt Verbände und Nachschub zurück.
+    pub fn disembark(&mut self, strength: f64) -> (f64, f64) {
+        let troops = strength.clamp(0.0, self.troops.max(0.0));
+        if troops <= 0.0 {
+            return (0.0, 0.0);
+        }
+        if troops >= self.troops {
+            self.troops = 0.0;
+            return (troops, std::mem::take(&mut self.supply));
+        }
+        let supply = self.supply * troops / self.troops;
+        self.troops -= troops;
+        self.supply -= supply;
+        (troops, supply)
+    }
+
+    /// `strength` Verbände gehen zu einer Landungstruppe von Bord. Der Nachschub bleibt
+    /// an Bord, solange dort Truppen sind; mit den letzten geht er mit, denn ohne Truppe
+    /// könnte ihn niemand mehr entladen. Gibt den Nachschub zurück, der mitgeht.
+    pub fn leave(&mut self, strength: f64) -> f64 {
+        self.troops = (self.troops - strength.max(0.0)).max(0.0);
+        if self.troops > 0.0 {
+            0.0
+        } else {
+            std::mem::take(&mut self.supply)
+        }
+    }
+}
+
 /// Fälliger Besitzwechsel, den der Abschluss des Tages ausführt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Conquest {
@@ -836,6 +877,7 @@ impl Sieges {
                 defense.militia,
                 defense.depot,
                 defense.plan.regulars as f64,
+                defense.delivered.iter().sum(),
             ];
             if strengths.into_iter().any(|value| !sound(value)) {
                 return Some(format!(

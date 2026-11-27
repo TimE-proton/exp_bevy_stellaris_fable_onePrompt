@@ -9,7 +9,7 @@ use super::step::{DayEffects, hull_shares};
 use super::{OrbitView, PlanetDefense, Sieges, TechView};
 use crate::data::{GameData, ShipClass, SiegeBalance, WeaponKind};
 use crate::diplomacy::Diplomacy;
-use crate::fleet::{Battles, Fleet, Fleets, Ship, update_blockades};
+use crate::fleet::{Battles, Fleet, Fleets, Ship, recompute_blockades};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
 use crate::tech::{Research, TechEffects};
@@ -37,6 +37,9 @@ impl OrbitAccess<'_> {
 pub struct Orbit<'a> {
     fleets: &'a mut Fleets,
     research: &'a Research,
+    /// Was belagerte Welten seit dem letzten [`Orbit::take_wrecks`] zerstört haben: je
+    /// Gemeinschaft Schiffe und ganze Flotten.
+    wrecks: BTreeMap<PolityId, (u32, u32)>,
 }
 
 /// Eine bestehende Flotte, soweit die Belagerung sie prüft.
@@ -73,6 +76,8 @@ pub struct Squadron {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Toll {
     pub ships_lost: u32,
+    /// Namen der Flotten, die dabei ihr letztes Schiff verloren haben.
+    pub fleets_lost: Vec<String>,
     /// Verbände, die mit ihren Schiffen verloren gingen.
     pub troops_lost: f64,
 }
@@ -175,6 +180,16 @@ fn settle(fleets: &Fleets, data: &GameData, sieges: &mut Sieges) -> Vec<(PolityI
     lost
 }
 
+/// Liegt die Flotte für `attacker` mit Treibstoff im System, auch wenn sie gerade kämpft
+/// oder sich sammelt? Dann ist sie noch da, hält aber vielleicht den Orbit nicht.
+fn lingers(fleet: &Fleet, system: SystemId, attacker: PolityId) -> bool {
+    fleet.alive
+        && fleet.owner == attacker
+        && fleet.system == system
+        && fleet.is_docked()
+        && fleet.min_fuel() > 0.0
+}
+
 /// Flotten, die `planet` heute für `attacker` belagern, in Nummernfolge.
 fn besiegers(
     fleets: &Fleets,
@@ -193,6 +208,21 @@ fn besiegers(
         })
         .map(|(fleet, _)| *fleet)
         .collect()
+}
+
+/// Sperrt eine Einschließung durch `attacker` das System? Nur, wenn dessen Besitzer mit
+/// ihm im Krieg steht, wie bei der Blockade der Flottenebene. Im eigenen System des
+/// Belagerers oder in dem eines Dritten bleibt der Markt offen; die eingeschlossene Welt
+/// selbst erreicht ihn dann nicht.
+pub fn closes(
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    system: SystemId,
+    attacker: PolityId,
+) -> bool {
+    galaxy
+        .system_owner(system)
+        .is_some_and(|owner| diplomacy.at_war(attacker, owner))
 }
 
 /// Macht eine dem Belagerer feindliche Flotte ihm den Orbit streitig? Wer sich nach einem
@@ -231,12 +261,63 @@ pub fn squadron(
     attacker: PolityId,
     defender: PolityId,
 ) -> Squadron {
+    muster(
+        fleets, research, data, diplomacy, sieges, planet, system, attacker, defender, false,
+    )
+}
+
+/// Wie [`squadron`], für die Anzeige: Ruht die Belagerung, weil ihre Flotten im Gefecht
+/// stehen oder sich sammeln, nennt die Lage trotzdem die Flotten, die noch über dem
+/// Planeten liegen, mit ihren Tanks, Magazinen und Truppen an Bord. Die Orbitalhoheit
+/// (`view.control`) bleibt, wie der Tagesschritt sie sieht.
+pub fn presence(
+    fleets: &Fleets,
+    research: &Research,
+    data: &GameData,
+    diplomacy: &Diplomacy,
+    sieges: &Sieges,
+    planet: PlanetId,
+    system: SystemId,
+    attacker: PolityId,
+    defender: PolityId,
+) -> Squadron {
+    muster(
+        fleets, research, data, diplomacy, sieges, planet, system, attacker, defender, true,
+    )
+}
+
+fn muster(
+    fleets: &Fleets,
+    research: &Research,
+    data: &GameData,
+    diplomacy: &Diplomacy,
+    sieges: &Sieges,
+    planet: PlanetId,
+    system: SystemId,
+    attacker: PolityId,
+    defender: PolityId,
+    lingering: bool,
+) -> Squadron {
     let balance = &data.balance.siege;
-    let besieging = besiegers(fleets, &sieges.assign, planet, system, attacker);
+    let mut besieging = besiegers(fleets, &sieges.assign, planet, system, attacker);
+    let control = !besieging.is_empty() && !contested(fleets, diplomacy, system, attacker);
+    if lingering && besieging.is_empty() {
+        besieging = sieges
+            .assign
+            .iter()
+            .filter(|(_, target)| **target == planet)
+            .filter(|(fleet, _)| {
+                fleets
+                    .get(**fleet)
+                    .is_some_and(|fleet| lingers(fleet, system, attacker))
+            })
+            .map(|(fleet, _)| *fleet)
+            .collect();
+    }
     let effects = research.effects(attacker);
     let mut squadron = Squadron {
         view: OrbitView {
-            control: !besieging.is_empty() && !contested(fleets, diplomacy, system, attacker),
+            control,
             att: tech_view(research, attacker, balance),
             def: tech_view(research, defender, balance),
             ..Default::default()
@@ -276,7 +357,17 @@ pub fn squadron(
 
 impl<'a> Orbit<'a> {
     pub fn new(fleets: &'a mut Fleets, research: &'a Research) -> Self {
-        Self { fleets, research }
+        Self {
+            fleets,
+            research,
+            wrecks: BTreeMap::new(),
+        }
+    }
+
+    /// Schiffe und Flotten je Gemeinschaft, die belagerte Welten zerstört haben, seit
+    /// zuletzt gefragt wurde: für die Kennzahlen der Flottenebene.
+    pub fn take_wrecks(&mut self) -> BTreeMap<PolityId, (u32, u32)> {
+        std::mem::take(&mut self.wrecks)
     }
 
     /// Die Flotte, falls sie besteht.
@@ -392,7 +483,17 @@ impl<'a> Orbit<'a> {
             }
             let before = fleet.ships.len();
             fleet.ships.retain(|ship| ship.hull > WRECKED);
-            toll.ships_lost += (before - fleet.ships.len()) as u32;
+            let lost = (before - fleet.ships.len()) as u32;
+            if lost == 0 {
+                continue;
+            }
+            toll.ships_lost += lost;
+            let wrecks = self.wrecks.entry(fleet.owner).or_default();
+            wrecks.0 += lost;
+            if fleet.ships.is_empty() {
+                wrecks.1 += 1;
+                toll.fleets_lost.push(fleet.name.clone());
+            }
         }
         // Stärke und Bestand der Flotten folgen den Schiffen.
         self.fleets.refresh(data);
@@ -471,7 +572,8 @@ impl<'a> Orbit<'a> {
         battles: &Battles,
         sieges: &Sieges,
     ) {
-        update_blockades(galaxy, self.fleets, diplomacy, battles);
+        // Ohne Zählung: Den Blockadetag hat die Flottenebene heute schon vermerkt.
+        recompute_blockades(galaxy, self.fleets, diplomacy, battles);
         self.veto_blockades(galaxy, &sieges.defenses);
         let held = self.held_systems(galaxy, diplomacy, sieges);
         self.close_systems(held);
@@ -479,7 +581,10 @@ impl<'a> Orbit<'a> {
 
     /// Systeme, die eine Belagerung sperrt: Der Belagerer hält den Orbit über einer Welt
     /// ohne Stationen; und war das System schon gesperrt, hält die Sperre, solange seine
-    /// Flotte dort noch kämpft (ein Entsatz muss sie erst schlagen).
+    /// Flotte dort noch kämpft (ein Entsatz muss sie erst schlagen). Wie die Blockade der
+    /// Flottenebene trifft die Sperre nur Systeme, deren Besitzer mit dem Belagerer im
+    /// Krieg steht: Liegt die belagerte Welt in dessen eigenem System oder in dem eines
+    /// Dritten, bleibt es offen.
     pub fn held_systems(
         &self,
         galaxy: &Galaxy,
@@ -492,6 +597,9 @@ impl<'a> Orbit<'a> {
             .filter(|(planet, _)| sieges.defense(**planet).stations <= 0.0)
             .filter_map(|(planet, siege)| {
                 let system = galaxy.planet(*planet).system;
+                if !closes(galaxy, diplomacy, system, siege.attacker) {
+                    return None;
+                }
                 let holds =
                     self.control(diplomacy, &sieges.assign, *planet, system, siege.attacker)
                         || (sieges.closed.contains(&system)
@@ -547,14 +655,7 @@ impl<'a> Orbit<'a> {
             .iter()
             .filter(|(_, target)| **target == planet)
             .filter_map(|(fleet, _)| self.fleets.get(*fleet))
-            .any(|fleet| {
-                fleet.alive
-                    && fleet.owner == attacker
-                    && fleet.system == system
-                    && fleet.is_docked()
-                    && fleet.min_fuel() > 0.0
-                    && (!fighting || fleet.in_battle)
-            })
+            .any(|fleet| lingers(fleet, system, attacker) && (!fighting || fleet.in_battle))
     }
 
     /// Wer einen Planeten einschließt, sperrt sein System für Handel und Nachschub, gleich
@@ -607,7 +708,7 @@ pub(super) fn check(world: &World) -> Result<(), String> {
 pub(super) mod testing {
     use super::*;
     use crate::clock::TICKS_PER_DAY;
-    use crate::fleet::Stance;
+    use crate::fleet::{Stance, update_blockades};
     use crate::polity::Succession;
     use crate::siege::{Siege, resolve_conquests, run_day, tidy};
     use crate::state::{SimConfig, SimState};

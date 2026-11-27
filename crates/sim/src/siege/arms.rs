@@ -64,7 +64,14 @@ impl Works {
         }
     }
 
+    /// Platz der Anlage in der Reihenfolge von [`Works::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Setzt die Stufe; was für die nächste schon geliefert war, ist damit verbaut.
     fn set_level(self, defense: &mut PlanetDefense, level: u8) {
+        defense.delivered[self.index()] = 0.0;
         match self {
             Works::Stations => defense.stations = level as f32,
             Works::Guns => defense.guns = level as f32,
@@ -187,6 +194,12 @@ pub fn upkeep_due(
     to_money(worlds + balance.pay * (aboard + ashore))
 }
 
+/// Sätze, die der nächsten Stufe `next` einer Anlage noch fehlen: Stufe n braucht n Sätze,
+/// abzüglich dessen, was schon geliefert ist.
+pub fn sets_missing(defense: &PlanetDefense, works: Works, next: u8) -> f64 {
+    (next as f64 - defense.delivered[works.index()]).max(0.0)
+}
+
 /// Kosten eines Gütersatzes zum heutigen Briefkurs, in Credits.
 fn bundle_cost(market: &Market, bundle: &[(GoodId, f64)], spread: f64) -> f64 {
     bundle
@@ -279,9 +292,12 @@ pub fn defense_claim(
         for (works, next) in Works::ALL.into_iter().zip(missing.next_level) {
             let Some(next) = next else { continue };
             let bundle = works.bundle(balance);
-            if sets_in_stock(market, bundle, balance.buy_share) >= next as f64 {
-                goods += next as f64 * bundle_cost(market, bundle, spread);
-            }
+            let sets = sets_missing(defense, works, next).min(sets_in_stock(
+                market,
+                bundle,
+                balance.buy_share,
+            ));
+            goods += sets.max(0.0) * bundle_cost(market, bundle, spread);
         }
     }
     upkeep_due(data, galaxy, fleet_owner, sieges, polity) + to_money(goods)
@@ -297,7 +313,6 @@ fn buy_sets(
     market: usize,
     bundle: &[(GoodId, f64)],
     sets: f64,
-    whole: bool,
 ) -> f64 {
     let balance = &data.balance.siege;
     let spread = data.balance.economy.spread;
@@ -315,10 +330,7 @@ fn buy_sets(
     for (good, amount) in bundle {
         place.demand_today[good.index()] += affordable * amount;
     }
-    let mut bought = affordable.min(sets_in_stock(place, bundle, balance.buy_share));
-    if whole && bought < sets {
-        bought = 0.0;
-    }
+    let bought = affordable.min(sets_in_stock(place, bundle, balance.buy_share));
     if bought <= 0.0 {
         economy.want(polity, Claim::Defense, to_money(affordable * cost));
         return 0.0;
@@ -362,7 +374,6 @@ pub fn procure_day(
                 market,
                 &balance.day_bundle_ids,
                 missing.depot * share,
-                false,
             );
             if sets > 0.0 && garrison > 0.0 {
                 let defense = &mut sieges.defenses[planet.id.index()];
@@ -379,11 +390,30 @@ pub fn procure_day(
         }
         for (works, next) in Works::ALL.into_iter().zip(missing.next_level) {
             let Some(next) = next else { continue };
+            let sets = sets_missing(&sieges.defenses[planet.id.index()], works, next);
             for (good, amount) in works.bundle(balance) {
-                place.demand_today[good.index()] += next as f64 * amount * share;
+                place.demand_today[good.index()] += sets * amount * share;
             }
         }
     }
+}
+
+/// Die Bücher der Verteidigung am ersten Tag eines Monats, in der Reihenfolge, in der
+/// die Bewilligung reichen muss: zuerst Sold, Unterhalt, Aushebung und Ausbau
+/// ([`run_arms_month`]), danach der Kauf des Tages für die Depots ([`procure_day`]). So
+/// geht der Sold den Vorräten vor, wenn die Bewilligung nicht für beides reicht. An allen
+/// anderen Tagen läuft [`procure_day`] allein.
+pub fn open_arms_month(
+    data: &GameData,
+    galaxy: &mut Galaxy,
+    polities: &Polities,
+    economy: &mut Economy,
+    sieges: &mut Sieges,
+    fleet_owner: &dyn Fn(crate::ids::FleetId) -> Option<PolityId>,
+    blockaded: &dyn Fn(crate::ids::SystemId) -> bool,
+) {
+    run_arms_month(data, galaxy, polities, economy, sieges, fleet_owner);
+    procure_day(data, galaxy, economy, sieges, blockaded);
 }
 
 /// Monatsbeginn, nach dem Abschluss des Staatshaushalts, je lebender Gemeinschaft:
@@ -392,7 +422,8 @@ pub fn procure_day(
 /// - Je Welt, die Hauptwelt zuerst, dann in Nummernfolge: Was über dem Plan liegt, geht
 ///   (Reguläre kehren in die Bevölkerung zurück, soweit die Welt sie trägt). Dann
 ///   Aushebung auf den Plan zu, höchstens `recruit_per_month` der Miliz plus einen
-///   Verband, jeder aus Gütern und Menschen; und je Anlage eine Stufe, ganz oder gar nicht.
+///   Verband, jeder aus Gütern und Menschen; und je Anlage Güter für die nächste Stufe,
+///   soweit der Markt sie hergibt: Die Stufe steht, sobald ihr ganzer Satz geliefert ist.
 pub fn run_arms_month(
     data: &GameData,
     galaxy: &mut Galaxy,
@@ -412,7 +443,8 @@ pub fn run_arms_month(
         } else {
             0.0
         };
-        economy.book_unfunded(polity.id, due - paid);
+        // Was die Bewilligung nicht deckt, hat der Abschluss des Haushalts schon als
+        // fehlend vermerkt: Hier wird es nicht ein zweites Mal gezählt.
         let mut worlds: Vec<PlanetId> = galaxy.planets_of(polity.id).map(|p| p.id).collect();
         worlds.sort_by_key(|planet| (Some(*planet) != polity.capital, *planet));
         for id in worlds {
@@ -452,7 +484,6 @@ pub fn run_arms_month(
                     system.index(),
                     &balance.regular_bundle_ids,
                     missing.recruits,
-                    false,
                 );
                 if raised > 0.0 {
                     let defense = &mut sieges.defenses[index];
@@ -470,18 +501,22 @@ pub fn run_arms_month(
             }
             for (works, next) in Works::ALL.into_iter().zip(missing.next_level) {
                 let Some(next) = next else { continue };
-                // Stufe n kostet das n-Fache des Satzes, ganz oder gar nicht.
-                let built = buy_sets(
+                // Stufe n kostet das n-Fache des Satzes. Der Markt gibt je Kauf nur einen
+                // Teil seines Bestands her: Was er liefert, liegt bereit, und die Stufe
+                // steht, sobald alles da ist.
+                let wanted = sets_missing(&sieges.defenses[index], works, next);
+                let bought = buy_sets(
                     data,
                     economy,
                     polity.id,
                     system.index(),
                     works.bundle(balance),
-                    next as f64,
-                    true,
+                    wanted,
                 );
-                if built > 0.0 {
-                    works.set_level(&mut sieges.defenses[index], next);
+                let defense = &mut sieges.defenses[index];
+                defense.delivered[works.index()] += bought;
+                if defense.delivered[works.index()] >= next as f64 - 1e-9 {
+                    works.set_level(defense, next);
                 }
             }
         }
@@ -667,7 +702,9 @@ mod tests {
         let month_line = &state.economy.budget(ME).unwrap().current;
         assert_eq!(month_line.line(Claim::Defense).paid, 0);
         assert!(month_line.line(Claim::Defense).wanted > 0);
-        assert!(month_line.unfunded > 0);
+        // Der Abschluss hat den gekürzten Anspruch als fehlend vermerkt; der Monatsschritt
+        // zählt ihn nicht noch einmal.
+        assert_eq!(month_line.unfunded, claim);
         assert_eq!(scene.money(), money);
 
         // Zwölf Monate ohne Sold: Fast die Hälfte der Garnison ist fort, die Anlagen
@@ -681,6 +718,63 @@ mod tests {
         assert!((defense.regulars - left).abs() < 1e-6);
         assert!(defense.regulars < 0.6 * before.regulars);
         assert_eq!(defense.guns, before.guns);
+    }
+
+    #[test]
+    fn pay_comes_before_depots_when_the_grant_covers_only_one() {
+        let (mut scene, planet) = home();
+        let balance = scene.data.balance.siege.clone();
+        let defense = scene.state.sieges.defense_mut(planet);
+        defense.militia = 20.0;
+        defense.depot = 0.0;
+        let before = defense.clone();
+        // Die Kasse reicht für Sold und Unterhalt und einen Credit darüber; verlangt ist
+        // weit mehr, denn das Depot ist leer.
+        let upkeep = to_money(planet_upkeep(&balance, &before));
+        let claim = settle(&mut scene, upkeep + 1000);
+        assert!(claim > upkeep + 1000);
+        let staff = scene.state.economy.staff[ME.index()];
+        // Der erste Tag des Monats, wie ihn die Partie rechnet.
+        let state = &mut scene.state;
+        open_arms_month(
+            &scene.data,
+            &mut state.galaxy,
+            &state.polities,
+            &mut state.economy,
+            &mut state.sieges,
+            &|_| None,
+            &|_| false,
+        );
+        assert_eq!(state.economy.staff[ME.index()] - staff, upkeep);
+        assert_eq!(state.sieges.defense(planet).regulars, before.regulars);
+    }
+
+    #[test]
+    fn works_grow_from_what_the_market_yields_month_by_month() {
+        let (mut scene, planet) = home();
+        let balance = scene.data.balance.siege.clone();
+        let system = scene.state.galaxy.planet(planet).system;
+        // Der Markt führt von den Gütern einer Station gerade das Anderthalbfache eines
+        // Satzes: Auf einmal gibt er die Stufe nicht her.
+        for (good, amount) in &balance.station_ids {
+            scene.state.economy.markets[system.index()].stock[good.index()] = 1.5 * amount;
+        }
+        scene.state.sieges.defense_mut(planet).plan.stations = 1;
+        let mut months = 0;
+        while scene.state.sieges.defense(planet).stations < 1.0 {
+            assert!(months < 12, "die Station wird nie fertig");
+            for (good, amount) in &balance.station_ids {
+                scene.state.economy.markets[system.index()].stock[good.index()] = 1.5 * amount;
+            }
+            let claim = settle(&mut scene, to_money(500_000.0));
+            assert!(claim > 0);
+            month(&mut scene);
+            months += 1;
+            let delivered = scene.state.sieges.defense(planet).delivered[0];
+            assert!((0.0..1.0).contains(&delivered));
+        }
+        assert!(months > 1, "der Markt gibt je Kauf nur einen Teil her");
+        assert_eq!(scene.state.sieges.defense(planet).delivered[0], 0.0);
     }
 
     #[test]

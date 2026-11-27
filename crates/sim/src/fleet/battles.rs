@@ -642,6 +642,21 @@ fn attached(fleets: &Fleets, battle: &Battle, side: usize) -> Option<usize> {
         })
 }
 
+impl Battles {
+    /// Verbucht Schiffe und ganze Flotten, die eine Gemeinschaft außerhalb eines Gefechts
+    /// verloren hat: unter den Stationen und Geschützen einer belagerten Welt. Sie zählen
+    /// in denselben Kennzahlen wie die Verluste der Gefechte.
+    pub fn count_wrecked(&mut self, owner: PolityId, ships: u32, fleets: u32) {
+        count_lost(&mut self.ships_lost, owner, ships);
+        if fleets > 0 {
+            if self.fleets_lost.len() <= owner.index() {
+                self.fleets_lost.resize(owner.index() + 1, 0);
+            }
+            self.fleets_lost[owner.index()] += fleets;
+        }
+    }
+}
+
 /// Zählt verlorene Schiffe einer Gemeinschaft (ohne Bordjäger).
 pub(super) fn count_lost(ships_lost: &mut Vec<u32>, owner: PolityId, lost: u32) {
     if lost == 0 {

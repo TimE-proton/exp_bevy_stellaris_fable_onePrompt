@@ -6,8 +6,8 @@
 //! Alles hier liest nur. Die Gründe stammen aus denselben Funktionen, die die Befehle
 //! ausführen ([`super::orders`], [`super::arms`]): Was hier möglich heißt, nimmt der Kern an.
 
-use super::arms::{Works, level_caps, planet_upkeep, shortfall};
-use super::orbit::squadron;
+use super::arms::{Works, level_caps, planet_upkeep, sets_missing, shortfall};
+use super::orbit::{closes, presence};
 use super::orders::check_embark;
 use super::{
     Course, DefensePlan, Forecast, Orbit, Outcome, Phase, PlanetDefense, SiegeView, Sieges,
@@ -145,11 +145,12 @@ pub struct SiegeCard {
 
 /// Die Lage einer laufenden Belagerung für den Tagesrechner und seine Prognose, aus der
 /// Welt gelesen: der Datensatz, die Verteidigung, der Planet am nächsten Tag und der
-/// Orbit, wie ihn auch der Tagesschritt sieht.
+/// Orbit, wie ihn auch der Tagesschritt sieht. Ruht die Belagerung, weil ihre Flotten im
+/// Gefecht stehen, nennt die Lage sie trotzdem, ohne Orbitalhoheit ([`presence`]).
 pub fn siege_view(refs: &SiegeRefs, planet: PlanetId, day: u64) -> Option<SiegeView> {
     let siege = refs.sieges.siege(planet)?;
     let system = refs.galaxy.planet(planet).system;
-    let squadron = squadron(
+    let squadron = presence(
         refs.fleets,
         refs.research,
         refs.data,
@@ -171,7 +172,13 @@ pub fn siege_view(refs: &SiegeRefs, planet: PlanetId, day: u64) -> Option<SiegeV
             refs.finance,
             planet,
             day + 1,
-            1.0,
+            // Den Markt vor Ort erreicht die Garnison nur in einem System, das die
+            // Einschließung mit sperrt.
+            if closes(refs.galaxy, refs.diplomacy, system, siege.attacker) {
+                1.0
+            } else {
+                0.0
+            },
         ),
         orbit: squadron.view,
         toughness: squadron.toughness,
@@ -187,7 +194,7 @@ pub fn siege_card(refs: &SiegeRefs, planet: PlanetId, day: u64) -> Option<SiegeC
     let view = siege_view(refs, planet, day)?;
     let (siege, defense) = (&view.siege, &view.defense);
     let target = refs.galaxy.planet(planet);
-    let squad = squadron(
+    let squad = presence(
         refs.fleets,
         refs.research,
         refs.data,
@@ -442,8 +449,17 @@ pub fn defense_card(refs: &SiegeRefs, planet: PlanetId) -> Option<DefenseCard> {
     planned.regulars = plan.regulars as f64;
     for (works, bundle) in Works::ALL.into_iter().zip(bundles) {
         let (level, target_level) = (works.level(defense).floor() as u8, works.planned(&plan));
-        // Stufe n kostet das n-Fache des Satzes.
-        let sets: f64 = (level + 1..=target_level).map(f64::from).sum();
+        // Stufe n kostet das n-Fache des Satzes; was für die nächste schon geliefert
+        // ist, kostet nichts mehr.
+        let sets: f64 = (level + 1..=target_level)
+            .map(|next| {
+                if next == level + 1 {
+                    sets_missing(defense, works, next)
+                } else {
+                    f64::from(next)
+                }
+            })
+            .sum();
         build_cost += sets * cost(bundle);
         match works {
             Works::Stations => planned.stations = target_level as f32,
@@ -510,6 +526,37 @@ mod tests {
             assert_eq!(told, forecast(&card.view, course, balance), "{course:?}");
         }
         assert_eq!(card.forecasts[0].0, Course::Starve);
+    }
+
+    #[test]
+    fn a_resting_siege_still_shows_its_fleet_and_names_the_contested_orbit() {
+        let mut scene = Scene::colony();
+        scene.state.sieges.embarked.insert(
+            FleetId(0),
+            Embarked {
+                troops: 5.0,
+                supply: 50.0,
+            },
+        );
+        scene.day();
+        // Ein Entsatz trifft ein: Beide Flotten stehen im Gefecht.
+        scene.place(1, scene.system);
+        scene.state.fleets.list[0].in_battle = true;
+        scene.state.fleets.list[1].in_battle = true;
+        let refs = SiegeRefs::of_state(&scene.state, &scene.data);
+        let card = siege_card(&refs, scene.planet, scene.day).unwrap();
+        assert!(!card.control);
+        assert_eq!(card.fleets, vec![FleetId(0)]);
+        assert!(card.fuel > 0.0 && card.firepower > 0.0);
+        assert_eq!(card.troops.embarked, 5.0);
+        for (course, told) in card.forecasts {
+            assert!(!told.falls, "{course:?}");
+            assert_eq!(
+                told.limited_by,
+                Some(crate::siege::Limit::NoControl),
+                "{course:?}"
+            );
+        }
     }
 
     #[test]

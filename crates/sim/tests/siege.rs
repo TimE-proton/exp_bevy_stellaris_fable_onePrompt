@@ -11,7 +11,7 @@
 //! Tagesberichte.
 
 use sim::GameData;
-use sim::ai::MilitaryMode;
+use sim::ai::{AiState, MilitaryMode};
 use sim::clock::DAYS_PER_YEAR;
 use sim::command::{CommandOutcome, SimCommand};
 use sim::diplomacy::Diplomacy;
@@ -798,6 +798,14 @@ fn a_relief_fleet_rests_the_siege_and_breaks_it_if_it_wins() {
         !cards[0].control,
         "das Lesemodell nennt den umstrittenen Orbit"
     );
+    // Die Flotte liegt noch über der Welt: Die Karte nennt sie, ihre Tanks und ihre
+    // Truppen, und als Grund den umstrittenen Orbit, nicht den Treibstoff.
+    assert_eq!(cards[0].fleets, vec![campaign.fleet]);
+    assert!(cards[0].fuel > 0.0);
+    assert_eq!(cards[0].troops.embarked, campaign.aboard());
+    for (_, told) in cards[0].forecasts {
+        assert_eq!(told.limited_by, Some(Limit::NoControl));
+    }
     let held = campaign.defense().militia;
     assert!(held > 0.0 && held <= militia);
     campaign.day();
@@ -1207,8 +1215,8 @@ fn a_landing_storms_a_colony_as_the_forecast_says() {
     let siege = campaign.siege().unwrap();
     assert_eq!((siege.army, campaign.aboard()), (troops, 0.0));
     assert_eq!(siege.phase(campaign.defense()), Phase::Ground);
-    // Der Nachschub ist noch an Bord; der nächste Tagesschritt bringt ihn zur Truppe.
-    assert_eq!((siege.army_supply, campaign.supply_aboard()), (0.0, supply));
+    // Mit den letzten Verbänden ist auch der Nachschub von Bord gegangen.
+    assert_eq!((siege.army_supply, campaign.supply_aboard()), (supply, 0.0));
 
     let mut days = 1;
     let (mut fought, mut fallen, mut damage) = (0, 0, 0.0);
@@ -1304,6 +1312,86 @@ fn a_landing_storms_a_colony_as_the_forecast_says() {
     assert!(told, "die Chronik nennt die Eroberung");
 }
 
+// --- Verluste im Orbit --------------------------------------------------------------
+
+/// Eine Hauptwelt mit Station, deren Feuer die angeschlagene Flotte des Belagerers am
+/// nächsten Tag zerstört. Gibt den Feldzug nach diesem Tag zurück.
+fn wrecked_over_a_station() -> Campaign {
+    let mut campaign = Campaign::against_a_capital(|sim, capital| {
+        let mut sieges = sim.world_mut().resource_mut::<Sieges>();
+        let defense = sieges.defense_mut(capital);
+        defense.stations = 1.0;
+        defense.plan.stations = 1;
+    });
+    campaign.begin();
+    campaign.day();
+    assert!(campaign.siege().is_some());
+    let reserved = &campaign.sim.world().resource::<AiState>().reserved;
+    assert!(reserved.contains(&campaign.fleet));
+    let fleet = campaign.fleet;
+    let mut fleets = campaign.sim.world_mut().resource_mut::<Fleets>();
+    for ship in &mut fleets.list[fleet.index()].ships {
+        ship.hull = 1e-4;
+    }
+    // Der Tagesbeginn, an dem die Station die Flotte zerstört; geprüft wird der Stand
+    // nach genau diesem Takt.
+    campaign.sim.run_days(1);
+    assert!(!self::fleet(&campaign.sim, fleet).alive);
+    campaign
+}
+
+#[test]
+fn a_fleet_wrecked_over_a_world_is_released_in_the_same_tick() {
+    let campaign = wrecked_over_a_station();
+    assert_eq!(check_invariants(campaign.sim.world()), Ok(()));
+    assert!(sieges(&campaign.sim).held.is_empty());
+    let reserved = &campaign.sim.world().resource::<AiState>().reserved;
+    assert!(!reserved.contains(&campaign.fleet));
+}
+
+#[test]
+fn ships_wrecked_over_a_world_are_counted_and_told() {
+    let campaign = wrecked_over_a_station();
+    let battles = campaign.sim.world().resource::<Battles>();
+    assert_eq!(battles.ships_lost_by(campaign.attacker), 6);
+    assert_eq!(battles.fleets_lost_by(campaign.attacker), 1);
+    let told = campaign
+        .sim
+        .world()
+        .resource::<sim::chronicle::Chronicle>()
+        .entries
+        .iter()
+        .any(|entry| {
+            entry.text.contains("verliert 6 Schiffe") && entry.text.contains("ist verloren")
+        });
+    assert!(told, "die Chronik nennt den Verlust der Flotte");
+}
+
+// --- Ausbau -------------------------------------------------------------------------
+
+#[test]
+fn a_planned_station_is_built_from_the_market_in_play() {
+    let mut sim = observer();
+    sim.run_days(YEARS * DAYS_PER_YEAR);
+    let polity = PolityId(0);
+    let home = home_of(&sim, polity).0;
+    let mut plan = defense(&sim, home).plan.clone();
+    plan.stations = 1;
+    applied(
+        &mut sim,
+        polity,
+        SimCommand::SetDefensePlan { planet: home, plan },
+    );
+    let mut years = 0;
+    while defense(&sim, home).stations < 1.0 {
+        assert!(years < 5, "die Station steht nach fünf Jahren nicht");
+        sim.run_days(DAYS_PER_YEAR);
+        years += 1;
+    }
+    assert_eq!(check_invariants(sim.world()), Ok(()));
+    assert_eq!(money_drift(sim.world()), Some(0));
+}
+
 // --- Plünderung ---------------------------------------------------------------------
 
 /// Kassen einer Welt in Tausendstel Credits: Haushalte, Firmen, Elite.
@@ -1369,14 +1457,27 @@ fn landing_sack_and_conquest_only_move_money() {
     );
 
     // Jede Kasse der Welt hat den Anteil sack_share verloren, auf das Tausendstel, und
-    // genau die Summe davon liegt in der Staatskasse des Eroberers.
+    // genau die Summe davon liegt in der Staatskasse des Eroberers. Bei den Firmen wird
+    // je Kasse abgerundet: Ihre Summe darf um ein Tausendstel je Firma darunter liegen.
+    let firms = sacked
+        .sim
+        .world()
+        .resource::<Economy>()
+        .planet(planet)
+        .firms
+        .len() as i64;
     let (taken, left) = (purses(&sacked.sim, planet), purses(&spared.sim, planet));
     let mut loot = 0;
-    for (after, before) in taken.into_iter().zip(left) {
+    for (index, (after, before)) in taken.into_iter().zip(left).enumerate() {
         let part = (before as f64 * balance.sack_share) as i64;
         assert!(part > 0, "jede Kasse der Kolonie hat Geld");
-        assert_eq!(after, before - part);
-        loot += part;
+        let slack = if index == 1 { firms } else { 0 };
+        let gone = before - after;
+        assert!(
+            (part - slack..=part).contains(&gone),
+            "Kasse {index}: {gone} statt {part}"
+        );
+        loot += gone;
     }
     assert_eq!(
         treasury(&sacked.sim, attacker),
@@ -2216,21 +2317,16 @@ fn the_conquest_script_takes_worlds_and_ends_a_community() {
         for day in war + 1..=war + 5 * DAYS_PER_YEAR {
             script.run_until(&mut sim, day, false);
             assert_eq!(money_drift(sim.world()), Some(0), "Seed {seed}, Tag {day}");
-            if day % 30 == 0 {
-                assert_eq!(
-                    check_invariants(sim.world()),
-                    Ok(()),
-                    "Seed {seed}, Tag {day}"
-                );
-            }
+            // Auch die Invarianten halten an jedem Tagesbeginn: an dem Tag, an dem eine
+            // Flotte über einer Welt verloren geht, wie an dem, an dem ein Sitz fällt.
+            assert_eq!(
+                check_invariants(sim.world()),
+                Ok(()),
+                "Seed {seed}, Tag {day}"
+            );
             let now = sim.polities().get(enemy).capital;
             if now != seat {
                 seats_fallen += 1;
-                assert_eq!(
-                    check_invariants(sim.world()),
-                    Ok(()),
-                    "Seed {seed}, Tag {day}"
-                );
                 seat = now;
             }
         }

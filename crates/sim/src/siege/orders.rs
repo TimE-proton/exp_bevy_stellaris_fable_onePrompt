@@ -429,6 +429,9 @@ pub fn land_troops(
         ));
     }
     let strength = strength.min(aboard);
+    if strength <= 0.0 {
+        return Err(format!("an Bord von {} sind keine Truppen", squadron.name));
+    }
     if sieges.pending.iter().any(|due| due.planet == planet) {
         return Err(format!("die Übergabe von {} steht aus", target.name));
     }
@@ -467,13 +470,15 @@ pub fn land_troops(
         // Vorräte kürzer; was die Truppe mitbringt, kommt hinzu, bis zum größten Depot.
         let garrison = defense.militia + defense.regulars;
         let stores = defense.depot * garrison;
-        let carried = force.supply * strength / force.troops;
         let room = balance.depot_days_cap as f64 * (garrison + strength) - stores;
+        let (strength, carried) = force.disembark(strength);
         let unloaded = carried.min(room.max(0.0));
         defense.depot = (stores + unloaded) / (garrison + strength);
         defense.regulars += strength;
-        force.troops -= strength;
-        force.supply -= unloaded;
+        // Was das Depot nicht fasst, bleibt an Bord, solange dort noch Truppen sind.
+        if force.troops > 0.0 {
+            force.supply += carried - unloaded;
+        }
         if let Some(siege) = siege {
             // Der Maßstab der Garnison wächst mit ihr. In der Tiefe gestaffelt geht die
             // Verstärkung in den Untergrund, soweit die Bunker noch Platz haben.
@@ -525,7 +530,9 @@ pub fn land_troops(
     // gehen ihm voraus und gehören deshalb noch zum Vortag.
     let day = tick.saturating_sub(1) / TICKS_PER_DAY;
     let landing = land(siege, defense, strength, day, balance);
-    force.troops -= strength;
+    // Mit den letzten Verbänden geht auch der Nachschub von Bord; sonst bringt ihn der
+    // nächste Tagesschritt zur Truppe.
+    siege.army_supply += force.leave(strength);
     embarked.retain(|_, force| force.troops > 0.0 || force.supply > 0.0);
     if landing.lost > 0.0 {
         stats.lost_attackers += landing.lost;
@@ -588,7 +595,10 @@ pub fn capitulate(
         siege.army += landed;
         siege.army_peak = siege.army_peak.max(siege.army);
     }
-    take_troops(sieges, &squadron.fleets, landed);
+    let supply = take_troops(sieges, &squadron.fleets, landed);
+    if let Some(siege) = sieges.active.get_mut(&planet) {
+        siege.army_supply += supply;
+    }
     sieges.pending.push(Conquest {
         planet,
         to: attacker,
@@ -1078,7 +1088,8 @@ mod tests {
         );
 
         // Ohne Belagerung: Truppen und Nachschub kommen heim. Das Depot fasst nicht mehr
-        // als das größte, das sich planen lässt; der Rest bleibt an Bord.
+        // als das größte, das sich planen lässt; was darüber liegt, verfällt mit den
+        // letzten Verbänden, denn ohne Truppe bleibt kein Nachschub an Bord.
         let mut scene = Scene::new();
         let home = scene.state.polities.get(ME).capital.unwrap();
         let system = scene.state.galaxy.planet(home).system;
@@ -1091,11 +1102,38 @@ mod tests {
         let defense = scene.state.sieges.defense(home);
         assert_eq!(defense.regulars, before.regulars + 5.0);
         assert_eq!(defense.depot, balance.depot_days_cap as f64);
-        let garrison = before.militia + before.regulars;
-        let unloaded = balance.depot_days_cap as f64 * (garrison + 5.0) - before.depot * garrison;
-        let aboard = &scene.state.sieges.embarked[&FleetId(0)];
-        assert_eq!(aboard.troops, 0.0);
-        assert!((aboard.supply - (10_000.0 - unloaded)).abs() < 1e-9);
+        assert!(!scene.state.sieges.embarked.contains_key(&FleetId(0)));
+    }
+
+    #[test]
+    fn supply_never_stays_aboard_without_troops_and_no_landing_conjures_stores() {
+        // Die letzte Welle über einer belagerten Welt nimmt den Nachschub mit an Land.
+        let mut scene = Scene::colony();
+        embark(&mut scene, 0, 10.0, 210.0);
+        scene.day();
+        land_now(&mut scene, ME, 0, 10.0).unwrap();
+        assert_eq!(scene.siege().army_supply, 210.0);
+        assert!(!scene.state.sieges.embarked.contains_key(&FleetId(0)));
+
+        // Ein Eintrag mit Nachschub, aber ohne Truppe (aus älteren Ständen): Auch eine
+        // winzige Stärke entlädt ihn nicht, und das Depot der Welt bleibt, wie es war.
+        let mut scene = Scene::new();
+        let home = scene.state.polities.get(ME).capital.unwrap();
+        let system = scene.state.galaxy.planet(home).system;
+        scene.place(0, system);
+        scene.state.sieges.assign.clear();
+        embark(&mut scene, 0, 0.0, 210.0);
+        let before = scene.state.sieges.defense(home).clone();
+        let reason = land_at(&mut scene, ME, 0, home, 1e-10, 7).unwrap_err();
+        assert!(reason.contains("sind keine Truppen"), "{reason}");
+        assert_eq!(scene.state.sieges.defense(home), &before);
+        // Auf einer Welt ohne Garnison bleibt das Depot eine Zahl.
+        embark(&mut scene, 0, 2.0, 20.0);
+        let defense = scene.state.sieges.defense_mut(home);
+        (defense.militia, defense.regulars, defense.depot) = (0.0, 0.0, 0.0);
+        land_at(&mut scene, ME, 0, home, 2.0, 7).unwrap();
+        let defense = scene.state.sieges.defense(home);
+        assert_eq!((defense.regulars, defense.depot), (2.0, 10.0));
     }
 
     #[test]
