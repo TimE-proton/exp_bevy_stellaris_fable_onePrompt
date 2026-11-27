@@ -899,6 +899,7 @@ mod tests {
     #[test]
     fn a_verdict_waits_in_the_pending_list_and_the_siege_rests() {
         let mut scene = Scene::new();
+        scene.hold_verdicts = true;
         let balance = scene.data.balance.siege.clone();
         let population = scene.state.galaxy.planet(scene.planet).population;
         let needed = occupation_force(population, &balance);

@@ -26,7 +26,7 @@ pub mod orders;
 mod plugin;
 pub mod step;
 
-pub use conquest::{HandOverTerms, hand_over, mirror_region, resolve_conquests};
+pub use conquest::{mirror_region, resolve_conquests};
 pub use day::{firm_value, lift, planet_facts, prize, run_day, tidy};
 pub use month::{run_month, stakes_in};
 pub use orbit::{Orbit, OrbitAccess, Squadron, Standing, Toll};
@@ -700,6 +700,12 @@ pub struct SiegeStats {
     /// Geplünderte Welten und was dabei in die Staatskassen floss, in Credits.
     pub sacked: u32,
     pub looted: f64,
+    /// Welten, die durch Eroberung den Besitzer gewechselt haben, und Gemeinschaften,
+    /// die mit ihrer letzten Welt geendet haben.
+    #[serde(default)]
+    pub fallen: u32,
+    #[serde(default)]
+    pub ended: u32,
 }
 
 impl SiegeStats {
@@ -773,6 +779,15 @@ impl Sieges {
 
     pub fn siege(&self, planet: PlanetId) -> Option<&Siege> {
         self.active.get(&planet)
+    }
+
+    /// Eine Gemeinschaft hat geendet: Etat, Plan und Vermerke, die sie betreffen, entfallen.
+    /// Ihre Belagerungen und die Truppen ihrer Flotten räumt [`tidy`] ab.
+    pub fn forget(&mut self, polity: PolityId) {
+        self.budget.remove(&polity);
+        self.plans.remove(&polity);
+        self.grievances
+            .retain(|(offender, wronged), _| *offender != polity && *wronged != polity);
     }
 
     /// Gehört die Flotte zu einer geplanten Operation? Dann lässt die Flotten-KI sie in Ruhe.

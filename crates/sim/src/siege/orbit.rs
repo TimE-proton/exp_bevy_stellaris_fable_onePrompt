@@ -521,6 +521,7 @@ pub(super) mod testing {
     use super::*;
     use crate::clock::TICKS_PER_DAY;
     use crate::fleet::Stance;
+    use crate::polity::Succession;
     use crate::siege::{Siege, resolve_conquests, run_day, tidy};
     use crate::state::{SimConfig, SimState};
 
@@ -547,6 +548,8 @@ pub(super) mod testing {
         pub planet: PlanetId,
         pub system: SystemId,
         pub day: u64,
+        /// Urteile bleiben stehen: Der Tagesabschluss vollzieht keinen Besitzwechsel.
+        pub hold_verdicts: bool,
     }
 
     impl Scene {
@@ -573,6 +576,7 @@ pub(super) mod testing {
                 planet,
                 system,
                 day: 0,
+                hold_verdicts: false,
             }
         }
 
@@ -639,20 +643,11 @@ pub(super) mod testing {
                 &mut state.chronicle,
                 self.day * TICKS_PER_DAY,
             );
-            resolve_conquests(
-                &self.data,
-                &mut state.galaxy,
-                &state.polities,
-                &state.diplomacy,
-                &state.battles,
-                &mut state.economy,
-                &mut state.finance,
-                &state.logistics,
-                &mut state.sieges,
-                &mut orbit,
-                &mut state.chronicle,
-                self.day * TICKS_PER_DAY,
-            );
+            if self.hold_verdicts {
+                return;
+            }
+            let (mut succession, sieges) = Succession::with_sieges(state, &self.data);
+            resolve_conquests(&mut succession, sieges, self.day * TICKS_PER_DAY);
         }
 
         /// Der Schritt, der in jedem Takt läuft, mitten im laufenden Tag.

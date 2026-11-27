@@ -6,10 +6,9 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::Economy;
 use crate::finance::Finance;
-use crate::fleet::Battles;
 use crate::galaxy::Galaxy;
 use crate::logistics::Logistics;
-use crate::polity::Polities;
+use crate::polity::{Polities, SuccessionParams};
 use crate::{SimSet, sim_schedule};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -104,38 +103,12 @@ fn siege_day(
     );
 }
 
-/// Tagesabschluss: Fällige Besitzwechsel werden vollzogen.
-fn conquests(
-    data: Res<GameData>,
-    clock: Res<SimClock>,
-    polities: Res<Polities>,
-    diplomacy: Res<Diplomacy>,
-    battles: Res<Battles>,
-    logistics: Res<Logistics>,
-    mut galaxy: ResMut<Galaxy>,
-    mut economy: ResMut<Economy>,
-    mut finance: ResMut<Finance>,
-    mut sieges: ResMut<Sieges>,
-    mut access: OrbitAccess,
-    mut chronicle: ResMut<Chronicle>,
-) {
+/// Tagesabschluss: Fällige Besitzwechsel werden über den gemeinsamen Pfad vollzogen.
+fn conquests(clock: Res<SimClock>, mut sieges: ResMut<Sieges>, mut params: SuccessionParams) {
     if sieges.pending.is_empty() {
         return;
     }
-    resolve_conquests(
-        &data,
-        &mut galaxy,
-        &polities,
-        &diplomacy,
-        &battles,
-        &mut economy,
-        &mut finance,
-        &logistics,
-        &mut sieges,
-        &mut access.orbit(),
-        &mut chronicle,
-        clock.tick,
-    );
+    resolve_conquests(&mut params.borrow(), &mut sieges, clock.tick);
 }
 
 /// Monatsbeginn: Miliz im Frieden, Abklingen von Schäden und Besatzung, Spiegelwerte der

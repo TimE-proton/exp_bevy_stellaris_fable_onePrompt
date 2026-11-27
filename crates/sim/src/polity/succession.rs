@@ -32,6 +32,7 @@ use crate::galaxy::{Galaxy, Planet};
 use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
 use crate::logistics::{Logistics, TradeHouse};
 use crate::polity::{Polities, Polity};
+use crate::siege::Sieges;
 use crate::state::{SimConfig, SimState};
 use crate::tech::Research;
 use bevy_ecs::prelude::*;
@@ -226,6 +227,28 @@ impl<'a> Succession<'a> {
             chronicle: &mut state.chronicle,
             ai: &mut state.ai,
         }
+    }
+
+    /// Wie [`Succession::of_state`], dazu der Zustand der Belagerungen: für die Eroberung,
+    /// die den Besitzwechsel vollzieht und ihre eigenen Bücher führt.
+    pub fn with_sieges(state: &'a mut SimState, data: &'a GameData) -> (Self, &'a mut Sieges) {
+        let succession = Succession {
+            data,
+            config: &mut state.config,
+            galaxy: &mut state.galaxy,
+            polities: &mut state.polities,
+            economy: &mut state.economy,
+            finance: &mut state.finance,
+            logistics: &mut state.logistics,
+            fleets: &mut state.fleets,
+            battles: &mut state.battles,
+            research: &mut state.research,
+            diplomacy: &mut state.diplomacy,
+            endgame: &mut state.endgame,
+            chronicle: &mut state.chronicle,
+            ai: &mut state.ai,
+        };
+        (succession, &mut state.sieges)
     }
 
     /// Gründet eine Gemeinschaft, die aus `parent` hervorgeht, und gibt ihre Nummer

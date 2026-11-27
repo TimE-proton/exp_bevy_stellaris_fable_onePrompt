@@ -1134,8 +1134,9 @@ mod tests {
     }
 
     #[test]
-    fn the_handover_of_a_capital_stays_pending_after_a_capitulation() {
+    fn the_siege_rests_while_a_handover_is_pending_after_a_capitulation() {
         let mut scene = Scene::new();
+        scene.hold_verdicts = true;
         let planet = scene.planet;
         let needed = occupation_force(
             scene.state.galaxy.planet(planet).population,
@@ -1151,7 +1152,8 @@ mod tests {
         for _ in 0..3 {
             scene.day();
         }
-        // Die Hauptwelt bleibt beim Verteidiger, das Urteil steht, die Belagerung ruht.
+        // Bis zum Tagesabschluss bleibt die Welt beim Verteidiger: Das Urteil steht, die
+        // Belagerung ruht.
         assert_eq!(scene.state.galaxy.planet(planet).owner, Some(FOE));
         assert_eq!(scene.state.sieges.pending, due);
         let siege = scene.siege();

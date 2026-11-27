@@ -3,75 +3,18 @@
 //! Die Eroberung ändert den Besitzer der Welt, nie den Besitz Privater an ihren Betrieben.
 //! Ein Vorbesitz des Eroberers mildert die Besatzung, Kriegsschäden belasten sie.
 
-use super::day::{SHOCK_FLOOR, local_issuers, prize, weary};
+use super::day::{SHOCK_FLOOR, local_issuers, prize, tidy, weary};
 use super::{Conquest, DefensePlan, Orbit, Outcome, PlanetDefense, Posture, Sieges, close};
-use crate::chronicle::{Chronicle, ChronicleKind};
+use crate::chronicle::ChronicleKind;
 use crate::clock::TICKS_PER_DAY;
-use crate::data::{GameData, SiegeBalance};
+use crate::data::SiegeBalance;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Economy, Money, pay, to_credits};
+use crate::endgame::Path;
 use crate::finance::{Finance, Region, Stage, ownership_of_region};
-use crate::fleet::Battles;
 use crate::galaxy::Galaxy;
-use crate::ids::{HolderId, IssuerId, PlanetId, PolityId};
-use crate::logistics::Logistics;
-use crate::polity::Polities;
-
-/// Bedingungen, unter denen eine Welt den Besitzer wechselt.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HandOverTerms {
-    /// Zusammenhalt der Region unter dem neuen Besitzer.
-    pub cohesion: f64,
-    pub stage: Stage,
-    /// Faktor auf die Stimmung der Betriebe der Welt.
-    pub shock: f64,
-}
-
-/// Übergibt eine gewöhnliche Welt an einen neuen Besitzer und gibt den alten zurück.
-///
-/// NAHTSTELLE: Diese Funktion steht an der Stelle des gemeinsamen Pfads, über den künftig
-/// jeder Besitzwechsel läuft (Abspaltung, Eroberung, Ende einer Gemeinschaft); er ersetzt
-/// sie. Sie tut nur, was eine Welt braucht, die nicht Hauptwelt ist: Besitzer,
-/// Steuerpflicht, Buchführung der Region, die Anteile des alten Staates an den Betrieben
-/// der Welt (`issuers`, vor dem Wechsel bestimmt) und den Schreck an der Börse. Was mit
-/// einer Hauptwelt fällt (neue Hauptwelt, Sitz des Handelshauses, Elite) und was aus
-/// einer Gemeinschaft ohne Planeten wird, kennt sie nicht: Die Eroberung einer Hauptwelt
-/// bleibt deshalb in `Sieges::pending` stehen.
-pub fn hand_over(
-    galaxy: &mut Galaxy,
-    economy: &mut Economy,
-    finance: &mut Finance,
-    issuers: &[IssuerId],
-    planet: PlanetId,
-    to: PolityId,
-    terms: HandOverTerms,
-    day: u64,
-) -> Option<PolityId> {
-    let old = galaxy.planet(planet).owner?;
-    galaxy.planet_mut(planet).owner = Some(to);
-    economy.planets[planet.index()].tax_exempt = false;
-    let region = &mut finance.regions[planet.index()];
-    region.owner_seen = Some(to);
-    region.since_day = day;
-    region.stage = terms.stage;
-    region.months_below = 0;
-    region.months_above = 0;
-    region.cohesion = terms.cohesion.clamp(0.0, 100.0);
-    // Was dem alten Staat an den Betrieben der Welt gehörte, gehört dem neuen. Private
-    // Halter behalten ihre Anteile.
-    let (from, into) = (HolderId::State(old), HolderId::State(to));
-    for id in issuers {
-        let Some(issuer) = finance.issuers.get_mut(id) else {
-            continue;
-        };
-        if let Some(shares) = issuer.holdings.remove(&from) {
-            *issuer.holdings.entry(into).or_default() += shares;
-        }
-        issuer.offered.remove(&from);
-        issuer.shock = (issuer.shock * terms.shock).max(SHOCK_FLOOR);
-    }
-    Some(old)
-}
+use crate::ids::{HolderId, PlanetId, PolityId};
+use crate::polity::{Polities, Succession, TransferTerms};
 
 /// Schreibt, was die Belagerung über eine Welt weiß, in die Spiegelwerte ihrer Region:
 /// Besatzung, wie weit die Garnison sie auffängt, und Kriegsschäden, soweit der heutige
@@ -141,32 +84,34 @@ fn sack(
     loot
 }
 
-/// Vollzieht die Eroberung einer gewöhnlichen Welt.
-fn conquer(
-    data: &GameData,
-    galaxy: &mut Galaxy,
-    polities: &Polities,
-    diplomacy: &Diplomacy,
-    battles: &Battles,
-    economy: &mut Economy,
-    finance: &mut Finance,
-    logistics: &Logistics,
-    sieges: &mut Sieges,
-    orbit: &mut Orbit,
-    chronicle: &mut Chronicle,
-    conquest: &Conquest,
-    tick: u64,
-) {
+/// Vollzieht die Eroberung einer Welt über den gemeinsamen Pfad des Besitzwechsels
+/// ([`Succession::transfer_planet`]): War sie die Hauptwelt, zieht die Hauptwelt der
+/// Verlierer um; war sie ihre letzte Welt, endet ihre Gemeinschaft, und der Eroberer
+/// tritt ihr Erbe unter Zwang an.
+fn conquer(succession: &mut Succession, sieges: &mut Sieges, conquest: &Conquest, tick: u64) {
+    let data = succession.data;
     let balance = &data.balance.siege;
     let day = tick / TICKS_PER_DAY;
     let (planet, to) = (conquest.planet, conquest.to);
     // Vor dem Wechsel gelesen: Vorbesitz des Eroberers und Dritter, die Betriebe der Welt,
     // die Beute.
-    let capitals: Vec<Option<PlanetId>> = polities.list.iter().map(|p| p.capital).collect();
-    let foreign = ownership_of_region(finance, galaxy, logistics, &capitals, planet).foreign;
+    let (foreign, issuers, prize_kept) = {
+        let Succession {
+            galaxy,
+            polities,
+            economy,
+            finance,
+            logistics,
+            ..
+        } = &*succession;
+        let capitals: Vec<Option<PlanetId>> = polities.list.iter().map(|p| p.capital).collect();
+        (
+            ownership_of_region(finance, galaxy, logistics, &capitals, planet).foreign,
+            local_issuers(finance, galaxy, logistics, polities, planet),
+            prize(data, galaxy, economy, logistics, planet),
+        )
+    };
     let stake = foreign.get(&to).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-    let issuers = local_issuers(finance, galaxy, logistics, polities, planet);
-    let prize_kept = prize(data, galaxy, economy, logistics, planet);
     let defense = sieges.defense(planet);
     let liberated = defense.occupied_from == Some(to);
     let (lowest, highest) = balance.conquest_cohesion;
@@ -176,14 +121,44 @@ fn conquer(
     if liberated {
         cohesion = cohesion.max(balance.liberation);
     }
-    let terms = HandOverTerms {
+    let terms = TransferTerms {
+        state_shares_to: HolderId::State(to),
+        state_share: 1.0,
         cohesion,
         stage: Stage::Restless,
         shock: balance.conquest_shock,
+        elite_flight: balance.elite_flight,
+        path: Path::Forced,
     };
-    let Some(old) = hand_over(galaxy, economy, finance, &issuers, planet, to, terms, day) else {
+    let Ok(transfer) = succession.transfer_planet(planet, to, terms, tick) else {
+        // Der Eroberer besteht nicht mehr: Das Urteil verfällt, die Belagerung endet im
+        // nächsten Takt von selbst.
         return;
     };
+    let old = transfer.from;
+    if liberated {
+        // Eine zurückgeholte Welt ist wieder eine eigene.
+        succession.endgame.tag(planet, Path::Own, 0.0, 0.0);
+    }
+    let Succession {
+        galaxy,
+        polities,
+        economy,
+        finance,
+        fleets,
+        battles,
+        research,
+        diplomacy,
+        chronicle,
+        ..
+    } = succession;
+    let (galaxy, polities, diplomacy): (&Galaxy, &Polities, &Diplomacy) =
+        (galaxy, polities, diplomacy);
+    for id in &issuers {
+        if let Some(issuer) = finance.issuers.get_mut(id) {
+            issuer.shock = issuer.shock.max(SHOCK_FLOOR);
+        }
+    }
     // Die Schonfrist junger Kolonien schützt auch die Ruinen einer eroberten Welt davor,
     // sofort abgewickelt zu werden.
     economy.planets[planet.index()].founded_day = day;
@@ -265,10 +240,24 @@ fn conquer(
         population,
         &mut finance.regions[planet.index()],
     );
+    let mut orbit = Orbit::new(fleets, research);
+    if transfer.eliminated {
+        // Die Gemeinschaft der Verlierer hat geendet: Was die Belagerung von ihr noch
+        // führt (eigene Belagerungen, Zuordnungen und Truppen aufgelöster Flotten),
+        // endet im selben Zug.
+        sieges.forget(old);
+        tidy(
+            data, galaxy, polities, diplomacy, finance, sieges, &orbit, chronicle, tick,
+        );
+        sieges.stats.ended += 1;
+    }
     // Wem ein System gehört, kann sich geändert haben: Blockaden neu bestimmen.
     orbit.refresh_blockades(galaxy, diplomacy, battles, &sieges.defenses);
     weary(finance, to, balance.wear_planet.0);
-    weary(finance, old, balance.wear_planet.1);
+    if !transfer.eliminated {
+        weary(finance, old, balance.wear_planet.1);
+    }
+    sieges.stats.fallen += 1;
     sieges.stats.prize_start += siege.prize_start;
     sieges.stats.prize_kept += prize_kept;
     let target = galaxy.planet(planet);
@@ -311,23 +300,8 @@ fn conquer(
 }
 
 /// Tagesabschluss: vollzieht die fälligen Besitzwechsel in der Reihenfolge ihrer Urteile.
-/// Ein Eintrag gilt nur, solange die Belagerung besteht, aus der er stammt. Die Eroberung
-/// einer Hauptwelt bleibt unberührt in der Liste stehen (siehe [`hand_over`]); die
-/// Belagerung ruht so lange.
-pub fn resolve_conquests(
-    data: &GameData,
-    galaxy: &mut Galaxy,
-    polities: &Polities,
-    diplomacy: &Diplomacy,
-    battles: &Battles,
-    economy: &mut Economy,
-    finance: &mut Finance,
-    logistics: &Logistics,
-    sieges: &mut Sieges,
-    orbit: &mut Orbit,
-    chronicle: &mut Chronicle,
-    tick: u64,
-) {
+/// Ein Eintrag gilt nur, solange die Belagerung besteht, aus der er stammt.
+pub fn resolve_conquests(succession: &mut Succession, sieges: &mut Sieges, tick: u64) {
     if sieges.pending.is_empty() {
         return;
     }
@@ -343,29 +317,20 @@ pub fn resolve_conquests(
         else {
             continue;
         };
-        if galaxy.planet(conquest.planet).owner != Some(defender) {
+        if succession.galaxy.planet(conquest.planet).owner != Some(defender) {
             continue;
         }
-        let capital = polities
-            .list
-            .get(defender.index())
-            .is_some_and(|polity| polity.capital == Some(conquest.planet));
-        if capital {
-            sieges.pending.push(conquest);
-            continue;
-        }
-        conquer(
-            data, galaxy, polities, diplomacy, battles, economy, finance, logistics, sieges, orbit,
-            chronicle, &conquest, tick,
-        );
+        conquer(succession, sieges, &conquest, tick);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::Sector;
+    use crate::data::{GameData, Sector};
+    use crate::endgame::Path;
     use crate::ids::FleetId;
+    use crate::ids::IssuerId;
     use crate::siege::orbit::testing::{FOE, ME, Scene};
     use crate::siege::{Embarked, occupation_force};
 
@@ -621,6 +586,12 @@ mod tests {
         .unwrap();
     }
 
+    /// Befiehlt die Plünderung, sobald die Belagerung besteht.
+    fn order_sack_when_open(scene: &mut Scene) {
+        scene.day();
+        order_sack(scene);
+    }
+
     #[test]
     fn a_sacked_world_pays_the_conqueror_and_third_parties_remember() {
         let mut scene = Scene::colony();
@@ -767,37 +738,158 @@ mod tests {
         assert_eq!(scene.state.sieges.stats.conquests(), 2);
     }
 
-    #[test]
-    fn the_fall_of_a_capital_stays_pending() {
-        let mut scene = Scene::new();
-        let planet = scene.planet;
-        let defense = scene.state.sieges.defense_mut(planet);
+    /// Die Hauptwelt der Gemeinschaft 1 ohne Vorräte und Reguläre, die Besatzungstruppe
+    /// des Belagerers an Bord.
+    fn weaken_the_seat(scene: &mut Scene) {
+        let defense = scene.state.sieges.defense_mut(scene.planet);
         defense.depot = 0.0;
         defense.regulars = 0.0;
-        embark(&mut scene, FleetId(0), 17.0);
+        embark(scene, FleetId(0), 17.0);
+    }
+
+    #[test]
+    fn the_fall_of_a_capital_moves_the_seat_to_the_largest_remaining_world() {
+        // Die Gemeinschaft 1 hält neben ihrer Hauptwelt eine Kolonie; belagert wird die
+        // Hauptwelt.
+        let mut scene = Scene::colony();
+        let colony = scene.planet;
+        let seat = scene.state.polities.get(FOE).capital.unwrap();
+        let system = scene.state.galaxy.planet(seat).system;
+        scene.state.sieges.assign.insert(FleetId(0), seat);
+        scene.place(0, system);
+        scene.planet = seat;
+        scene.system = system;
+        weaken_the_seat(&mut scene);
+        let balance = scene.data.balance.siege.clone();
+        // Die Kolonie ist autonom: Als Hauptwelt darf sie es nicht bleiben.
+        scene.state.finance.regions[colony.index()].stage = Stage::Autonomous;
+        scene.state.economy.planets[colony.index()].tax_exempt = true;
+        // Was die Elite der Hauptwelt im verbleibenden Gebiet hält: an den Betrieben der
+        // Kolonie und am Handelshaus.
+        let (old_elite, new_elite) = (HolderId::Elite(seat), HolderId::Elite(colony));
+        let remaining = |state: &crate::state::SimState| -> Vec<(IssuerId, u64, u64)> {
+            state
+                .finance
+                .issuers
+                .iter()
+                .filter(|(id, _)| match id {
+                    IssuerId::Firm { planet, .. } => *planet == colony,
+                    IssuerId::House(house) => state.logistics.houses[house.index()].polity == FOE,
+                    IssuerId::Kontor(_) => false,
+                })
+                .map(|(id, issuer)| (*id, issuer.held_by(old_elite), issuer.held_by(new_elite)))
+                .collect()
+        };
+        let before = remaining(&scene.state);
+        assert!(before.iter().any(|(_, held, _)| *held > 0));
+        assert!(
+            before
+                .iter()
+                .any(|(id, held, _)| matches!(id, IssuerId::House(_)) && *held > 0),
+            "die Elite der Hauptwelt hält Anteile am Handelshaus"
+        );
+        let money = scene.money();
+
+        until_it_falls(&mut scene, ME);
+        let state = &scene.state;
+        // Hauptwelt und Heimathafen des Handelshauses sind umgezogen; die Gemeinschaft lebt.
+        let loser = state.polities.get(FOE);
+        assert!(loser.alive);
+        assert_eq!(loser.capital, Some(colony));
+        let home = state.galaxy.planet(colony).system;
+        assert!(
+            state
+                .logistics
+                .houses
+                .iter()
+                .filter(|house| house.polity == FOE)
+                .all(|house| house.home == home)
+        );
+        // Die neue Hauptwelt ist nicht autonom und zahlt Steuern.
+        assert_ne!(state.finance.region(colony).stage, Stage::Autonomous);
+        assert!(!state.economy.planet(colony).tax_exempt);
+        // Die Elite der neuen Hauptwelt gewinnt genau den Anteil elite_flight jedes Postens.
+        for ((id, held, had), (_, left, now)) in before.iter().zip(remaining(state)) {
+            let moved = (*held as f64 * balance.elite_flight) as u64;
+            assert_eq!(now, had + moved, "{id:?}");
+            assert_eq!(left, held - moved, "{id:?}");
+        }
+        // Was der alten Elite bleibt, ist fortan Besitz aus dem Reich des Eroberers.
+        let capitals: Vec<_> = state.polities.list.iter().map(|p| p.capital).collect();
+        let ownership = ownership_of_region(
+            &state.finance,
+            &state.galaxy,
+            &state.logistics,
+            &capitals,
+            colony,
+        );
+        assert!(ownership.foreign.get(&ME).copied().unwrap_or(0.0) > 0.0);
+        // Die eroberte Hauptwelt ist besetzt und vermerkt; der Krieg geht weiter.
+        assert_eq!(state.galaxy.planet(seat).owner, Some(ME));
+        assert_eq!(state.endgame.path_of(seat), Path::Forced);
+        assert!(state.diplomacy.at_war(ME, FOE));
+        assert_eq!(
+            (state.sieges.stats.fallen, state.sieges.stats.ended),
+            (1, 0)
+        );
+        assert_eq!(scene.money(), money);
+        assert_eq!(state.sieges.find_anomaly(state.galaxy.planets.len()), None);
+    }
+
+    #[test]
+    fn the_fall_of_its_last_world_ends_a_community() {
+        let mut scene = Scene::new();
+        let planet = scene.planet;
+        weaken_the_seat(&mut scene);
+        order_sack_when_open(&mut scene);
+        // Die Verlierer belagern selbst: Auch das endet mit ihnen.
+        let elsewhere = scene.state.polities.get(ME).capital.unwrap();
+        scene.state.sieges.assign.insert(FleetId(1), elsewhere);
+        embark(&mut scene, FleetId(1), 2.0);
+        scene.state.sieges.budget.insert(FOE, 5);
+        let treasury = scene.state.economy.treasury(FOE);
+        assert!(treasury > 0);
+        let money = scene.money();
         let mut days = 0;
-        while scene.state.sieges.pending.is_empty() {
+        while scene.state.galaxy.planet(planet).owner != Some(ME) {
+            let before = scene.state.economy.treasury(ME);
             scene.day();
             days += 1;
-            assert!(days < 400, "kein Urteil");
+            // Kein Tag schafft oder vernichtet Geld, auch nicht der der Plünderung.
+            assert_eq!(scene.money(), money, "Tag {days}");
+            assert!(days < 400, "die Hauptwelt fiel nicht");
+            if scene.state.galaxy.planet(planet).owner == Some(ME) {
+                // Staatskasse der Verlierer und Plünderung gehen an den Eroberer.
+                assert!(scene.state.economy.treasury(ME) >= before + treasury);
+            }
         }
-        let due = scene.state.sieges.pending.clone();
-        for _ in 0..5 {
-            scene.day();
-        }
-        // Die Hauptwelt wechselt den Besitzer noch nicht; Urteil und Datensatz bleiben stehen.
-        assert_eq!(scene.state.galaxy.planet(planet).owner, Some(FOE));
-        assert_eq!(scene.state.sieges.pending, due);
-        assert!(scene.state.sieges.siege(planet).is_some());
-        assert_eq!(scene.state.sieges.stats.conquests(), 0);
-        assert!(scene.state.finance.region(planet).besieged);
-
-        // Endet die Belagerung anders, verfällt das Urteil mit ihr.
-        scene.state.diplomacy.wars.clear();
-        scene.day();
-        assert!(scene.state.sieges.pending.is_empty());
-        assert!(scene.state.sieges.active.is_empty());
-        assert_eq!(scene.state.galaxy.planet(planet).owner, Some(FOE));
+        let state = &scene.state;
+        let ended = state.polities.get(FOE);
+        assert!(!ended.alive);
+        assert_eq!(ended.capital, None);
+        assert_eq!(state.economy.treasury(FOE), 0);
+        // Der Sieger steht nicht mehr im Krieg; Anleihen der Verlierer schuldet er.
+        assert!(!state.diplomacy.is_at_war(ME));
+        assert!(state.finance.bonds.iter().all(|bond| bond.issuer != FOE));
+        // Keine Flotte der Verlierer besteht mehr, und die Belagerung führt nichts mehr
+        // von ihnen.
+        assert_eq!(state.fleets.of(FOE).count(), 0);
+        let sieges = &state.sieges;
+        assert!(sieges.active.is_empty() && sieges.pending.is_empty());
+        assert!(sieges.assign.is_empty());
+        assert!(!sieges.embarked.contains_key(&FleetId(1)));
+        assert!(!sieges.budget.contains_key(&FOE));
+        assert_eq!((sieges.stats.fallen, sieges.stats.ended), (1, 1));
+        assert_eq!(sieges.stats.sacked, 1);
+        assert_eq!(state.endgame.path_of(planet), Path::Forced);
+        let told = state
+            .chronicle
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("endet") || entry.text.contains("aufgelöst"));
+        assert!(told, "die Chronik nennt das Ende der Gemeinschaft");
+        assert_eq!(sieges.find_anomaly(state.galaxy.planets.len()), None);
+        assert_eq!(scene.fleet_anomaly(), None);
     }
 
     #[test]
