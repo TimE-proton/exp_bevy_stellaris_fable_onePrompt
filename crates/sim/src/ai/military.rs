@@ -26,10 +26,13 @@ use crate::command::CommandQueue;
 use crate::data::{GameData, ShipClass};
 use crate::diplomacy::Diplomacy;
 use crate::economy::{BudgetMonth, Claim, Economy, to_credits};
+use crate::finance::Finance;
 use crate::fleet::{Battles, BuildStatus, Fleet, Fleets, Stance, fleet_claim, supply_base};
 use crate::galaxy::Galaxy;
 use crate::ids::{FleetId, PolityId, ShipId, SystemId};
+use crate::logistics::Logistics;
 use crate::polity::Polities;
+use crate::siege::Sieges;
 use crate::tech::{PolityResearch, Research, ai_budget_share, available_of};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,6 +46,11 @@ pub struct Situation<'a> {
     pub battles: &'a Battles,
     pub diplomacy: &'a Diplomacy,
     pub research: &'a Research,
+    pub finance: &'a Finance,
+    pub logistics: &'a Logistics,
+    pub sieges: &'a Sieges,
+    /// Seed der Partie: Aus ihm folgen Schätzungen und die Haltung der Gemeinschaften.
+    pub seed: u64,
     /// Der heutige Tag.
     pub day: u64,
 }
@@ -64,7 +72,7 @@ const AVOID_MARGIN: f64 = 0.8;
 const MISSED_PAY: f32 = 0.005;
 
 /// Gemeinschaften, die die KI führt: lebend, mit Sitz, nicht die des Spielers.
-fn led<'a>(
+pub(super) fn led<'a>(
     sit: &'a Situation<'a>,
     player: Option<PolityId>,
 ) -> impl Iterator<Item = (PolityId, SystemId)> + 'a {
@@ -643,17 +651,22 @@ pub fn lead_fleets(
             .of(id)
             .filter(|fleet| !ai.is_reserved(fleet.id))
             .collect();
+        // Im Gefecht entscheidet die Führung auch für Flotten, die belagern oder einen
+        // Feldzug führen: Den Rückzug befiehlt sonst niemand.
+        let engaged: Vec<&Fleet> = sit.fleets.of(id).filter(|fleet| fleet.in_battle).collect();
         let mut plan = ai.plan(id);
         plan.operations
             .retain(|fleet, _| own.iter().any(|own| own.id == *fleet));
-        if !own.is_empty() {
+        if !own.is_empty() || !engaged.is_empty() {
             let theatre = Theatre::new(sit, id, home, &plan);
             let mut hand = Hand::new(queue, id);
             let enemies: Vec<PolityId> = sit.diplomacy.enemies_of(id).collect();
             if enemies.is_empty() {
                 lead_in_peace(sit, &theatre, &mut plan, &mut hand, &own);
             } else {
-                lead_at_war(sit, &theatre, &mut plan, &mut hand, id, &own, &enemies);
+                lead_at_war(
+                    sit, &theatre, &mut plan, &mut hand, id, &own, &engaged, &enemies,
+                );
             }
         }
         if ai.plan(id) != plan {
@@ -723,6 +736,7 @@ fn lead_at_war(
     hand: &mut Hand,
     id: PolityId,
     own: &[&Fleet],
+    engaged: &[&Fleet],
     enemies: &[PolityId],
 ) {
     let data = sit.data;
@@ -788,7 +802,7 @@ fn lead_at_war(
     });
 
     // --- Im Gefecht: Rückzug, bevor die Flotte verloren ist. ---
-    for fleet in own.iter().filter(|fleet| fleet.in_battle) {
+    for fleet in engaged {
         let Some((battle, side)) = sit.battles.of_fleet(fleet.id) else {
             continue;
         };
@@ -845,6 +859,9 @@ fn lead_at_war(
         }
     }
 
+    if own.is_empty() {
+        return;
+    }
     let busy = merge_idle(sit, hand, plan, own, |system| standing.contains(&system));
     let navy: f64 = own.iter().map(|fleet| fleet.build_value(data)).sum();
     let main = own
@@ -867,6 +884,25 @@ fn lead_at_war(
         .map(Sighting::position)
         .filter(|system| sit.galaxy.owns_planet_in(id, *system))
         .collect();
+    // Systeme, in denen eine eigene Welt belagert wird: Dorthin geht der Entsatz zuerst,
+    // und für ihn gilt ein eigenes Maß (`siege.relief_odds`). Die Hauptwelt geht vor.
+    let capital = sit.polities.get(id).capital;
+    let besieged: BTreeMap<SystemId, u8> = sit
+        .sieges
+        .active
+        .iter()
+        .filter(|(_, siege)| siege.defender == id)
+        .map(|(planet, _)| {
+            (
+                sit.galaxy.planet(*planet).system,
+                if capital == Some(*planet) { 2 } else { 1 },
+            )
+        })
+        .fold(BTreeMap::new(), |mut ranks, (system, rank)| {
+            let slot = ranks.entry(system).or_insert(0);
+            *slot = (*slot).max(rank);
+            ranks
+        });
 
     for fleet in own {
         if !fleet.is_ready() || busy.contains(&fleet.id) {
@@ -919,17 +955,22 @@ fn lead_at_war(
                     && way_clear(index)
             })
         };
+        // Ein Hafen für eine Flotte, die nicht in einem liegt: der nächste, zu dem der Weg
+        // an keinem Gegner vorbeiführt; gibt es keinen, der nächste, an dem keiner steht,
+        // und sonst der nächste überhaupt. Wer fern jedem Hafen liegen bleibt, fährt
+        // seinen Tank leer und liegt danach dort fest.
+        let shelter = || {
+            safe_base(false)
+                .or_else(|| nearest(&distance, |index| theatre.bases[index] && clear(index)))
+                .or_else(|| nearest(&distance, |index| theatre.bases[index]))
+                .unwrap_or(at)
+        };
         // Wohin eine Flotte geht, die Vorräte fassen oder instand gesetzt werden muss: zu
         // einer Werft, wenn der Tank bis dorthin reicht, sonst erst in den nächsten Hafen.
-        // Ist kein Hafen ohne Gegner erreichbar, wartet sie, wo sie ist, statt ihm in die
-        // Arme zu laufen.
         let refuge = || {
             let in_tank =
                 |base: &SystemId| distance[base.index()] * fuel_per_distance <= fleet.min_fuel();
-            safe_base(true)
-                .filter(in_tank)
-                .or_else(|| safe_base(false))
-                .unwrap_or(at)
+            safe_base(true).filter(in_tank).unwrap_or_else(shelter)
         };
         let mut operation = plan.operations.get(&fleet.id).copied();
 
@@ -1022,14 +1063,9 @@ fn lead_at_war(
                 plan.operations.remove(&fleet.id);
             } else {
                 hand.set_stance(fleet, Stance::Escort);
-                // Mit leerem Tank schleppt sich die Flotte nur: Der Weg, der heute frei
-                // ist, ist es nicht mehr, wenn sie ankommt. Wer eben erst weichen musste,
-                // bleibt deshalb liegen, statt denselben Weg gleich wieder zu versuchen.
-                let dry = fleet.min_fuel() < distance[refit.target.index()] * fuel_per_distance;
-                let stranded = dry && fleet.route.is_empty() && sit.day < plan.no_offensive_before;
-                if !stranded {
-                    hand.move_fleet(fleet, refit.target);
-                }
+                // Auch mit leerem Tank: Die Flotte schleppt sich nur, aber wer fern jedem
+                // Hafen liegen bleibt, kommt nie wieder zu Vorräten.
+                hand.move_fleet(fleet, refit.target);
                 continue;
             }
         }
@@ -1040,7 +1076,14 @@ fn lead_at_war(
             let meet = intruded
                 .iter()
                 .copied()
-                .filter(|system| chances(*system) >= levers.defend_odds)
+                .filter(|system| {
+                    let needed = if besieged.contains_key(system) {
+                        levers.siege.relief_odds
+                    } else {
+                        levers.defend_odds
+                    };
+                    chances(*system) >= needed
+                })
                 .max_by(|a, b| {
                     let people = |system: SystemId| -> f64 {
                         sit.galaxy
@@ -1049,7 +1092,11 @@ fn lead_at_war(
                             .map(|planet| planet.population)
                             .sum()
                     };
-                    people(*a).total_cmp(&people(*b)).then(b.cmp(a))
+                    let rank = |system: SystemId| besieged.get(&system).copied().unwrap_or(0);
+                    rank(*a)
+                        .cmp(&rank(*b))
+                        .then(people(*a).total_cmp(&people(*b)))
+                        .then(b.cmp(a))
                 });
             plan.operations.remove(&fleet.id);
             hand.set_stance(fleet, Stance::Escort);
@@ -1075,7 +1122,7 @@ fn lead_at_war(
                     let hold = if theatre.bases[at.index()] && clear(at.index()) {
                         at
                     } else {
-                        safe_base(false).unwrap_or(at)
+                        shelter()
                     };
                     hand.set_orders(fleet, fleet.formation, Doctrine::Defensive);
                     if fleet.route.is_empty() && hold == at {
@@ -1106,7 +1153,7 @@ fn lead_at_war(
             let to = match rally {
                 Some(system) if way_clear(system.index()) => system,
                 _ if theatre.bases[at.index()] => at,
-                _ => safe_base(false).unwrap_or(at),
+                _ => shelter(),
             };
             if !fuelling {
                 hand.move_fleet(fleet, to);
@@ -1265,7 +1312,7 @@ fn lead_at_war(
         } else if theatre.bases[at.index()] {
             at
         } else {
-            safe_base(false).unwrap_or(at)
+            shelter()
         };
         if !fuelling {
             hand.move_fleet(fleet, to);

@@ -37,8 +37,8 @@ pub use battles::{
 pub use movement::{day_travel, move_fleets, recompute_blockades, update_blockades};
 pub use plugin::FleetPlugin;
 pub use supply::{
-    fleet_claim, maintain_fleets, maintenance_parts, monthly_upkeep, pay_upkeep,
-    procurement_estimate, repair_fleets, resupply_fleets, supply_base,
+    DRY_FUEL, fleet_claim, maintain_fleets, maintenance_parts, monthly_upkeep, pay_upkeep,
+    procurement_estimate, repair_fleets, resupply_fleets, supply_base, tally_dry_fleets,
 };
 pub use yard::{
     BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable, lay_up,
@@ -54,6 +54,7 @@ use crate::polity::Polities;
 use crate::tech::Research;
 use bevy_ecs::prelude::Resource;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stance {
@@ -359,6 +360,10 @@ pub struct Fleets {
     /// Zähler je Gemeinschaft über die ganze Partie. Lesen mit [`Fleets::tally_of`].
     #[serde(default)]
     pub tally: Vec<FleetTally>,
+    /// Je Flotte die Tage in Folge, die sie bis heute mit leerem Tank fern jedem eigenen
+    /// Hafen lag ([`tally_dry_fleets`]); wer nicht so liegt, fehlt.
+    #[serde(default)]
+    pub dry_streak: BTreeMap<FleetId, u32>,
 }
 
 /// Was die Marine einer Gemeinschaft über die ganze Partie erlebt hat, für Berichte.
@@ -374,6 +379,16 @@ pub struct FleetTally {
     pub months_in_arrears: u32,
     /// Tage, an denen eine ihrer Flotten ein fremdes System gesperrt hielt (je System).
     pub blockade_days: u32,
+    /// Flottentage mit leerem Tank (unter [`DRY_FUEL`]) fern jedem eigenen Hafen
+    /// ([`supply_base`]), und die längste solche Folge einer Flotte in Tagen; gezählt,
+    /// solange die Gemeinschaft irgendwo einen Hafen hat ([`tally_dry_fleets`]).
+    #[serde(default)]
+    pub dry_days: u32,
+    #[serde(default)]
+    pub dry_longest: u32,
+    /// Flottentage mit leerem Tank, an denen die Gemeinschaft nirgends einen Hafen hatte.
+    #[serde(default)]
+    pub cut_off_days: u32,
 }
 
 impl Fleets {

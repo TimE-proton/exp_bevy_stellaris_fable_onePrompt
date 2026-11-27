@@ -11,7 +11,10 @@
 use crate::battle::{Battle, ShipStatus};
 use crate::data::{GameData, ShipClass, TechBranch};
 use crate::fleet::{Battles, Fleet, Fleets, combat_value};
-use crate::ids::{FleetId, PolityId, SystemId};
+use crate::galaxy::Galaxy;
+use crate::ids::{FleetId, PlanetId, PolityId, SystemId};
+use crate::rng::{Domain, Rng};
+use crate::siege::{Sieges, militia_strength};
 use crate::tech::Research;
 
 /// Wert je Schiffsklasse in Credits, in der Reihenfolge von [`ShipClass::ALL`].
@@ -178,9 +181,115 @@ pub fn tech_edge(data: &GameData, research: &Research, viewer: PolityId, enemy: 
     (1.0 + data.balance.military.ai.tech_edge * lead).clamp(0.5, 2.0)
 }
 
+/// Die Verteidigung einer fremden Welt, wie sie von außen zu schätzen ist.
+///
+/// Anlagen sieht jeder aus dem Orbit, die Miliz folgt aus der Bevölkerung. Reguläre und
+/// Vorräte sind nur als Spanne bekannt: so breit wie `siege.intel_spread` des wahren
+/// Werts, und wo die Wahrheit darin liegt, steht je Betrachter und Welt fest (nachfragen
+/// schärft das Bild nicht). Geplant wird mit der oberen Grenze.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldEstimate {
+    pub stations: f64,
+    pub guns: f64,
+    pub shield: u8,
+    pub militia: f64,
+    /// Reguläre Verbände: untere und obere Grenze.
+    pub regulars: (f64, f64),
+    /// Vorräte in Tagen: untere und obere Grenze.
+    pub depot_days: (f64, f64),
+}
+
+impl WorldEstimate {
+    /// Verteidiger, mit denen ein Angreifer rechnen muss: Miliz und die obere Grenze
+    /// der Regulären.
+    pub fn defenders(&self) -> f64 {
+        self.militia + self.regulars.1
+    }
+}
+
+/// Schätzt die Verteidigung der Welt `planet` aus Sicht von `viewer`.
+pub fn world_estimate(
+    data: &GameData,
+    galaxy: &Galaxy,
+    sieges: &Sieges,
+    seed: u64,
+    viewer: PolityId,
+    planet: PlanetId,
+) -> WorldEstimate {
+    let balance = &data.balance.siege;
+    let defense = sieges.defense(planet);
+    let spread = balance.intel_spread.clamp(0.0, 1.0);
+    let mut rng = Rng::stream(
+        seed,
+        Domain::Intel,
+        ((viewer.index() as u64) << 32) | planet.index() as u64,
+        0,
+    );
+    // Die Spanne ist `spread` des wahren Werts breit und enthält ihn.
+    let mut range = |truth: f64| {
+        let low = truth * (1.0 - spread * rng.f64());
+        (low.max(0.0), low.max(0.0) + spread * truth)
+    };
+    let regulars = range(defense.regulars);
+    let depot_days = range(defense.depot);
+    WorldEstimate {
+        stations: defense.stations as f64,
+        guns: defense.guns as f64,
+        shield: defense.shield,
+        // Die Miliz folgt Bevölkerung und Zusammenhalt; gerechnet wird mit dem
+        // Zusammenhalt, bei dem sie ihr Grundmaß hat.
+        militia: militia_strength(
+            galaxy.planet(planet).population,
+            balance.militia_cohesion.0,
+            balance,
+        ),
+        regulars,
+        depot_days,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_foreign_garrison_is_known_as_a_range_that_holds_the_truth() {
+        use crate::siege::orbit::testing::{FOE, ME, Scene};
+        let mut scene = Scene::new();
+        let planet = scene.planet;
+        let defense = scene.state.sieges.defense_mut(planet);
+        defense.regulars = 20.0;
+        defense.depot = 80.0;
+        defense.guns = 2.0;
+        defense.shield = 1;
+        let spread = scene.data.balance.siege.intel_spread;
+        let view = |viewer: PolityId| {
+            world_estimate(
+                &scene.data,
+                &scene.state.galaxy,
+                &scene.state.sieges,
+                9,
+                viewer,
+                planet,
+            )
+        };
+        let estimate = view(ME);
+        // Anlagen sieht jeder; Reguläre und Vorräte sind eine Spanne um die Wahrheit,
+        // so breit wie intel_spread des wahren Werts.
+        assert_eq!(
+            (estimate.guns, estimate.shield, estimate.stations),
+            (2.0, 1, 0.0)
+        );
+        assert!(estimate.regulars.0 <= 20.0 && 20.0 <= estimate.regulars.1);
+        assert!(estimate.depot_days.0 <= 80.0 && 80.0 <= estimate.depot_days.1);
+        assert!((estimate.regulars.1 - estimate.regulars.0 - spread * 20.0).abs() < 1e-9);
+        assert!(estimate.militia > 0.0);
+        assert_eq!(estimate.defenders(), estimate.militia + estimate.regulars.1);
+        // Nachfragen schärft das Bild nicht; ein anderer Betrachter sieht ein anderes.
+        assert_eq!(estimate, view(ME));
+        assert_ne!(estimate.regulars, view(FOE).regulars);
+        assert_ne!(estimate.regulars, view(PolityId(2)).regulars);
+    }
 
     #[test]
     fn the_counter_table_decides_between_fleets_of_equal_value() {

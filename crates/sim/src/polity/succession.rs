@@ -934,6 +934,7 @@ impl<'a> Succession<'a> {
             modes,
             plans,
             reserved,
+            defense_hold: _,
         } = &mut **ai;
         modes.remove(&from);
         if let Some(plan) = plans.get_mut(from.index()) {

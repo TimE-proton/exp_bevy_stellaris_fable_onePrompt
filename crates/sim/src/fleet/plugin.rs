@@ -1,6 +1,7 @@
 use super::{
     Battles, Fleets, advance_battles, advance_yards, maintain_fleets, move_fleets, muster_battles,
-    open_battles, pay_upkeep, repair_fleets, resupply_fleets, update_blockades, update_yards,
+    open_battles, pay_upkeep, repair_fleets, resupply_fleets, tally_dry_fleets, update_blockades,
+    update_yards,
 };
 use crate::chronicle::Chronicle;
 use crate::clock::{SimClock, day_start, month_start};
@@ -139,6 +140,7 @@ fn service(
         &data,
         clock.tick,
     );
+    tally_dry_fleets(&galaxy, &diplomacy, &mut fleets);
 }
 
 /// Gefechte und Blockaden. Am Tagesanfang beginnen Gefechte und greifen Verstärkungen

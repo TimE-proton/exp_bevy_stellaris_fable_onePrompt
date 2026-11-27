@@ -446,6 +446,113 @@
             // Gibt die Flotte einen Angriff vor einem stärkeren Gegner auf, beginnt sie
             // so viele Tage keinen neuen.
             caution_days: 360,
+            // Belagerung und Verteidigung der Welten.
+            siege: (
+                // Ein Feldzug gegen eine Welt beginnt ab diesem Kräfteverhältnis gegen
+                // alles, was im Umkreis des Ziels eingreifen kann (response_jumps). Der
+                // Weg vom nächsten eigenen Hafen darf höchstens reach des Tanks kosten:
+                // Hin- und Rückweg zusammen das Doppelte, der Rest ist die Zeit im Orbit
+                // (fuel_per_day). Eine ferne Welt lässt sich deshalb nicht aushungern.
+                odds: 1.1,
+                reach: 0.3,
+                // Findet die Gemeinschaft im Krieg ein Jahr lang kein Ziel, sucht sie
+                // weiter: bis reach_wide des Tanks (dann bleibt über dem Ziel kaum Zeit,
+                // es taugt nur für einen Sturm oder Beschuss) und ab odds_wide.
+                widen_days: 360,
+                reach_wide: 0.4,
+                odds_wide: 1.0,
+                // Zielwahl: Wert der Beute, bei einer Hauptwelt mal capital_bonus, geteilt
+                // durch Weg und Stärke der Verteidigung.
+                capital_bonus: 3.0,
+                // Truppen: für einen Sturm das storm_ratio-Fache der geschätzten
+                // Verteidiger an der Oberfläche, mindestens das occupation_margin-Fache
+                // der Besatzungstruppe; mit supply_days Tagen Nachschub. Auf Truppen und
+                // Treibstoff wartet ein Feldzug höchstens muster_days Tage.
+                storm_ratio: 1.5,
+                occupation_margin: 1.25,
+                supply_days: 90,
+                muster_days: 120,
+                // Den letzten eigenen Hafen vor dem Ziel verlässt die Flotte mit diesem
+                // Tankinhalt: Jeder Tag im Orbit zählt.
+                sail_fuel: 0.95,
+                // Stationen greift die Flotte nur an, wenn sie sie in station_days Tagen
+                // niederkämpft; kein Weg darf sie mehr als hull_limit ihres Rumpfs kosten.
+                station_days: 45.0,
+                hull_limit: 0.4,
+                // Wahl des Wegs: Kosten in Anteilen der Beute. Ein Tag kostet day_cost
+                // (mal 0,5 bis 1,5 nach dem Wagemut der Gemeinschaft, mal haste, wenn
+                // Entsatz droht); dazu der verlorene Anteil der Truppe mal loss_weight,
+                // der Beute mal prize_weight, des Rumpfs mal hull_weight. Mit 0,001 je Tag
+                // wiegen hundert Tage Warten so schwer wie ein Zwanzigstel der Truppe:
+                // Wo der Tank reicht und kein Entsatz droht, wird ausgehungert; fern der
+                // eigenen Häfen, unter Zeitdruck oder gegen schwache Garnisonen gestürmt.
+                day_cost: 0.001,
+                // Dazu je Tag Sold und Wartung der Flotte im Verhältnis zum Wert der
+                // Beute, mal upkeep_weight: Eine Flotte über dem Ziel fehlt überall sonst.
+                upkeep_weight: 0.3,
+                loss_weight: 2.0,
+                prize_weight: 1.0,
+                hull_weight: 1.5,
+                haste: 3.0,
+                stick: 0.15,
+                // Kein Flächenbeschuss auf Welten, an deren Betrieben die Gemeinschaft
+                // selbst so viel hält.
+                area_stake_max: 0.25,
+                // So oft kehrt ein Feldzug zum Auftanken oder Truppenholen heim; eine
+                // aufgegebene Belagerung wird retry_days lang nicht wieder versucht, nach
+                // jedem weiteren Scheitern am selben Ziel ein Vielfaches davon. Truppen,
+                // die nach dem Ende eines Feldzugs an Bord sind, gehen land_after_days
+                // danach im nächsten eigenen Hafen an Land.
+                sorties: 3,
+                retry_days: 720,
+                land_after_days: 30,
+                // Geplündert wird, wenn die Kasse weniger als so viele Monate Flotte deckt.
+                sack_below_months: 3.0,
+                // Im Krieg hält die Hauptwelt Truppen für diesen Anteil der Plätze der
+                // Hauptflotte bereit; beim Einschiffen bleibt garrison_keep der
+                // planmäßigen Garnison zurück.
+                expedition_share: 1.0,
+                garrison_keep: 0.5,
+                // Verteidigung: Sold und Unterhalt höchstens defense_share der
+                // Staatseinnahmen; reicht das nicht, kürzt die KI alle Pläne in Stufen.
+                // Bedroht ist eine Welt, wenn ein Kriegsgegner höchstens defense_jumps
+                // Sprünge entfernt liegt oder sie an einem Engpass an fremdes Gebiet grenzt.
+                // Der Etat bemisst sich an den Einnahmen der letzten drei Monate, wenn sie
+                // unter dem langen Mittel liegen. Trägt er schon nicht, was steht, plant die
+                // KI nach dismantle_after_months Monaten auch stehende Anlagen ab.
+                defense_share: 0.05,
+                dismantle_after_months: 6,
+                defense_jumps: 3,
+                // Ausbauziele im Krieg (Reguläre als Vielfaches der Miliz); im Frieden gilt
+                // von Anlagen und Regulären nur der Anteil defense_peace, was steht,
+                // bleibt aber stehen. Jede Welt hält immer ein Depot: Ohne Vorräte löste
+                // sich ihre Miliz vom ersten Tag einer Einschließung an auf. Mit 60 Tagen
+                // dauert das Aushungern rund 200 Tage, fast einen ganzen Tank.
+                defense_capital: (stations: 1, guns: 2, shield: 1, bunkers: 1, regulars: 1.0, depot_days: 60),
+                defense_exposed: (stations: 0, guns: 1, shield: 0, bunkers: 1, regulars: 2.0, depot_days: 60),
+                defense_interior: (stations: 0, guns: 0, shield: 0, bunkers: 0, regulars: 0.5, depot_days: 30),
+                defense_peace: 0.25,
+                // Belagert: Unter hold_fire_days Tagen Vorrat schweigen die Geschütze; in
+                // die Tiefe gestaffelt wird, wenn die Verteidiger an der Oberfläche
+                // weniger als das deep_ratio-Fache der gelandeten Truppe zählen.
+                hold_fire_days: 30.0,
+                deep_ratio: 1.0,
+                // Entsatz: Ab diesem Kräfteverhältnis macht eine Flotte dem Belagerer
+                // einer eigenen Welt den Orbit streitig.
+                relief_odds: 0.85,
+                // Übergabe, wenn kein Entsatz möglich ist und eine Besatzungstruppe
+                // bereitsteht. Nur Gemeinschaften mit einer Standhaftigkeit unter
+                // capitulate_resolve übergeben überhaupt; ihre Hauptwelt nur die unter
+                // capitulate_capital_resolve. Aus Hunger: Die Vorräte sind leer, und von
+                // der Garnison steht weniger als capitulate_garrison ihres Anfangs.
+                // Überrannt: Das Zentrum ist verloren, im Untergrund sitzt niemand, und
+                // die gelandete Truppe übertrifft die Verteidiger an der Oberfläche um
+                // capitulate_ratio.
+                capitulate_resolve: 0.6,
+                capitulate_garrison: 0.5,
+                capitulate_ratio: 3.0,
+                capitulate_capital_resolve: 0.25,
+            ),
         ),
     ),
     battle: (

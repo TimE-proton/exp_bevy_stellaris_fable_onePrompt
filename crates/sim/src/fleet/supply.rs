@@ -17,7 +17,7 @@ use crate::data::GameData;
 use crate::diplomacy::Diplomacy;
 use crate::economy::{Claim, Economy, Market, Money, procure, purchase, to_credits, to_money};
 use crate::galaxy::Galaxy;
-use crate::ids::{GoodId, PlanetId, PolityId, SystemId};
+use crate::ids::{FleetId, GoodId, PlanetId, PolityId, SystemId};
 use crate::polity::{Polities, Polity};
 use std::collections::BTreeMap;
 
@@ -56,6 +56,47 @@ pub fn supply_base(
         && galaxy
             .system_owner(system)
             .is_none_or(|holder| holder == owner || !diplomacy.at_war(owner, holder))
+}
+
+/// Unter diesem Inhalt des knappsten Tanks gilt eine Flotte als leer gefahren.
+pub const DRY_FUEL: f32 = 0.05;
+
+/// Zählt für die Berichte, welche Flotten heute mit leerem Tank ([`DRY_FUEL`]) fern jedem
+/// eigenen Hafen ([`supply_base`]) liegen: je Gemeinschaft die Flottentage und die längste
+/// Folge solcher Tage einer Flotte. Hat ihre Gemeinschaft nirgends mehr einen Hafen (alle
+/// ihre Welten liegen in Systemen eines Kriegsgegners), kann die Flotte nirgends
+/// auftanken; solche Tage zählen für sich (`cut_off_days`). Täglich, nach dem Nachschub.
+pub fn tally_dry_fleets(galaxy: &Galaxy, diplomacy: &Diplomacy, fleets: &mut Fleets) {
+    let mut ports: BTreeMap<PolityId, bool> = BTreeMap::new();
+    let mut streaks = BTreeMap::new();
+    let dry: Vec<(FleetId, PolityId)> = fleets
+        .list
+        .iter()
+        .filter(|fleet| {
+            fleet.alive
+                && fleet.min_fuel() < DRY_FUEL
+                && !supply_base(galaxy, diplomacy, fleet.owner, fleet.system)
+        })
+        .map(|fleet| (fleet.id, fleet.owner))
+        .collect();
+    for (fleet, owner) in dry {
+        let any_port = *ports.entry(owner).or_insert_with(|| {
+            galaxy
+                .systems
+                .iter()
+                .any(|system| supply_base(galaxy, diplomacy, owner, system.id))
+        });
+        if !any_port {
+            fleets.tally_mut(owner).cut_off_days += 1;
+            continue;
+        }
+        let streak = fleets.dry_streak.get(&fleet).copied().unwrap_or(0) + 1;
+        streaks.insert(fleet, streak);
+        let tally = fleets.tally_mut(owner);
+        tally.dry_days += 1;
+        tally.dry_longest = tally.dry_longest.max(streak);
+    }
+    fleets.dry_streak = streaks;
 }
 
 /// Flotten, die in einem System liegen, in dem ihre Gemeinschaft einkaufen kann

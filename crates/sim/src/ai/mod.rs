@@ -6,13 +6,16 @@
 //!   Frieden herrscht, entscheidet sie nicht; das kommt mit der Diplomatie.
 //! - [`estimate`]: was eine Gemeinschaft von fremden Flotten sieht, und die
 //!   Kräfteschätzung mit der Kontertabelle.
-//! - [`levers`]: die einzige Stelle, an der die KI Flotten-, Werft- und Forschungsbefehle
-//!   erteilt. Spätere Planer steuern über diese Hebel.
+//! - [`levers`]: die einzige Stelle, an der die KI Flotten-, Werft-, Forschungs- und
+//!   Belagerungsbefehle erteilt.
+//! - [`siege`]: Belagerung und Verteidigung der Welten: Zielwahl, Truppen, die Wahl
+//!   zwischen Aushungern, Sturm und Beschuss, Verteidigungspläne, Übergabe.
 
 pub mod estimate;
 pub mod levers;
 pub mod military;
 mod plugin;
+pub mod siege;
 
 pub use plugin::AiPlugin;
 
@@ -58,6 +61,38 @@ pub struct Operation {
     pub target: SystemId,
     /// Bauwert der Flotte bei Beginn: das Maß, an dem Verluste zum Abbruch führen.
     pub start_value: f64,
+}
+
+/// Abschnitt eines Feldzugs gegen eine Welt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CampaignStage {
+    /// Die Flotte läuft den Sammelplatz an, fasst Treibstoff und schifft Truppen ein.
+    #[default]
+    Muster,
+    /// Sie marschiert zum Ziel.
+    March,
+    /// Sie liegt über dem Ziel und belagert es.
+    Siege,
+}
+
+/// Ein Feldzug einer Gemeinschaft gegen eine Welt des Gegners: eine Flotte, ein Ziel.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Campaign {
+    pub target: PlanetId,
+    /// Eigene Welt, auf der die Truppen bereitstehen.
+    pub staging: PlanetId,
+    pub fleet: FleetId,
+    pub stage: CampaignStage,
+    pub started_day: u64,
+    /// Tag, an dem der laufende Abschnitt begann.
+    pub stage_day: u64,
+    /// Verbände, die die Flotte mitnehmen soll.
+    pub troops: f64,
+    /// So oft ist die Flotte schon zum Auftanken oder Truppenholen heimgekehrt.
+    pub sorties: u32,
+    /// Das Ziel wurde mit der weiteren Suche gewählt (`reach_wide`, `odds_wide`).
+    #[serde(default)]
+    pub wide: bool,
 }
 
 /// Ein Gefecht mit einer fremden Flotte, wie es die Führung in Erinnerung behält.
@@ -116,6 +151,31 @@ pub struct MilitaryPlan {
     /// einen Eindringling. `None`: am Warteplatz.
     #[serde(default)]
     pub post: Option<SystemId>,
+    /// Der laufende Feldzug gegen eine Welt ([`siege`]).
+    #[serde(default)]
+    pub campaign: Option<Campaign>,
+    /// Welten, deren Belagerung aufgegeben wurde, und der Tag, vor dem sie nicht wieder
+    /// Ziel wird.
+    #[serde(default)]
+    pub spurned: BTreeMap<PlanetId, u64>,
+    /// Begonnene Feldzüge über die ganze Partie, für Berichte.
+    #[serde(default)]
+    pub campaigns: u32,
+    /// Tag, an dem zuletzt ein Feldzug endete (0: noch keiner). Truppen, die danach an
+    /// Bord bleiben, gehen nach `land_after_days` an Land.
+    #[serde(default)]
+    pub campaign_end: u64,
+    /// Seit diesem Tag findet die Gemeinschaft im Krieg kein Ziel für einen Feldzug;
+    /// `None`, sobald sie eines hat oder Frieden herrscht.
+    #[serde(default)]
+    pub searching_since: Option<u64>,
+    /// Wie oft ein Feldzug an einer Welt gescheitert ist: Jedes Mal ruht sie länger.
+    #[serde(default)]
+    pub failures: BTreeMap<PlanetId, u32>,
+    /// Monatserste in Folge, an denen schon der Unterhalt dessen, was an Verteidigung
+    /// steht, den Etat überstieg.
+    #[serde(default)]
+    pub defense_over_months: u32,
 }
 
 fn long_calm() -> u32 {
@@ -139,6 +199,13 @@ impl Default for MilitaryPlan {
             met: BTreeMap::new(),
             no_offensive_before: 0,
             post: None,
+            campaign: None,
+            spurned: BTreeMap::new(),
+            campaigns: 0,
+            campaign_end: 0,
+            searching_since: None,
+            failures: BTreeMap::new(),
+            defense_over_months: 0,
         }
     }
 }
@@ -152,9 +219,13 @@ pub struct AiState {
     pub modes: BTreeMap<PolityId, MilitaryMode>,
     /// Pläne je Gemeinschaft (Stelle = Nummer der Gemeinschaft).
     pub plans: Vec<MilitaryPlan>,
-    /// Flotten, die ein anderer Planer für sich beansprucht. Die Grundhaltung lässt sie
-    /// in Ruhe. Heute trägt niemand etwas ein.
+    /// Flotten, die einen Planeten belagern (eingetragen von der Belagerung selbst). Die
+    /// Grundhaltung lässt sie in Ruhe; ebenso die Flotte eines laufenden Feldzugs
+    /// ([`AiState::is_reserved`]).
     pub reserved: BTreeSet<FleetId>,
+    /// Welten, deren Verteidigungsplan die KI nicht anrührt: Ein Drehbuch hat ihn gesetzt.
+    #[serde(default)]
+    pub defense_hold: BTreeSet<PlanetId>,
 }
 
 impl AiState {
@@ -166,10 +237,14 @@ impl AiState {
             .unwrap_or(self.default_mode)
     }
 
-    /// Hat ein anderer Planer diese Flotte für sich beansprucht? Dann lässt die
-    /// Grundhaltung sie in Ruhe.
+    /// Belagert diese Flotte, oder führt sie einen Feldzug? Dann lässt die Grundhaltung
+    /// sie in Ruhe.
     pub fn is_reserved(&self, fleet: FleetId) -> bool {
         self.reserved.contains(&fleet)
+            || self.plans.iter().any(|plan| {
+                plan.campaign
+                    .is_some_and(|campaign| campaign.fleet == fleet)
+            })
     }
 
     /// Der Plan einer Gemeinschaft, wie er ist (ohne Eintrag der leere).

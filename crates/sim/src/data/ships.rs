@@ -565,6 +565,120 @@ pub struct MilitaryAiBalance {
     /// Nach einem Angriff, der vor einem stärkeren Gegner aufgegeben wurde, beginnt die
     /// Gemeinschaft so viele Tage lang keinen neuen.
     pub caution_days: u64,
+    /// Belagerung und Verteidigung der Welten.
+    pub siege: SiegeAiBalance,
+}
+
+/// Ausbauziel einer Klasse von Welten im Verteidigungsplan der KI.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct DefenseRow {
+    pub stations: u8,
+    pub guns: u8,
+    pub shield: u8,
+    pub bunkers: u8,
+    /// Reguläre als Vielfaches der Miliz.
+    pub regulars: f32,
+    pub depot_days: u16,
+}
+
+/// `balance.ron: military.ai.siege`: wie die KI-Gemeinschaften belagern und ihre Welten
+/// verteidigen.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SiegeAiBalance {
+    /// Geschätztes Kräfteverhältnis gegen alles, was im Umkreis des Ziels eingreifen
+    /// kann, ab dem ein Feldzug gegen eine Welt beginnt.
+    pub odds: f64,
+    /// Anteil des Tanks, den der Weg vom nächsten eigenen Hafen zum Ziel höchstens
+    /// kosten darf.
+    pub reach: f32,
+    /// Findet die Gemeinschaft im Krieg `widen_days` Tage lang kein Ziel, sucht sie
+    /// weiter: bis `reach_wide` des Tanks und ab dem Kräfteverhältnis `odds_wide`.
+    pub widen_days: u64,
+    pub reach_wide: f32,
+    pub odds_wide: f64,
+    /// Faktor auf den Wert einer Hauptwelt bei der Zielwahl.
+    pub capital_bonus: f64,
+    /// Truppen für einen Sturm: dieses Vielfache der geschätzten Verteidiger an der
+    /// Oberfläche; für die Besatzung dieses Vielfache der Besatzungstruppe.
+    pub storm_ratio: f64,
+    pub occupation_margin: f64,
+    /// Nachschub in Tagen, den die Truppen beim Einschiffen mitnehmen.
+    pub supply_days: u16,
+    /// So viele Tage wartet ein Feldzug höchstens auf Truppen und Treibstoff.
+    pub muster_days: u64,
+    /// Tankinhalt, mit dem die Flotte ihren letzten Hafen vor dem Ziel verlässt.
+    pub sail_fuel: f32,
+    /// Stationen greift die Flotte nur an, wenn ihre Feuerkraft sie in so vielen Tagen
+    /// niederkämpft.
+    pub station_days: f64,
+    /// Rumpfanteil, den ein Weg die Flotte höchstens kosten darf.
+    pub hull_limit: f64,
+    /// Kosten eines Wegs, in Anteilen der Beute: je Tag, je verlorenem Anteil der
+    /// Truppe, je verlorenem Anteil der Beute, je verlorenem Rumpfanteil.
+    pub day_cost: f64,
+    /// Dazu je Tag der Sold und die Wartung der belagernden Flotte, geteilt durch den
+    /// Wert der Beute, mal diesem Gewicht: Eine Flotte, die über dem Ziel liegt, fehlt
+    /// überall sonst.
+    pub upkeep_weight: f64,
+    pub loss_weight: f64,
+    pub prize_weight: f64,
+    pub hull_weight: f64,
+    /// Faktor auf die Kosten je Tag, wenn Entsatz droht.
+    pub haste: f64,
+    /// Der laufende Weg gilt um diesen Anteil billiger: So kippt die Wahl nicht täglich.
+    pub stick: f64,
+    /// Ab diesem eigenen Anteil an den Betrieben der Welt kein Flächenbeschuss.
+    pub area_stake_max: f64,
+    /// So oft kehrt ein Feldzug zum Auftanken oder Truppenholen heim und kommt wieder.
+    pub sorties: u32,
+    /// Eine aufgegebene Belagerung wird so viele Tage lang nicht wieder versucht, nach
+    /// jedem weiteren Scheitern am selben Ziel ein Vielfaches davon.
+    pub retry_days: u64,
+    /// Truppen, die nach dem Ende eines Feldzugs noch an Bord sind, gehen so viele Tage
+    /// danach im nächsten eigenen Hafen an Land, auch im Krieg.
+    pub land_after_days: u64,
+    /// Geplündert wird, wenn die Staatskasse weniger als so viele Monate Flottenkosten deckt.
+    pub sack_below_months: f64,
+    /// Anteil der Plätze der Hauptflotte, für den die Gemeinschaft im Krieg Truppen
+    /// bereithält.
+    pub expedition_share: f64,
+    /// Anteil der planmäßigen Garnison des Sammelplatzes, der beim Einschiffen bleibt.
+    pub garrison_keep: f64,
+    /// Sold und Unterhalt der Verteidigung sollen höchstens diesen Anteil der
+    /// Staatseinnahmen kosten.
+    pub defense_share: f64,
+    /// Übersteigt schon der Unterhalt dessen, was steht, so viele Monate in Folge den
+    /// Etat, plant die KI auch Anlagen ab, die stehen.
+    pub dismantle_after_months: u32,
+    /// Eine Welt gilt als bedroht, wenn ein Kriegsgegner oder eine fremde Grenze
+    /// höchstens so viele Sprünge entfernt liegt.
+    pub defense_jumps: u32,
+    /// Ausbauziele: Hauptwelt, bedrohte Welt, übrige Welten.
+    pub defense_capital: DefenseRow,
+    pub defense_exposed: DefenseRow,
+    pub defense_interior: DefenseRow,
+    /// Im Frieden gilt von Anlagen und Regulären der Ausbauziele nur dieser Anteil.
+    pub defense_peace: f64,
+    /// Unter so vielen Tagen Vorrat schweigen die Geschütze einer belagerten Welt.
+    pub hold_fire_days: f64,
+    /// In die Tiefe gestaffelt wird, wenn die Verteidiger an der Oberfläche weniger als
+    /// dieses Vielfache der gelandeten Truppe zählen.
+    pub deep_ratio: f64,
+    /// Kräfteverhältnis, ab dem eine Flotte den Orbit einer belagerten eigenen Welt
+    /// streitig macht.
+    pub relief_odds: f64,
+    /// Übergabe: Nur Gemeinschaften, deren Standhaftigkeit unter diesem Wert liegt
+    /// (0..1), übergeben eine Welt; die anderen halten bis zum Ende.
+    pub capitulate_resolve: f64,
+    /// Aus Hunger: Die Vorräte sind leer, und von der Garnison bei Beginn steht weniger
+    /// als dieser Anteil.
+    pub capitulate_garrison: f64,
+    /// Überrannt: Das Zentrum ist verloren, im Untergrund sitzt niemand, und die
+    /// gelandete Truppe übertrifft die Verteidiger an der Oberfläche um dieses Vielfache.
+    pub capitulate_ratio: f64,
+    /// Ihre Hauptwelt übergibt nur eine Gemeinschaft, deren Standhaftigkeit unter diesem
+    /// Wert liegt (0..1).
+    pub capitulate_capital_resolve: f64,
 }
 
 /// Drei Werte je Doktrin: offensiv, ausgewogen, defensiv.

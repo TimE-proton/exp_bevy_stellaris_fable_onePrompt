@@ -1,11 +1,11 @@
-//! Die Hebel der KI: die einzige Stelle, an der sie Flotten-, Werft- und Forschungsbefehle
-//! erteilt.
+//! Die Hebel der KI: die einzige Stelle, an der sie Flotten-, Werft-, Forschungs- und
+//! Belagerungsbefehle erteilt.
 //!
 //! Jeder Hebel vergleicht den gewünschten mit dem bestehenden Zustand und stellt nur dann
 //! einen Befehl ein, wenn sich etwas ändern soll und der Befehl nach den Regeln angenommen
-//! würde. Er gibt zurück, ob er einen Befehl erteilt hat. Spätere Planer (Kriegsziele,
-//! Belagerung, Diplomatie) steuern über dieselben Hebel und über
-//! [`super::AiState::reserved`], statt eigene Befehle zu erteilen.
+//! würde. Er gibt zurück, ob er einen Befehl erteilt hat. Die Belagerung
+//! ([`super::siege`]) steuert über dieselben Hebel; spätere Planer (Kriegsziele,
+//! Diplomatie) tun es ebenso, statt eigene Befehle zu erteilen.
 
 use crate::battle::{Doctrine, Formation};
 use crate::command::{CommandQueue, CommandSource, SimCommand};
@@ -16,6 +16,7 @@ use crate::fleet::{Battles, BuildOrder, Fleet, Fleets, Stance, supply_base, yard
 use crate::galaxy::Galaxy;
 use crate::ids::{PlanetId, PolityId, ShipId, SystemId};
 use crate::polity::Polities;
+use crate::siege::{DefensePlan, PlanetDefense, Posture, SiegeOrders, Sieges};
 use crate::tech::PolityResearch;
 
 /// Die Hand einer Gemeinschaft an den Hebeln: Sie erteilt Befehle in deren Namen.
@@ -176,6 +177,97 @@ impl<'a> Hand<'a> {
             fleet: fleet.id,
             ships,
         })
+    }
+
+    /// Lässt eine Flotte einen Planeten in ihrem System belagern.
+    pub fn begin_siege(&mut self, sieges: &Sieges, fleet: &Fleet, planet: PlanetId) -> bool {
+        if sieges.assign.get(&fleet.id) == Some(&planet) || !fleet.is_docked() {
+            return false;
+        }
+        self.issue(SimCommand::BeginSiege {
+            fleet: fleet.id,
+            planet,
+        })
+    }
+
+    /// Stehende Befehle einer eigenen Belagerung.
+    pub fn siege_orders(&mut self, sieges: &Sieges, planet: PlanetId, orders: SiegeOrders) -> bool {
+        let Some(siege) = sieges.siege(planet) else {
+            return false;
+        };
+        if siege.attacker != self.polity
+            || siege.orders == orders
+            || orders.focus as usize >= siege.zones.len()
+        {
+            return false;
+        }
+        self.issue(SimCommand::SetSiegeOrders { planet, orders })
+    }
+
+    /// Hebt eine eigene Belagerung auf.
+    pub fn lift_siege(&mut self, planet: PlanetId) -> bool {
+        self.issue(SimCommand::LiftSiege { planet })
+    }
+
+    /// Schifft Reguläre einer eigenen Welt auf eine Flotte in deren System ein.
+    pub fn embark(&mut self, fleet: &Fleet, planet: PlanetId, strength: f64, days: u16) -> bool {
+        if strength.is_nan() || strength <= 0.0 || fleet.in_battle || !fleet.is_docked() {
+            return false;
+        }
+        self.issue(SimCommand::EmbarkTroops {
+            fleet: fleet.id,
+            planet,
+            strength,
+            supply_days: days,
+        })
+    }
+
+    /// Setzt eingeschiffte Verbände einer Flotte an Land.
+    pub fn land(&mut self, fleet: &Fleet, planet: PlanetId, strength: f64) -> bool {
+        if strength.is_nan() || strength <= 0.0 || !fleet.is_docked() {
+            return false;
+        }
+        self.issue(SimCommand::LandTroops {
+            fleet: fleet.id,
+            planet,
+            strength,
+        })
+    }
+
+    /// Haltung der Garnison einer eigenen Welt und ob ihre Geschütze schweigen.
+    pub fn garrison_orders(
+        &mut self,
+        defense: &PlanetDefense,
+        planet: PlanetId,
+        posture: Posture,
+        hold_fire: bool,
+    ) -> bool {
+        if defense.posture == posture && defense.hold_fire == hold_fire {
+            return false;
+        }
+        self.issue(SimCommand::SetGarrisonOrders {
+            planet,
+            posture,
+            hold_fire,
+        })
+    }
+
+    /// Übergibt eine belagerte eigene Welt.
+    pub fn capitulate(&mut self, planet: PlanetId) -> bool {
+        self.issue(SimCommand::Capitulate { planet })
+    }
+
+    /// Setzt das Ausbauziel der Verteidigung einer eigenen Welt.
+    pub fn defense_plan(
+        &mut self,
+        defense: &PlanetDefense,
+        planet: PlanetId,
+        plan: DefensePlan,
+    ) -> bool {
+        if defense.plan == plan {
+            return false;
+        }
+        self.issue(SimCommand::SetDefensePlan { planet, plan })
     }
 
     /// Setzt den Anteil der Staatseinnahmen, der in die Forschung geht.

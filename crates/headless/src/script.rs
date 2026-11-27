@@ -41,6 +41,9 @@ pub struct ScriptArgs {
     /// Jahres 25 ihrem nächsten Nachbarn den Krieg, belagert zuerst dessen nächste Welt
     /// und dann seinen Sitz und schließt zu Beginn des Jahres 45 Frieden, wenn er dann
     /// noch besteht; ihre Flotten führt dabei das Drehbuch.
+    /// `feldzug`: Die Gemeinschaften 0 bis 3 erklären zu Beginn der Jahre 20, 25, 30 und
+    /// 35 ihrem nächsten Nachbarn den Krieg und schließen je 15 Jahre später Frieden;
+    /// Flotten, Belagerungen und Verteidigung führt auf allen Seiten die KI.
     #[arg(long, value_enum)]
     pub preset: Option<Preset>,
     /// Militärische Führung durch die KI, beliebig oft: WER (Nummer ab 0, `alle` für
@@ -57,6 +60,7 @@ pub enum Preset {
     GrenzkriegAngreiferRuht,
     GrenzkriegNachbarRuht,
     Eroberung,
+    Feldzug,
 }
 
 impl ScriptArgs {
@@ -74,14 +78,14 @@ impl ScriptArgs {
             events.push(parse_mode(text).map_err(|error| format!("--ai {text}: {error}"))?);
         }
         if let Some(preset) = self.preset {
-            if preset == Preset::Eroberung {
-                events.extend(sim::harness::conquest_war());
-            } else {
-                events.extend(sim::harness::border_war());
+            match preset {
+                Preset::Eroberung => events.extend(sim::harness::conquest_war()),
+                Preset::Feldzug => events.extend(sim::harness::campaign_wars()),
+                _ => events.extend(sim::harness::border_war()),
             }
             let passive = MilitaryMode::PassiveFleet;
             match preset {
-                Preset::Eroberung => {}
+                Preset::Eroberung | Preset::Feldzug => {}
                 Preset::Grenzkrieg => {}
                 Preset::GrenzkriegAngreiferRuht => events.push(ScriptedEvent {
                     day: 0,
