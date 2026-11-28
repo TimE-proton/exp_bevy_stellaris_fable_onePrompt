@@ -343,6 +343,21 @@ fn the_world_gets_its_surface_off_the_main_thread_and_keeps_it_for_the_next_visi
     let surface = material(&game);
     assert!(surface.base_color_texture.is_some());
     assert!(surface.metallic_roughness_texture.is_some());
+    // Die Partie läuft ein paar Tage weiter; unter dem Beschuss schrumpft die Bevölkerung.
+    // Die Oberfläche hängt nicht an ihr und bleibt im Zwischenspeicher gültig.
+    let planet = game.resource::<WatchedSiege>().planet;
+    let population = |game: &TestGame| {
+        game.resource::<sim::galaxy::Galaxy>()
+            .planet(planet)
+            .population
+    };
+    let (day, people) = (game.resource::<SimClock>().day(), population(&game));
+    game.key(KeyCode::Digit6);
+    game.frames(12);
+    game.key(KeyCode::Space);
+    game.frames(2);
+    assert!(game.resource::<SimClock>().day() > day, "die Zeit läuft");
+    assert_ne!(population(&game), people, "die Bevölkerung ändert sich");
     // Zurück zum Fenster „Belagerung“ und wieder hinein: Die Oberfläche ist sofort da.
     game.click_on(TO_WINDOW);
     game.frames(4);

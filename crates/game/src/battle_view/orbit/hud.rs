@@ -397,7 +397,15 @@ fn scene_labels(
             return;
         }
         let font = egui::FontId::proportional(13.0);
-        // Dunkler Schatten: Die Schrift steht vor hellem Boden und vor dem Himmel.
+        // Dunkle, halb durchsichtige Tafel und Schatten: Die Schrift steht vor hellen
+        // Wolken, Eis und vor dem Himmel.
+        let size = painter
+            .layout_no_wrap(text.clone(), font.clone(), color)
+            .size();
+        let plate = Align2::CENTER_BOTTOM
+            .anchor_size(pos, size)
+            .expand2(egui::vec2(5.0, 2.0));
+        painter.rect_filled(plate, 3.0, Color32::from_black_alpha(150));
         painter.text(
             pos + egui::vec2(1.0, 1.0),
             Align2::CENTER_BOTTOM,

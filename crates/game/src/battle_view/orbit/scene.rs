@@ -14,6 +14,7 @@ use super::super::scene::{
     BattleAssets, Cosmetic, Lighting, SideKit, additive, show_lit, side_tint,
 };
 use super::atmosphere::AtmosphereMaterial;
+use super::night_lights::NightLightsMaterial;
 use super::planet_look::{self, LookInput, Surface};
 use super::{Layout, WatchedSiege};
 use crate::map::{MapCamera, camera_shows};
@@ -41,12 +42,15 @@ pub const SHIELD_RADIUS: f32 = PLANET_RADIUS * 1.09;
 /// Höhe der Wolkendecke und der Zonen über der Oberfläche (Anteil am Halbmesser). Die
 /// Zonen liegen über den Wolken: Sie sind Lagebild, nicht Gelände.
 const CLOUD_LIFT: f32 = 1.012;
+/// Höhe der Hülle mit den Stadtlichtern: knapp über dem Boden, unter den Wolken.
+const LIGHTS_LIFT: f32 = 1.002;
 const ZONE_LIFT: f32 = 1.015;
 /// So schnell dreht sich die Wolkendecke (Bogenmaß je Sekunde Szenenzeit).
 const CLOUD_DRIFT: f32 = 0.006;
 /// Stärke des Leuchtens: Glut und Stadtlichter (direkt in Bildwerten, ohne Belichtung).
-const LAVA_GLOW: f32 = 2.6;
-const CITY_GLOW: f32 = 0.32;
+/// Die Glut bleibt so verhalten, dass auch ihre Tagseite Licht und Schatten zeigt.
+const LAVA_GLOW: f32 = 1.7;
+const CITY_GLOW: f32 = 0.7;
 /// So viele Oberflächen behält das Spiel, damit ein zweiter Besuch sofort fertig ist.
 const KEPT_LOOKS: usize = 3;
 /// Bahn der Orbitalstationen.
@@ -217,13 +221,15 @@ pub fn sun_direction() -> Vec3 {
 }
 
 /// Licht der Orbitansicht: eine kräftige Sonne, kaum Gegen- und Umgebungslicht. So ist
-/// die Nachtseite wirklich dunkel, und Glut und Stadtlichter leuchten darin.
+/// die Nachtseite wirklich dunkel, und Glut und Stadtlichter leuchten darin. Das schwache
+/// Aufhelllicht kommt aus der Richtung der Übersicht: Es zeigt die abgewandten Seiten der
+/// Schiffe, ohne auf der Nachtseite der Welt einen zweiten, falschen Tag zu malen.
 pub fn orbit_lighting() -> Lighting {
     let sun = sun_direction();
     Lighting {
         key: (sun, 4_000.0),
         key_color: Color::srgb(1.0, 0.985, 0.96),
-        fill: ((-sun + Vec3::new(0.0, -0.3, 0.2)).normalize(), 70.0),
+        fill: (overview().translation.normalize(), 12.0),
         ambient: 22.0,
     }
 }
@@ -259,6 +265,28 @@ fn scar_of(watched: &WatchedSiege) -> f32 {
     (watched.card.view.defense.scar as f32).clamp(0.0, 1.0)
 }
 
+/// So stark dunkeln die Kriegsschäden die Oberfläche ab (Faktor auf die Farbe).
+fn scar_dimming(scar: f32) -> f32 {
+    1.0 - 0.45 * scar
+}
+
+/// Grundfarbe der Kugel, solange ihre Oberfläche noch entsteht: der Ton ihrer Art,
+/// abgedunkelt nach den Kriegsschäden.
+fn placeholder_color(tint: [f32; 3], scar: f32) -> Color {
+    let dark = scar_dimming(scar);
+    let tint = LinearRgba::from(Color::srgb(tint[0], tint[1], tint[2]));
+    Color::linear_rgb(tint.red * dark, tint.green * dark, tint.blue * dark)
+}
+
+/// Helligkeit der Stadtlichter: mit der Bevölkerung; wo der Krieg die Städte trifft,
+/// gehen viele aus.
+fn city_glow(settled: f32, scar: f32) -> f32 {
+    if settled <= 0.0 {
+        return 0.0;
+    }
+    CITY_GLOW * (0.25 + 0.75 * settled.sqrt()) * (1.0 - 0.8 * scar)
+}
+
 /// Wie weit die Oberfläche der gezeigten Welt ist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LookStage {
@@ -274,6 +302,7 @@ struct LookImages {
     normal: Option<Handle<Image>>,
     roughness: Handle<Image>,
     emissive: Option<Handle<Image>>,
+    lights: Option<Handle<Image>>,
     clouds: Option<Handle<Image>>,
 }
 
@@ -282,9 +311,10 @@ struct LookImages {
 struct Staging {
     input: LookInput,
     stage: LookStage,
-    /// Noch hochzuladen: Platz (Farbe, Normalen, Rauheit, Leuchten, Wolken) und Bild.
+    /// Noch hochzuladen: Platz (Farbe, Normalen, Rauheit, Glut, Stadtlichter, Wolken) und
+    /// Bild.
     layers: Vec<(usize, planet_look::Layer)>,
-    handles: [Option<Handle<Image>>; 5],
+    handles: [Option<Handle<Image>>; 6],
 }
 
 impl Staging {
@@ -294,6 +324,7 @@ impl Staging {
             surface.normal,
             Some(surface.roughness),
             surface.emissive,
+            surface.lights,
             surface.clouds,
         ]
         .into_iter()
@@ -314,12 +345,13 @@ impl Staging {
             self.handles[slot] = Some(images.add(layer.image()));
             return None;
         }
-        let [albedo, normal, roughness, emissive, clouds] = self.handles.clone();
+        let [albedo, normal, roughness, emissive, lights, clouds] = self.handles.clone();
         Some(LookImages {
             albedo: albedo?,
             normal,
             roughness: roughness?,
             emissive,
+            lights,
             clouds,
         })
     }
@@ -395,15 +427,20 @@ impl Drop for PlanetLooks {
 }
 
 /// Bringt die Oberfläche der gezeigten Welt voran: erst ein schnelles Vorabbild, dann
-/// die volle Auflösung; beides entsteht abseits des Hauptfadens. Dreht die Wolken und
-/// dunkelt die Oberfläche nach den Kriegsschäden ab.
+/// die volle Auflösung; beides entsteht abseits des Hauptfadens. Dreht die Wolken,
+/// dunkelt die Oberfläche nach den Kriegsschäden ab und stellt die Stadtlichter nach der
+/// Bevölkerung ein.
+#[allow(clippy::too_many_arguments)]
 fn update_look(
     watched: Res<WatchedSiege>,
+    galaxy: Res<Galaxy>,
     scene: Option<ResMut<OrbitScene>>,
     mut looks: ResMut<PlanetLooks>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut clouds: Query<(&mut Transform, &mut Visibility), With<CloudLayer>>,
+    mut night: ResMut<Assets<NightLightsMaterial>>,
+    mut clouds: Query<(&mut Transform, &mut Visibility), (With<CloudLayer>, Without<NightLights>)>,
+    mut lights: Query<&mut Visibility, (With<NightLights>, Without<CloudLayer>)>,
 ) {
     let Some(mut scene) = scene else {
         return;
@@ -442,25 +479,49 @@ fn update_look(
         looks.start(input, next);
     }
     let scar = scar_of(&watched);
+    // Stadtlichter: Die Bevölkerung ändert sich Tag für Tag; dafür braucht es keine neue
+    // Oberfläche, nur eine andere Helligkeit.
+    let glow = city_glow(planet_look::settled(galaxy.planet(watched.planet)), scar);
+    if let Some(texture) = best.as_ref().and_then(|best| best.1.lights.clone())
+        && ((glow - scene.city_glow).abs() > 0.004
+            || night
+                .get(&scene.lights_material)
+                .is_some_and(|material| material.lights != texture))
+        && let Some(mut material) = night.get_mut(&scene.lights_material)
+    {
+        scene.city_glow = glow;
+        material.lights = texture;
+        material.sun.w = glow;
+        let shown = if glow > 0.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        for mut visibility in &mut lights {
+            *visibility = shown;
+        }
+    }
+    if best.is_none() && scar != scene.scar {
+        // Noch keine Oberfläche: Auch die Kugel in der Farbe ihrer Art trägt die Schäden.
+        scene.scar = scar;
+        if let Some(mut material) = materials.get_mut(&scene.planet_material) {
+            material.base_color = placeholder_color(scene.look.tint, scar);
+        }
+    }
     if let Some((stage, images)) = best
         && (stage > scene.shown_look || scar != scene.scar)
     {
         scene.shown_look = stage;
         scene.scar = scar;
-        let dark = 1.0 - 0.45 * scar;
+        let dark = scar_dimming(scar);
         if let Some(mut material) = materials.get_mut(&scene.planet_material) {
             material.base_color = Color::linear_rgb(dark, dark, dark);
             material.base_color_texture = Some(images.albedo.clone());
             material.normal_map_texture = images.normal.clone();
             material.metallic_roughness_texture = Some(images.roughness.clone());
             material.perceptual_roughness = 1.0;
-            let glow = if scene.look.style == planet_look::Style::Lava {
-                LAVA_GLOW
-            } else {
-                CITY_GLOW
-            };
             material.emissive = if images.emissive.is_some() {
-                LinearRgba::new(glow, glow, glow, 0.0)
+                LinearRgba::new(LAVA_GLOW, LAVA_GLOW, LAVA_GLOW, 0.0)
             } else {
                 LinearRgba::BLACK
             };
@@ -496,6 +557,10 @@ struct PlanetBody;
 /// Wolkendecke über dem Planeten; dreht sich langsam mit der Szenenzeit.
 #[derive(Component)]
 struct CloudLayer;
+
+/// Hülle mit den Stadtlichtern der Nachtseite.
+#[derive(Component)]
+struct NightLights;
 
 /// Saum der Atmosphäre.
 #[derive(Component)]
@@ -564,6 +629,9 @@ pub struct OrbitScene {
     look: LookInput,
     planet_material: Handle<StandardMaterial>,
     cloud_material: Handle<StandardMaterial>,
+    lights_material: Handle<NightLightsMaterial>,
+    /// Eingestellte Helligkeit der Stadtlichter.
+    city_glow: f32,
     /// Gezeigte Stufe der Oberfläche: keine, Vorabbild, fertig.
     shown_look: LookStage,
     /// Kriegsschäden, wie sie die Oberfläche gerade abdunkeln.
@@ -699,6 +767,7 @@ pub(super) fn enter(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut atmospheres: ResMut<Assets<AtmosphereMaterial>>,
+    mut night: ResMut<Assets<NightLightsMaterial>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
 ) {
     let Some(watched) = watched else {
@@ -710,9 +779,8 @@ pub(super) fn enter(
     let scar = scar_of(&watched);
     // Bis die Oberfläche fertig ist, steht die Kugel in der Farbe ihrer Art da.
     let globe = meshes.add(meshes::uv_globe(128, 256));
-    let tint = look.tint;
     let planet_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(tint[0], tint[1], tint[2]),
+        base_color: placeholder_color(look.tint, scar),
         perceptual_roughness: 0.9,
         metallic: 0.0,
         reflectance: 0.35,
@@ -738,6 +806,19 @@ pub(super) fn enter(
         Mesh3d(globe.clone()),
         MeshMaterial3d(cloud_material.clone()),
         Transform::from_scale(Vec3::splat(PLANET_RADIUS * CLOUD_LIFT)),
+        Visibility::Hidden,
+    ));
+    // Stadtlichter: unsichtbar, bis ihre Textur da ist und die Welt bewohnt ist.
+    let lights_material = night.add(NightLightsMaterial {
+        lights: Handle::default(),
+        sun: sun_direction().extend(0.0),
+    });
+    commands.spawn((
+        OrbitVisual,
+        NightLights,
+        Mesh3d(globe.clone()),
+        MeshMaterial3d(lights_material.clone()),
+        Transform::from_scale(Vec3::splat(PLANET_RADIUS * LIGHTS_LIFT)),
         Visibility::Hidden,
     ));
     if let Some(haze) = look.haze() {
@@ -772,10 +853,12 @@ pub(super) fn enter(
         station: meshes.add(meshes::station().tinted(own).to_mesh()),
         gun: meshes.add(meshes::surface_gun().tinted(own).to_mesh()),
         bunker: meshes.add(meshes::bunker().tinted(own).to_mesh()),
-        shell: meshes.add(meshes::globe(24, 48, |_| [1.0; 4]).to_mesh()),
+        shell: meshes.add(meshes::uv_globe(24, 48)),
         look,
         planet_material,
         cloud_material,
+        lights_material,
+        city_glow: -1.0,
         shown_look: LookStage::None,
         scar,
         zone_materials: [

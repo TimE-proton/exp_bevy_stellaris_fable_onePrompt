@@ -1,9 +1,11 @@
 //! Aussehen eines Planeten in der Orbitansicht: prozedurale Oberfläche als Textur.
 //!
-//! Aus dem, was der Kern über eine Welt weiß (Art, Temperatur, Wasser, Atmosphäre,
-//! Bevölkerung), entstehen deterministisch – Seed ist die Kennung des Planeten –
-//! äquirektangulare Bilder: Farbe, Normalen aus einer Höhenkarte, Rauheit, Leuchten
-//! (Glut, Stadtlichter) und eine Wolkendecke. Abgetastet wird ein 3D-Gradientenrauschen
+//! Aus dem, was der Kern über eine Welt weiß (Art, Temperatur, Wasser, Atmosphäre),
+//! entstehen deterministisch – Seed ist die Kennung des Planeten – äquirektangulare
+//! Bilder: Farbe, Normalen aus einer Höhenkarte, Rauheit, Leuchten der Glut, Stadtlichter
+//! und eine Wolkendecke. Die Bevölkerung geht nicht in die Bilder ein: Wie hell die
+//! Städte leuchten, stellt das Spiel am Material ein ([`settled`]), damit eine wachsende
+//! oder schrumpfende Bevölkerung keine neue Oberfläche verlangt. Abgetastet wird ein 3D-Gradientenrauschen
 //! auf der Einheitskugel; deshalb gibt es weder eine Naht an der Datumsgrenze noch
 //! verzerrte Pole.
 //!
@@ -70,15 +72,17 @@ impl Style {
         match self {
             Style::Garden | Style::Ocean | Style::Toxic => 0.025,
             Style::Steppe => 0.03,
-            Style::Ice => 0.012,
+            Style::Ice => 0.03,
             Style::Rock => 0.11,
-            Style::Lava => 0.04,
+            Style::Lava => 0.06,
             Style::Gas => 0.0,
         }
     }
 }
 
-/// Was in das Aussehen eingeht. Gleiche Eingabe, gleiches Bild.
+/// Was in das Aussehen eingeht. Gleiche Eingabe, gleiches Bild; zugleich der Schlüssel
+/// des Zwischenspeichers. Darum steht hier nur, was sich im Lauf einer Partie nicht
+/// ändert – die Bevölkerung nicht (siehe [`settled`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LookInput {
     pub seed: u64,
@@ -88,10 +92,18 @@ pub struct LookInput {
     /// Wasseranteil 0..1.
     pub water: f32,
     pub atmosphere: Atmosphere,
-    /// Bevölkerung im Verhältnis zur Tragfähigkeit, 0..1: Stadtlichter auf der Nachtseite.
-    pub settled: f32,
     /// Farbe der Art aus den Spieldaten (sRGB), Grundton der Gasriesen.
     pub tint: [f32; 3],
+}
+
+/// Bevölkerung im Verhältnis zur Tragfähigkeit, 0..1: wie hell die Stadtlichter auf der
+/// Nachtseite leuchten.
+pub fn settled(planet: &Planet) -> f32 {
+    if planet.capacity > 0.0 {
+        (planet.population / planet.capacity).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
 }
 
 impl LookInput {
@@ -101,11 +113,6 @@ impl LookInput {
         let tint = kind.map_or([0.55, 0.52, 0.5], |kind| {
             [kind.color.0, kind.color.1, kind.color.2]
         });
-        let settled = if planet.capacity > 0.0 {
-            (planet.population / planet.capacity).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
-        };
         Self {
             seed: u64::from(planet.id.0)
                 .wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -114,7 +121,6 @@ impl LookInput {
             temperature: planet.temperature,
             water: planet.water.clamp(0.0, 1.0),
             atmosphere: planet.atmosphere,
-            settled,
             tint,
         }
     }
@@ -151,24 +157,33 @@ impl LookInput {
         })
     }
 
-    /// Wolken: Farbe (sRGB), bedeckter Anteil und größte Deckkraft. Keine ohne Luft.
+    /// Wolken: Farbe (sRGB), bedeckter Anteil und größte Deckkraft. Keine ohne Luft und
+    /// keine in dünner Luft; giftige und ätzende Luft trägt eine dichte, gelbliche Decke
+    /// mit wenigen Lücken.
     fn clouds(&self) -> Option<([f32; 3], f32, f32)> {
         if self.style == Style::Gas {
             return None;
         }
-        // Wo viel Wasser ist, ziehen mehr Wolken; über trockenen Welten weniger.
+        // Wo viel Wasser ist, ziehen mehr und dichtere Wolken; über trockenen Welten
+        // wenige, dünne (sonst sähen sie aus wie Salz- oder Schneefelder).
         let wet = (0.45 + 0.75 * self.water).min(1.15);
+        let thick = 0.6 + 0.4 * smoothstep(0.1, 0.5, self.water);
         match (self.atmosphere, self.style) {
-            (Atmosphere::None, _) => None,
-            (Atmosphere::Thin, _) => Some(([0.95, 0.95, 0.97], 0.1, 0.4)),
-            (Atmosphere::Breathable, _) => Some(([1.0, 1.0, 1.0], 0.34 * wet, 0.85)),
-            (Atmosphere::Dense, _) => Some(([0.98, 0.98, 1.0], 0.46 * wet, 0.88)),
+            (Atmosphere::None | Atmosphere::Thin, _) => None,
+            (Atmosphere::Breathable, _) => Some(([1.0, 1.0, 1.0], 0.34 * wet, 0.85 * thick)),
+            (Atmosphere::Dense, _) => Some(([0.98, 0.98, 1.0], 0.46 * wet, 0.88 * thick)),
             (Atmosphere::Toxic | Atmosphere::Corrosive, Style::Lava) => {
                 Some(([0.42, 0.36, 0.32], 0.3, 0.7))
             }
-            (Atmosphere::Toxic, _) => Some(([0.92, 0.93, 0.66], 0.4, 0.75)),
-            (Atmosphere::Corrosive, _) => Some(([0.88, 0.74, 0.46], 0.48, 0.8)),
+            (Atmosphere::Toxic, _) => Some(([0.80, 0.84, 0.34], 0.8, 0.9)),
+            (Atmosphere::Corrosive, _) => Some(([0.88, 0.68, 0.36], 0.84, 0.9)),
         }
+    }
+
+    /// Kann die Welt Städte tragen, deren Lichter man sieht? (Giftwelten leben unter
+    /// Kuppeln; dort leuchtet nichts durch die Decke.)
+    fn has_towns(&self) -> bool {
+        matches!(self.style, Style::Garden | Style::Ocean | Style::Steppe)
     }
 }
 
@@ -236,7 +251,8 @@ impl Layer {
     }
 
     /// Textur für die Engine: linear gefiltert, mit Mip-Stufen, in Längsrichtung
-    /// umlaufend (keine Naht an der Datumsgrenze).
+    /// umlaufend (keine Naht an der Datumsgrenze). Die Bilddaten gehen nur an die
+    /// Grafikkarte; im Hauptspeicher bleibt nach dem Hochladen keine Kopie.
     pub fn image(self) -> Image {
         let format = if self.srgb {
             TextureFormat::Rgba8UnormSrgb
@@ -251,7 +267,7 @@ impl Layer {
             },
             TextureDimension::D2,
             format,
-            RenderAssetUsages::default(),
+            RenderAssetUsages::RENDER_WORLD,
         );
         image.data = Some(self.data);
         image.texture_descriptor.mip_level_count = self.levels;
@@ -316,9 +332,12 @@ pub struct Surface {
     pub normal: Option<Layer>,
     /// Grün: Rauheit, Blau: Metall (stets 0).
     pub roughness: Layer,
-    /// Leuchten (sRGB), nur wo etwas glüht oder Städte leuchten.
+    /// Leuchten der Glut (sRGB), nur bei Glutwelten.
     pub emissive: Option<Layer>,
-    /// Wolken: weiß bzw. getönt, Deckkraft im Alpha-Kanal.
+    /// Stadtlichter (sRGB, halbe Auflösung) für die Nachtseite; nur bei Welten, die Städte
+    /// tragen können. Wie hell sie leuchten, stellt das Spiel ein.
+    pub lights: Option<Layer>,
+    /// Wolken: weiß bzw. getönt, Deckkraft im Alpha-Kanal (halbe Auflösung).
     pub clouds: Option<Layer>,
 }
 
@@ -353,7 +372,12 @@ struct Noise {
     perm: [u8; 512],
     /// Versatz je Oktave, damit sich die Gitter der Oktaven nicht decken.
     offsets: [[f32; 3]; 8],
+    /// Achsen großer Kreise: lange Bruchlinien der Eiswelten.
+    axes: [Vec3; ICE_LINES],
 }
+
+/// So viele lange Bruchlinien hat eine Eiswelt.
+const ICE_LINES: usize = 14;
 
 #[inline]
 fn fade(t: f32) -> f32 {
@@ -403,7 +427,12 @@ impl Noise {
                 dice.unit() * 97.0 - 48.0,
             ]
         });
-        Self { perm, offsets }
+        let axes = std::array::from_fn(|_| dice.direction());
+        Self {
+            perm,
+            offsets,
+            axes,
+        }
     }
 
     /// Rauschen in etwa −1..1.
@@ -635,12 +664,14 @@ fn area_quantile(values: &[f32], width: usize, share: f32) -> f32 {
 
 // --- Gelände ----------------------------------------------------------------------------
 
-/// Was die erste Runde je Bildpunkt festhält: Höhe, Feuchte bzw. Risse, Feinstruktur.
+/// Was die erste Runde je Bildpunkt festhält: Höhe, Feuchte bzw. Risse, Feinstruktur und
+/// eine großräumige Schwankung (Kälte der Meere, Dichte der Risse, Tätigkeit der Glut).
 #[derive(Clone, Copy, Default)]
 struct Field {
     height: f32,
     moist: f32,
     detail: f32,
+    broad: f32,
 }
 
 fn field(noise: &Noise, style: Style, p: Vec3) -> Field {
@@ -651,51 +682,84 @@ fn field(noise: &Noise, style: Style, p: Vec3) -> Field {
             } else {
                 (1.35, 0.8)
             };
-            let base = noise.warped(p, scale, warp, 7);
-            let mountains = noise.ridged(p * 2.6 + Vec3::new(3.1, 7.7, 1.9), 5);
+            let base = noise.warped(p, scale, warp, 6);
+            let mountains = noise.ridged(p * 2.6 + Vec3::new(3.1, 7.7, 1.9), 4);
             let inland = smoothstep(-0.05, 0.35, base);
             Field {
                 height: base + 0.42 * mountains * (0.25 + 0.75 * inland),
-                moist: noise.fbm(p * 2.2 + Vec3::new(11.0, 3.0, 7.0), 4),
+                moist: noise.fbm(p * 2.2 + Vec3::new(11.0, 3.0, 7.0), 3),
                 detail: noise.fbm(p * 21.0 + Vec3::new(2.0, 5.0, 9.0), 2),
+                broad: noise.fbm(p * 1.7 + Vec3::new(6.0, 12.0, 4.0), 2),
             }
         }
         Style::Ice => {
-            let base = noise.warped(p, 1.7, 0.8, 6);
-            let wide = 1.0 - noise.fbm(p * 2.4 + Vec3::new(4.0, 1.0, 6.0), 3).abs();
-            let fine = 1.0 - noise.fbm(p * 7.5 + Vec3::new(9.0, 2.0, 3.0), 2).abs();
-            let cracks = (wide.powi(14)).max(0.65 * fine.powi(18));
+            let base = noise.warped(p, 1.7, 0.8, 5);
+            // Wo der Panzer jung ist, reißt er dicht; anderswo bleibt er fast glatt.
+            let density = smoothstep(
+                -0.35,
+                0.45,
+                noise.fbm(p * 1.1 + Vec3::new(4.0, 1.0, 6.0), 3),
+            );
+            // Lange Bruchlinien entlang großer Kreise, leicht gewellt und in Stücke
+            // zerbrochen; dazu ein feines Netz, nur wo der Panzer dicht reißt.
+            let wobble = 0.045 * noise.fbm(p * 3.2 + Vec3::new(2.0, 8.0, 5.0), 2);
+            let mut lineae = 0.0f32;
+            for (index, axis) in noise.axes.iter().enumerate() {
+                let width = 0.0035 + 0.0045 * ((index * 7 % 5) as f32 / 4.0);
+                let off = (p.dot(*axis) + wobble).abs();
+                if off < width * 1.5 {
+                    let line = smoothstep(width * 1.5, width * 0.35, off);
+                    let pieces = smoothstep(-0.15, 0.1, noise.at_point(p * 2.3 + *axis * 9.0));
+                    lineae = lineae.max(line * pieces);
+                }
+            }
+            let fine = 1.0
+                - noise
+                    .at_point(p * 7.0 + Vec3::new(9.0, 2.0, 3.0) + Vec3::splat(wobble * 20.0))
+                    .abs();
+            let fine = smoothstep(0.965, 0.995, fine) * density;
             Field {
-                height: base,
-                moist: cracks,
+                height: base + 0.05 * lineae + 0.02 * fine,
+                moist: lineae.max(0.6 * fine),
                 detail: noise.fbm(p * 16.0, 3),
+                broad: density,
             }
         }
         Style::Rock => Field {
             height: noise.fbm(p * 2.2, 6) * 0.3 + 0.08 * noise.ridged(p * 3.0, 3),
             moist: noise.fbm(p * 1.3 + Vec3::new(7.0, 7.0, 1.0), 3),
             detail: noise.fbm(p * 9.0, 4) * 0.55,
+            broad: 0.0,
         },
         Style::Lava => {
             let base = noise.warped(p, 1.6, 1.2, 6);
+            // Tätige Gebiete reißen breit und hell auf, alte Kruste kaum.
+            let active = smoothstep(-0.2, 0.5, noise.fbm(p * 1.25 + Vec3::new(5.0, 2.0, 9.0), 3));
             let q = p * 3.6;
             let warp = Vec3::new(
                 noise.fbm(q + Vec3::new(1.0, 4.0, 2.0), 2),
                 noise.fbm(q + Vec3::new(6.0, 2.0, 8.0), 2),
                 noise.fbm(q + Vec3::new(3.0, 9.0, 5.0), 2),
             );
-            // Nähte zwischen erkalteten Schollen: Nulllinien einzelner Oktaven, grob und fein.
+            // Nähte zwischen erkalteten Schollen: Nulllinien einzelner Oktaven, grob und
+            // fein. Ihre Breite schwankt mit der Tätigkeit und entlang der Naht.
             let wide = 1.0 - noise.at_point(q + warp * 0.7).abs();
             let fine = 1.0
                 - noise
                     .at_point(p * 11.0 + warp * 0.4 + Vec3::splat(3.3))
                     .abs();
-            let seams = smoothstep(0.93, 0.995, wide).max(0.7 * smoothstep(0.94, 0.995, fine));
-            let embers = 0.2 * smoothstep(0.8, 0.95, wide);
+            let along = 0.5 + 0.5 * noise.at_point(p * 6.0 + warp + Vec3::splat(7.7));
+            let open = 0.965 - 0.045 * active * (0.4 + 0.6 * along);
+            let seams = smoothstep(open, 0.997, wide) * (0.25 + 0.75 * active)
+                + 0.65 * smoothstep(0.972 - 0.02 * active, 0.997, fine) * active * active;
+            let embers = 0.18 * smoothstep(0.82, 0.95, wide) * active;
+            // Die Schollen sind gewölbt, die Nähte liegen tiefer.
+            let plates = 0.05 * smoothstep(0.55, 0.92, wide);
             Field {
-                height: base,
-                moist: seams.max(embers),
-                detail: noise.fbm(p * 20.0, 2),
+                height: base - plates,
+                moist: seams.max(embers).min(1.0),
+                detail: noise.fbm(p * 14.0, 3),
+                broad: active,
             }
         }
         Style::Gas => {
@@ -706,6 +770,7 @@ fn field(noise: &Noise, style: Style, p: Vec3) -> Field {
                 height: p.y + 0.05 * turbulence,
                 moist: noise.fbm(Vec3::new(p.x * 4.0, p.y * 30.0, p.z * 4.0), 4),
                 detail: 0.0,
+                broad: 0.0,
             }
         }
     }
@@ -792,12 +857,15 @@ struct Shade {
     glow: [f32; 3],
 }
 
-fn shade(input: &LookInput, levels: &Levels, cell: Field, p: Vec3) -> Shade {
+/// `slope`: wie stark sich die Höhe von einem Bildpunkt zum nächsten ändert. Damit wird
+/// die Küste über etwa einen Bildpunkt weich überblendet: Aus der Nähe läuft sie dann als
+/// glatte Linie statt in Treppen.
+fn shade(input: &LookInput, levels: &Levels, cell: Field, p: Vec3, slope: f32) -> Shade {
     let lat = p.y.clamp(-1.0, 1.0).asin().abs() / (PI / 2.0);
     let style = input.style;
     match style {
         Style::Garden | Style::Ocean | Style::Steppe | Style::Toxic => {
-            terrestrial(input, levels, cell, lat)
+            terrestrial(input, levels, cell, lat, slope)
         }
         Style::Ice => {
             let ice = mix3(
@@ -805,8 +873,15 @@ fn shade(input: &LookInput, levels: &Levels, cell: Field, p: Vec3) -> Shade {
                 [0.93, 0.95, 0.98],
                 cell.detail * 0.8 + 0.55,
             );
-            let lines = mix3([0.55, 0.40, 0.31], [0.36, 0.48, 0.60], lat);
-            let mut color = mix3(ice, lines, cell.moist * 0.85);
+            // Alter, glatter Panzer ist etwas grauer als frisch gerissener.
+            let ice = mix3(ice, [0.78, 0.80, 0.82], (1.0 - cell.broad) * 0.25);
+            // Risse blaugrau; nur in der Mitte der langen Linien ein Hauch Braun.
+            let lines = mix3(
+                [0.40, 0.50, 0.60],
+                [0.47, 0.47, 0.50],
+                smoothstep(0.6, 1.0, cell.moist),
+            );
+            let mut color = mix3(ice, lines, cell.moist * 0.8);
             let mut roughness = 0.55;
             // Offene Rinnen und Meeresöffnungen in den Senken.
             let open = smoothstep(levels.sea + 0.02, levels.sea - 0.015, cell.height);
@@ -841,25 +916,37 @@ fn shade(input: &LookInput, levels: &Levels, cell: Field, p: Vec3) -> Shade {
             }
         }
         Style::Lava => {
+            // Kruste: dunkler Basalt, alte Schollen grauer und heller, Asche auf den Höhen.
+            // Die Schollen tragen großräumige Töne (nach ihrer Höhe), das Feine nur leise.
+            let grain = smoothstep(-0.8, 0.8, cell.detail);
+            let tone = smoothstep(levels.lava, levels.high, cell.height);
             let crust = mix3(
-                [0.05, 0.045, 0.045],
-                [0.21, 0.17, 0.14],
-                smoothstep(-0.5, 0.6, cell.detail),
+                [0.045, 0.04, 0.035],
+                [0.21, 0.165, 0.13],
+                0.15 + 0.5 * tone + 0.35 * grain,
             );
+            let crust = mix3(crust, [0.27, 0.25, 0.24], (1.0 - cell.broad) * 0.3 * tone);
             let ash = smoothstep(levels.high - 0.1, levels.high + 0.05, cell.height);
-            let crust = mix3(crust, [0.34, 0.31, 0.29], ash * 0.7);
-            let lake = smoothstep(levels.lava + 0.01, levels.lava - 0.05, cell.height);
+            let crust = mix3(crust, [0.36, 0.33, 0.31], ash * 0.7);
+            // Seen: am Ufer kühler, innen heiß; auf ihnen schwimmt erstarrte Haut.
+            let shore = smoothstep(levels.lava + 0.01, levels.lava - 0.03, cell.height);
+            let inner = smoothstep(levels.lava - 0.02, levels.lava - 0.12, cell.height);
+            let skin = smoothstep(-0.05, 0.45, cell.detail) * (1.0 - 0.7 * inner);
+            let lake = shore * (0.55 + 0.45 * inner) * (1.0 - 0.65 * skin);
             let cracks = cell.moist * (1.0 - 0.7 * ash);
             let heat = lake.max(cracks).min(1.0);
             let glow = if heat < 0.35 {
-                mix3([0.0, 0.0, 0.0], [0.45, 0.04, 0.0], heat / 0.35)
+                mix3([0.0, 0.0, 0.0], [0.30, 0.025, 0.0], heat / 0.35)
             } else if heat < 0.75 {
-                mix3([0.45, 0.04, 0.0], [1.0, 0.32, 0.03], (heat - 0.35) / 0.4)
+                mix3([0.30, 0.025, 0.0], [0.95, 0.28, 0.03], (heat - 0.35) / 0.4)
             } else {
-                mix3([1.0, 0.32, 0.03], [1.0, 0.72, 0.25], (heat - 0.75) / 0.25)
+                mix3([0.95, 0.28, 0.03], [1.0, 0.66, 0.22], (heat - 0.75) / 0.25)
             };
+            let color = mix3(crust, [0.30, 0.07, 0.02], heat);
+            // Erstarrte Haut auf den Seen ist dunkel und rau.
+            let color = mix3(color, [0.08, 0.06, 0.05], shore * skin * 0.8);
             Shade {
-                color: mix3(crust, [0.30, 0.07, 0.02], heat),
+                color,
                 roughness: lerp(0.9, 0.55, heat),
                 glow,
             }
@@ -870,92 +957,117 @@ fn shade(input: &LookInput, levels: &Levels, cell: Field, p: Vec3) -> Shade {
 
 /// Gartenwelt, Ozeanwelt, Steppe und Giftwelt: Meer, Küste, Land nach Breite und
 /// Temperatur, Gebirge und Eis.
-fn terrestrial(input: &LookInput, levels: &Levels, cell: Field, lat: f32) -> Shade {
+fn terrestrial(input: &LookInput, levels: &Levels, cell: Field, lat: f32, slope: f32) -> Shade {
     let style = input.style;
     let elevation = ((cell.height - levels.sea) / (levels.high - levels.sea).max(1e-3)).max(0.0);
     let depth = ((levels.sea - cell.height) / (levels.sea - levels.low).max(1e-3)).max(0.0);
-    let local =
+    // Großräumige Kälte: Strömungen und Winde verschieben die Eisgrenze um viele
+    // Breitengrade, statt sie an einem festen Breitenkreis zu ziehen. Auf dem Meer wirkt
+    // das stärker als an Land, wo Höhe und Breite den Ausschlag geben.
+    let base =
         input.temperature + 16.0 - 52.0 * lat.powf(1.6) - 22.0 * elevation + 5.0 * cell.detail;
+    let local = base + 6.0 * cell.broad;
+    let local_sea = base + 15.0 * cell.broad;
     let (deep, mid, shelf) = match style {
-        Style::Toxic => ([0.16, 0.28, 0.02], [0.38, 0.58, 0.04], [0.70, 0.86, 0.14]),
+        Style::Toxic => ([0.09, 0.13, 0.02], [0.17, 0.25, 0.04], [0.27, 0.34, 0.08]),
         Style::Steppe => ([0.03, 0.12, 0.16], [0.05, 0.22, 0.26], [0.18, 0.42, 0.42]),
         Style::Ocean => ([0.01, 0.04, 0.14], [0.02, 0.12, 0.30], [0.08, 0.48, 0.55]),
         _ => ([0.01, 0.035, 0.12], [0.02, 0.10, 0.26], [0.06, 0.32, 0.42]),
     };
-    let mut glow = [0.0; 3];
-    let (mut color, mut roughness) = if cell.height < levels.sea {
-        let water = mix3(mid, deep, smoothstep(0.05, 0.6, depth));
-        let water = mix3(shelf, water, smoothstep(0.0, 0.07, depth));
-        (water, if style == Style::Toxic { 0.22 } else { 0.3 })
-    } else {
-        let land = match style {
-            Style::Toxic => {
-                let veg = smoothstep(-0.25, 0.3, cell.moist);
-                let low = mix3([0.44, 0.35, 0.19], [0.30, 0.31, 0.12], veg);
-                let high = mix3(low, [0.24, 0.21, 0.16], smoothstep(0.35, 0.7, elevation));
-                let sulfur = smoothstep(0.35, 0.7, cell.detail) * smoothstep(0.1, 0.4, elevation);
-                mix3(high, [0.86, 0.78, 0.24], sulfur * 0.75)
-            }
-            Style::Steppe => {
-                let wet = cell.moist - 0.05;
-                let rust = mix3(
-                    [0.62, 0.38, 0.22],
-                    [0.78, 0.62, 0.38],
-                    smoothstep(-0.3, 0.1, wet),
-                );
-                let grass = mix3(rust, [0.46, 0.45, 0.24], smoothstep(0.1, 0.45, wet));
-                let rock = mix3(grass, [0.45, 0.36, 0.30], smoothstep(0.4, 0.8, elevation));
-                // Salzpfannen in den Senken nahe dem Wasserspiegel.
-                let salt = smoothstep(0.06, 0.0, elevation) * smoothstep(-0.2, 0.3, cell.detail);
-                mix3(rock, [0.88, 0.86, 0.80], salt * 0.8)
-            }
-            _ => {
-                let wet_band = if lat < 0.75 {
-                    0.22 * (lat * 11.4).cos()
-                } else {
-                    0.0
-                };
-                let wet = cell.moist + wet_band;
-                let veg = smoothstep(-0.3, 0.25, wet);
-                let hot = smoothstep(18.0, 30.0, local);
-                let cold = smoothstep(8.0, -2.0, local);
-                let dry = mix3([0.55, 0.50, 0.28], [0.80, 0.66, 0.44], hot);
-                let lush = mix3([0.13, 0.27, 0.10], [0.08, 0.22, 0.06], hot);
-                let lush = mix3(lush, [0.15, 0.22, 0.14], cold);
-                let dry = mix3(dry, [0.44, 0.42, 0.34], cold);
-                let grass = mix3([0.30, 0.40, 0.16], [0.36, 0.38, 0.26], cold);
-                let land = if veg < 0.5 {
-                    mix3(dry, grass, veg * 2.0)
-                } else {
-                    mix3(grass, lush, (veg - 0.5) * 2.0)
-                };
-                mix3(land, [0.40, 0.36, 0.32], smoothstep(0.45, 0.85, elevation))
-            }
-        };
-        let land = scale3(land, 0.9 + 0.2 * (cell.detail * 0.5 + 0.5));
-        // Ein schmaler, heller Saum an der Küste.
-        let beach = if style == Style::Toxic {
-            0.0
-        } else {
-            smoothstep(0.02, 0.0, elevation) * 0.55
-        };
-        let land = mix3(land, [0.76, 0.70, 0.52], beach);
-        if input.settled > 0.0 && style != Style::Toxic {
-            let towns = smoothstep(0.42, 0.66, cell.detail)
-                * smoothstep(0.75, 0.2, elevation)
-                * smoothstep(-6.0, 6.0, local);
-            let lights = towns * (0.25 + 0.75 * input.settled.sqrt());
-            glow = scale3([1.0, 0.8, 0.52], lights);
+    // Wasser: vom Schelf ins Tiefe; die Säureseen der Giftwelt ohne hellen Saum.
+    let shallow = if style == Style::Toxic { 0.25 } else { 0.07 };
+    let water = mix3(mid, deep, smoothstep(0.05, 0.6, depth));
+    let water = mix3(shelf, water, smoothstep(0.0, shallow, depth));
+    let water_roughness = if style == Style::Toxic { 0.22 } else { 0.3 };
+    let land = match style {
+        Style::Toxic => {
+            let veg = smoothstep(-0.25, 0.3, cell.moist);
+            let low = mix3([0.30, 0.23, 0.12], [0.19, 0.21, 0.07], veg);
+            let high = mix3(low, [0.15, 0.13, 0.10], smoothstep(0.35, 0.7, elevation));
+            let sulfur = smoothstep(0.35, 0.7, cell.detail) * smoothstep(0.1, 0.4, elevation);
+            mix3(high, [0.78, 0.70, 0.20], sulfur * 0.6)
         }
-        (land, 0.88)
+        Style::Steppe => {
+            let wet = cell.moist - 0.05;
+            let rust = mix3(
+                [0.62, 0.38, 0.22],
+                [0.78, 0.62, 0.38],
+                smoothstep(-0.3, 0.1, wet),
+            );
+            let grass = mix3(rust, [0.46, 0.45, 0.24], smoothstep(0.1, 0.45, wet));
+            let rock = mix3(grass, [0.45, 0.36, 0.30], smoothstep(0.4, 0.8, elevation));
+            // Salzpfannen in den Senken nahe dem Wasserspiegel.
+            let salt = smoothstep(0.06, 0.0, elevation) * smoothstep(-0.2, 0.3, cell.detail);
+            mix3(rock, [0.88, 0.86, 0.80], salt * 0.8)
+        }
+        _ => {
+            let wet_band = if lat < 0.75 {
+                0.22 * (lat * 11.4).cos()
+            } else {
+                0.0
+            };
+            let wet = cell.moist + wet_band;
+            let veg = smoothstep(-0.3, 0.25, wet);
+            let hot = smoothstep(18.0, 30.0, local);
+            let cold = smoothstep(8.0, -2.0, local);
+            let dry = mix3([0.55, 0.50, 0.28], [0.80, 0.66, 0.44], hot);
+            let lush = mix3([0.13, 0.27, 0.10], [0.08, 0.22, 0.06], hot);
+            let lush = mix3(lush, [0.15, 0.22, 0.14], cold);
+            let dry = mix3(dry, [0.44, 0.42, 0.34], cold);
+            let grass = mix3([0.30, 0.40, 0.16], [0.36, 0.38, 0.26], cold);
+            let land = if veg < 0.5 {
+                mix3(dry, grass, veg * 2.0)
+            } else {
+                mix3(grass, lush, (veg - 0.5) * 2.0)
+            };
+            mix3(land, [0.40, 0.36, 0.32], smoothstep(0.45, 0.85, elevation))
+        }
     };
-    // Eis: an Land nach Temperatur und Höhe, auf dem Meer als Packeis.
+    let land = scale3(land, 0.9 + 0.2 * (cell.detail * 0.5 + 0.5));
+    // Ein schmaler, heller Saum an der Küste.
+    let beach = if style == Style::Toxic {
+        0.0
+    } else {
+        smoothstep(0.02, 0.0, elevation) * 0.55
+    };
+    let land = mix3(land, [0.76, 0.70, 0.52], beach);
+    // Stadtlichter: Wo Städte stehen, bestimmt das Gelände; wie hell sie leuchten, die
+    // Bevölkerung (am Material).
+    let mut glow = [0.0; 3];
+    if input.has_towns() {
+        let towns = smoothstep(0.42, 0.66, cell.detail)
+            * smoothstep(0.75, 0.2, elevation)
+            * smoothstep(-6.0, 6.0, local);
+        glow = scale3([1.0, 0.8, 0.52], towns);
+    }
+    // Land und Meer, über die Breite eines Bildpunkts überblendet.
+    let edge = slope.max(1e-4) * 0.7;
+    let ground = smoothstep(levels.sea - edge, levels.sea + edge, cell.height);
+    let mut color = mix3(water, land, ground);
+    let mut roughness = lerp(water_roughness, 0.88, ground);
+    glow = scale3(glow, ground);
+    // Eis: an Land nach Temperatur und Höhe, auf dem Meer als Packeis, das am Rand in
+    // Schollen zerbricht.
     let frost = if style == Style::Toxic {
         0.0
     } else {
-        smoothstep(-2.0, -9.0, local)
+        let land = smoothstep(-2.0, -9.0, local);
+        let pack = smoothstep(-2.0, -9.0, local_sea + 4.0 * cell.detail);
+        let floes = smoothstep(0.3, 0.7, pack + 0.3 * cell.detail);
+        lerp(floes, land, ground)
     };
-    color = mix3(color, [0.90, 0.93, 0.97], frost);
+    let ice = mix3(
+        [0.80, 0.85, 0.91],
+        [0.94, 0.96, 0.98],
+        smoothstep(-0.6, 0.6, cell.detail + 0.6 * cell.broad),
+    );
+    // Altes, dickes Packeis ist bläulicher und hat Presseisrücken.
+    let ice = mix3(
+        ice,
+        [0.74, 0.80, 0.88],
+        (1.0 - ground) * smoothstep(0.2, 0.6, cell.detail.abs()) * 0.5,
+    );
+    color = mix3(color, ice, frost);
     roughness = lerp(roughness, 0.6, frost);
     glow = scale3(glow, 1.0 - frost);
     Shade {
@@ -1099,9 +1211,16 @@ pub fn generate(
         let finished = rows_parallel(&mut rows, 1, cancel, |y, line| {
             let (albedo, rough, glow) = &mut line[0];
             let mut any = false;
+            let up = y.saturating_sub(1) * width;
+            let down = (y + 1).min(height - 1) * width;
             for x in 0..width {
                 let cell = fields[y * width + x];
-                let s = shade(input, &levels, cell, direction(x, y, width, height));
+                let left = fields[y * width + (x + width - 1) % width].height;
+                let right = fields[y * width + (x + 1) % width].height;
+                let slope = 0.5
+                    * ((right - left).abs()
+                        + (fields[down + x].height - fields[up + x].height).abs());
+                let s = shade(input, &levels, cell, direction(x, y, width, height), slope);
                 let at = x * 4;
                 albedo[at..at + 4].copy_from_slice(&[
                     byte(s.color[0]),
@@ -1126,52 +1245,72 @@ pub fn generate(
 
     // Normalen aus der Höhe (Meere glatt).
     let normal = (style.relief() > 0.0).then(|| {
-        let relief = style.relief();
         let ground: Vec<f32> = heights.iter().map(|h| h.max(levels.sea)).collect();
-        let mut normal = vec![0u8; width * height * 4];
-        let _ = rows_parallel(&mut normal, width * 4, cancel, |y, line| {
-            let polar = PI * (y as f32 + 0.5) / height as f32;
-            let east_step = TAU * polar.sin().max(0.02) / width as f32;
-            let south_step = PI / height as f32;
-            let up = y.saturating_sub(1);
-            let down = (y + 1).min(height - 1);
-            for x in 0..width {
-                let left = (x + width - 1) % width;
-                let right = (x + 1) % width;
-                let dx = (ground[y * width + right] - ground[y * width + left]) * relief
-                    / (2.0 * east_step);
-                let dy = (ground[down * width + x] - ground[up * width + x]) * relief
-                    / ((down - up).max(1) as f32 * south_step);
-                let n = Vec3::new(-dx, -dy, 1.0).normalize();
-                let at = x * 4;
-                line[at..at + 4].copy_from_slice(&[
-                    byte(n.x * 0.5 + 0.5),
-                    byte(n.y * 0.5 + 0.5),
-                    byte(n.z * 0.5 + 0.5),
-                    255,
-                ]);
-            }
-        });
+        let normal = normal_map(&ground, width, style.relief(), cancel);
         Layer::new(width, height, normal, false)
     });
     if cancel.load(Ordering::Relaxed) {
         return None;
     }
 
+    // Wolken sind weich: Die halbe Auflösung genügt und kostet ein Viertel der Zeit und
+    // des Speichers.
     let clouds = match input.clouds() {
-        Some(look) => Some(clouds(input, look, (width, height), cancel)?),
+        Some(look) => Some(clouds(input, look, (width / 2, height / 2), cancel)?),
         None => None,
     };
 
+    // Die Glut braucht die volle Auflösung (feine Nähte); die Stadtlichter nicht. Sie
+    // stehen halb so groß da: viermal weniger Speicher.
+    let (emissive, lights) = if !glows {
+        (None, None)
+    } else if style == Style::Lava {
+        (Some(Layer::new(width, height, glow, true)), None)
+    } else {
+        let half = halve(width, height, &glow);
+        (None, Some(Layer::new(width / 2, height / 2, half, true)))
+    };
     Some(Surface {
         albedo: Layer::new(width, height, albedo, true),
         normal,
         // Die Rauheit braucht keine volle Auflösung: halb so groß, viermal weniger zum
         // Hochladen.
         roughness: Layer::new(width / 2, height / 2, halve(width, height, &rough), false),
-        emissive: glows.then(|| Layer::new(width, height, glow, true)),
+        emissive,
+        lights,
         clouds,
     })
+}
+
+/// Normalen im Tangentenraum aus einer Höhenkarte (RGBA8, Stufe 0). In Längsrichtung
+/// laufen die Nachbarn über die Datumsgrenze um.
+fn normal_map(ground: &[f32], width: usize, relief: f32, cancel: &AtomicBool) -> Vec<u8> {
+    let height = ground.len() / width;
+    let mut normal = vec![0u8; width * height * 4];
+    let _ = rows_parallel(&mut normal, width * 4, cancel, |y, line| {
+        let polar = PI * (y as f32 + 0.5) / height as f32;
+        let east_step = TAU * polar.sin().max(0.02) / width as f32;
+        let south_step = PI / height as f32;
+        let up = y.saturating_sub(1);
+        let down = (y + 1).min(height - 1);
+        for x in 0..width {
+            let left = (x + width - 1) % width;
+            let right = (x + 1) % width;
+            let dx =
+                (ground[y * width + right] - ground[y * width + left]) * relief / (2.0 * east_step);
+            let dy = (ground[down * width + x] - ground[up * width + x]) * relief
+                / ((down - up).max(1) as f32 * south_step);
+            let n = Vec3::new(-dx, -dy, 1.0).normalize();
+            let at = x * 4;
+            line[at..at + 4].copy_from_slice(&[
+                byte(n.x * 0.5 + 0.5),
+                byte(n.y * 0.5 + 0.5),
+                byte(n.z * 0.5 + 0.5),
+                255,
+            ]);
+        }
+    });
+    normal
 }
 
 /// Wolkendecke: verwirbelte Felder, dichter in den Zonen der Tiefdruckgürtel.
@@ -1184,36 +1323,39 @@ fn clouds(
     let noise = Noise::new(input.seed ^ 0xc10d);
     let banded = matches!(input.atmosphere, Atmosphere::Toxic | Atmosphere::Corrosive);
     // Wirbelstürme: Um ihre Mitte wird der Raum verdreht, die Wolken ziehen Spiralen.
+    // Wenige und große; kleine Wirbel sähen aus wie einzelne Bögen.
     let mut dice = Dice(input.seed ^ 0x5717);
-    let storms: Vec<(Vec3, f32, f32)> = (0..5)
+    let storms: Vec<(Vec3, f32, f32)> = (0..3)
         .map(|_| {
             let lat = (0.25 + 0.5 * dice.unit()) * if dice.unit() < 0.5 { -1.0 } else { 1.0 };
             let lon = dice.unit() * TAU;
             let center = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
             // Drehsinn nach Halbkugel.
-            (center, 0.07 + 0.08 * dice.unit(), 3.5 * lat.signum())
+            (center, 0.13 + 0.09 * dice.unit(), 2.4 * lat.signum())
         })
         .collect();
     let mut values = vec![0.0f32; width * height];
     let mut fine = vec![0.0f32; width * height];
-    let mut both: Vec<(&mut [f32], &mut [f32])> = values
+    let mut thin = vec![0.0f32; width * height];
+    let mut all: Vec<((&mut [f32], &mut [f32]), &mut [f32])> = values
         .chunks_mut(width)
         .zip(fine.chunks_mut(width))
+        .zip(thin.chunks_mut(width))
         .collect();
-    let finished = rows_parallel(&mut both, 1, cancel, |y, line| {
-        let (values, fine) = &mut line[0];
+    let finished = rows_parallel(&mut all, 1, cancel, |y, line| {
+        let ((values, fine), thin) = &mut line[0];
         for x in 0..width {
             let mut p = direction(x, y, width, height);
             for (center, size, turns) in &storms {
                 let near = p.dot(*center);
-                if near > 0.9 {
+                if near > 0.8 {
                     let distance = near.clamp(-1.0, 1.0).acos() / size;
                     let angle = turns * (-distance * distance).exp();
                     p = Quat::from_axis_angle(*center, angle) * p;
                 }
             }
             let lat = p.y.clamp(-1.0, 1.0).asin().abs() / (PI / 2.0);
-            let swirl = noise.warped(p, 2.8, 0.8, 7);
+            let swirl = noise.warped(p, 2.8, 0.8, 6);
             let streaks = if banded {
                 0.3 * noise.fbm(Vec3::new(p.x * 2.0, p.y * 10.0, p.z * 2.0), 3)
             } else {
@@ -1221,7 +1363,12 @@ fn clouds(
             };
             let belts = 0.12 * (lat * 11.0).cos() + 0.1 * smoothstep(0.55, 0.75, lat);
             values[x] = swirl + streaks + belts;
-            fine[x] = noise.fbm(p * 11.0 + Vec3::splat(4.4), 5);
+            fine[x] = noise.fbm(p * 11.0 + Vec3::splat(4.4), 4);
+            // Feine Schleier in Längsrichtung gezogen: Zirren zwischen den Feldern.
+            thin[x] = noise.fbm(
+                Vec3::new(p.x * 3.0, p.y * 11.0, p.z * 3.0) + Vec3::splat(9.1),
+                3,
+            );
         }
     });
     if !finished {
@@ -1230,17 +1377,26 @@ fn clouds(
     let threshold = area_quantile(&values, width, 1.0 - cover);
     let peak = area_quantile(&values, width, 0.995).max(threshold + 1e-3);
     let mut data = vec![0u8; width * height * 4];
+    // Dünne Schleier und Dunst nur über Wasserwelten; die Decke giftiger Luft ist dicht
+    // genug.
+    let veil = if banded { 0.0 } else { 0.22 * opacity };
+    let mist = if banded { 0.0 } else { 0.03 };
+    // Eine Decke ist überall dicht, Wolkenfelder werden es erst zu ihren Kernen hin.
+    let (floor, soft) = if banded { (0.75, 0.1) } else { (0.35, 0.32) };
     for (index, value) in values.iter().enumerate() {
         // Die Feinstruktur verschiebt den Rand (fransig); innen wächst die Dichte zu den
-        // Kernen hin, so bleibt Struktur in den Feldern.
+        // Kernen hin, so bleibt Struktur in den Feldern. Der Rand läuft weit aus.
         let detail = fine[index];
         let density = (*value + 0.25 * detail - threshold) / (peak - threshold);
-        let edge = smoothstep(0.0, 0.12, density);
-        let core = 0.5 + 0.5 * smoothstep(0.05, 0.6, density);
-        let texture = 0.8 + 0.2 * smoothstep(-0.4, 0.4, detail);
-        let alpha = edge * core * texture * opacity;
-        // Dichte Wolken sind innen etwas grauer: So zeichnet sich ihre Form ab.
-        let shade = 1.0 - 0.1 * smoothstep(0.6, 1.0, alpha / opacity.max(1e-3));
+        let edge = smoothstep(-0.04, soft, density);
+        let core = floor + (1.0 - floor) * smoothstep(0.02, 0.7, density);
+        let texture = 0.78 + 0.22 * smoothstep(-0.4, 0.4, detail);
+        let thick = edge * core * texture * opacity;
+        let cirrus = veil * smoothstep(0.15, 0.65, thin[index]) * (0.6 + 0.4 * detail.abs());
+        let alpha = 1.0 - (1.0 - thick) * (1.0 - cirrus) * (1.0 - mist);
+        // Dünne Ränder sind grauer als die dichten, hellen Kerne: So bekommen die Felder
+        // Tiefe.
+        let shade = 0.8 + 0.2 * smoothstep(0.0, 0.75, density);
         let at = index * 4;
         data[at..at + 4].copy_from_slice(&[
             byte(color[0] * shade),
@@ -1273,7 +1429,6 @@ mod tests {
             temperature,
             water,
             atmosphere,
-            settled: 0.5,
             tint: [0.8, 0.66, 0.5],
         }
     }
@@ -1358,13 +1513,22 @@ mod tests {
         let lava = make(Style::Lava);
         let glow = lava.emissive.expect("die Glutwelt leuchtet");
         assert!(glow.mean()[0] > 0.02);
+        assert!(lava.lights.is_none(), "auf der Glut stehen keine Städte");
         let rock = make(Style::Rock);
         assert!(rock.clouds.is_none());
         assert!(rock.emissive.is_none());
+        assert!(rock.lights.is_none());
         assert!(input(Style::Rock).haze().is_none());
         let garden = make(Style::Garden);
         assert!(garden.clouds.is_some());
+        assert!(garden.emissive.is_none());
+        let lights = garden.lights.expect("Stadtlichter der Gartenwelt");
+        assert_eq!((lights.width, lights.height), (SMALL.0 / 2, SMALL.1 / 2));
         assert!(input(Style::Garden).haze().is_some());
+        // Dünne Luft trägt keine Wolken, giftige eine fast geschlossene Decke.
+        assert!(make(Style::Steppe).clouds.is_none());
+        let toxic = make(Style::Toxic).clouds.expect("Decke der Giftwelt");
+        assert!(toxic.mean()[3] > 0.5, "{:?}", toxic.mean());
         assert!(
             make(Style::Gas).normal.is_none(),
             "Gasriesen haben kein Relief"
@@ -1422,9 +1586,55 @@ mod tests {
             if let Some(layer) = &surface.emissive {
                 save(layer, format!("{name}_leuchten.png"));
             }
+            if let Some(layer) = &surface.lights {
+                save(layer, format!("{name}_lichter.png"));
+            }
             if let Some(layer) = &surface.normal {
                 save(layer, format!("{name}_normalen.png"));
             }
+        }
+    }
+
+    #[test]
+    fn the_normals_run_over_the_date_line() {
+        // Höhe nach dem Sinus der Länge: Die Steigung in der ersten Spalte gleicht der in
+        // der letzten (beide liegen gleich weit neben dem Nullmeridian). Liest die erste
+        // Spalte ihren westlichen Nachbarn nicht über die Datumsgrenze, ist sie nur halb so
+        // steil.
+        let (width, height) = (256, 8);
+        let ground: Vec<f32> = (0..width * height)
+            .map(|index| (TAU * ((index % width) as f32 + 0.5) / width as f32).sin())
+            .collect();
+        let normal = normal_map(&ground, width, 0.2, &AtomicBool::new(false));
+        let pixel = |x: usize, y: usize| &normal[(y * width + x) * 4..(y * width + x) * 4 + 4];
+        for y in 0..height {
+            assert_eq!(pixel(0, y), pixel(width - 1, y), "Zeile {y}");
+            // Und sie ist wirklich geneigt: nach Westen hin tiefer.
+            assert!(pixel(0, y)[0] < 120, "{:?}", pixel(0, y));
+        }
+    }
+
+    #[test]
+    fn every_kind_of_the_game_data_has_its_own_style() {
+        let data = GameData::load_workspace().expect("Spieldaten");
+        let styles: Vec<(String, Style)> = data
+            .planet_kinds
+            .iter()
+            .map(|kind| (kind.key.clone(), Style::of_key(&kind.key)))
+            .collect();
+        for (key, style) in &styles {
+            assert_eq!(
+                *style == Style::Rock,
+                key == "felswelt",
+                "{key} ist {style:?}"
+            );
+        }
+        for style in Style::ALL {
+            assert_eq!(
+                styles.iter().filter(|entry| entry.1 == style).count(),
+                1,
+                "{style:?}"
+            );
         }
     }
 

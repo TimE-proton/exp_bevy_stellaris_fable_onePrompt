@@ -1274,34 +1274,6 @@ pub fn star_field(count: usize, radius: f32, mut sample: impl FnMut() -> f32) ->
 
 // --- Belagerung -----------------------------------------------------------------------
 
-/// Kugel mit Radius 1 aus Breiten- und Längenkreisen, y zeigt zum Pol. `paint` färbt jeden
-/// Punkt der Oberfläche. Anders als die Rümpfe ist sie glatt: Die Normale jeder Ecke zeigt
-/// vom Mittelpunkt weg.
-pub fn globe(rows: usize, columns: usize, mut paint: impl FnMut(Vec3) -> Paint) -> MeshData {
-    let point = |row: usize, column: usize| {
-        let polar = std::f32::consts::PI * row as f32 / rows as f32;
-        let around = TAU * column as f32 / columns as f32;
-        Vec3::new(
-            polar.sin() * around.cos(),
-            polar.cos(),
-            polar.sin() * around.sin(),
-        )
-    };
-    let mut mesh = MeshData::default();
-    for row in 0..rows {
-        for column in 0..columns {
-            let a = point(row, column);
-            let b = point(row + 1, column);
-            let c = point(row + 1, column + 1);
-            let d = point(row, column + 1);
-            mesh.tri_painted([a, c, b], [paint(a), paint(c), paint(b)]);
-            mesh.tri_painted([a, d, c], [paint(a), paint(d), paint(c)]);
-        }
-    }
-    mesh.normals = mesh.positions.clone();
-    mesh
-}
-
 /// Orbitalstation, etwa zwei Einheiten breit: Kern mit Kuppel, Ausleger und zwei Tafeln
 /// in der Farbe der Gemeinschaft. Die Achse des Kerns ist y.
 pub fn station() -> MeshData {
@@ -1431,12 +1403,15 @@ pub fn uv_globe(rows: usize, columns: usize) -> Mesh {
         for column in 0..columns as u32 {
             let a = row * stride + column;
             let b = (row + 1) * stride + column;
-            // Von außen gesehen gegen den Uhrzeigersinn.
-            if row != 0 {
+            // Von außen gesehen gegen den Uhrzeigersinn. In der ersten Reihe ist `a` die
+            // Polecke dieser Spalte, in der letzten `b`: Jedes Poldreieck nimmt die Polecke
+            // seiner eigenen Spalte.
+            if row == 0 {
+                indices.extend([a, b + 1, b]);
+            } else if row + 1 == rows as u32 {
                 indices.extend([a, a + 1, b]);
-            }
-            if row + 1 != rows as u32 {
-                indices.extend([a + 1, b + 1, b]);
+            } else {
+                indices.extend([a, a + 1, b, a + 1, b + 1, b]);
             }
         }
     }
@@ -1455,6 +1430,98 @@ pub fn uv_globe(rows: usize, columns: usize) -> Mesh {
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+
+    /// Lage, Texturkoordinaten und Tangenten der Texturkugel.
+    fn globe_data(mesh: &Mesh) -> (Vec<Vec3>, Vec<[f32; 2]>, Vec<[f32; 4]>, Vec<u32>) {
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("Lagen");
+        };
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("Texturkoordinaten");
+        };
+        let Some(VertexAttributeValues::Float32x4(tangents)) =
+            mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+        else {
+            panic!("Tangenten");
+        };
+        let Some(bevy::mesh::Indices::U32(indices)) = mesh.indices() else {
+            panic!("Indizes");
+        };
+        (
+            positions.iter().map(|p| Vec3::from_array(*p)).collect(),
+            uvs.clone(),
+            tangents.clone(),
+            indices.clone(),
+        )
+    }
+
+    #[test]
+    fn the_texture_globe_maps_like_the_surface_and_its_poles_do_not_twist() {
+        let (rows, columns) = (12, 24);
+        let (positions, uvs, tangents, indices) = globe_data(&uv_globe(rows, columns));
+        for ((p, uv), tangent) in positions.iter().zip(&uvs).zip(&tangents) {
+            // Dieselbe Abbildung wie `planet_look::direction`: v vom Nord- zum Südpol,
+            // u mit der Länge von x über z.
+            assert!((p.length() - 1.0).abs() < 1e-5);
+            assert!(
+                (p.y.acos() / std::f32::consts::PI - uv[1]).abs() < 1e-5,
+                "{p} {uv:?}"
+            );
+            if p.y.abs() < 0.9999 {
+                let around = p.z.atan2(p.x).rem_euclid(TAU) / TAU;
+                let du = (around - uv[0]).rem_euclid(1.0);
+                assert!(!(1e-4..=1.0 - 1e-4).contains(&du), "{p} {uv:?}");
+                // Tangente nach Osten: in Richtung wachsender u.
+                let east = Vec3::new(-p.z, 0.0, p.x).normalize();
+                let t = Vec3::new(tangent[0], tangent[1], tangent[2]);
+                assert!(t.dot(east) > 0.9999, "{t} gegen {east}");
+                assert_eq!(tangent[3], 1.0);
+            }
+        }
+        let mut poles = 0;
+        for triangle in indices.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| positions[triangle[k] as usize]);
+            // Von außen gesehen gegen den Uhrzeigersinn.
+            assert!((b - a).cross(c - a).dot(a + b + c) > 0.0, "{triangle:?}");
+            // Die Polecke liegt in der Mitte zwischen den beiden anderen Ecken.
+            for k in 0..3 {
+                let pole = triangle[k] as usize;
+                if positions[pole].y.abs() > 0.9999 {
+                    poles += 1;
+                    let others: Vec<f32> = (0..3)
+                        .filter(|other| *other != k)
+                        .map(|other| uvs[triangle[other] as usize][0])
+                        .collect();
+                    let middle = (others[0] + others[1]) / 2.0;
+                    assert!((uvs[pole][0] - middle).abs() < 1e-5, "{triangle:?}");
+                }
+            }
+        }
+        assert_eq!(poles, 2 * columns);
+        assert_eq!(indices.len() / 3, 2 * columns * (rows - 1));
+    }
+
+    #[test]
+    fn a_zone_cap_lies_on_the_sphere_within_its_angle() {
+        let angle = 0.3;
+        let cap = zone_cap(angle);
+        assert!(cap.triangle_count() > 0);
+        for p in &cap.positions {
+            assert!((p.length() - 1.0).abs() < 1e-5, "{p}");
+            assert!(p.y.clamp(-1.0, 1.0).acos() <= angle + 1e-4, "{p}");
+        }
+        // Die Mitte liegt am Pol, der Rand auf dem vollen Winkel.
+        let widest = cap
+            .positions
+            .iter()
+            .map(|p| p.y.clamp(-1.0, 1.0).acos())
+            .fold(0.0f32, f32::max);
+        assert!((widest - angle).abs() < 1e-4);
+        assert!(cap.positions.iter().any(|p| p.y > 0.9999));
+    }
 
     /// Erwartete halbe Breite und Höhenbereich je Klasse (normiert). Die Zahlen halten den
     /// Charakter der Umrisse fest: Träger breit und flach, Kreuzer schmal, Fregatte gedrungen.

@@ -436,14 +436,21 @@ Partie an, und „Ausgang der Belagerung“ nennt in den Worten der Chronik, was
 die Tafel links zeigt danach den „Stand am Ende der Belagerung“, ohne Prognose.
 
 Jede Welt sieht nach ihrer Art aus, deterministisch aus ihrer Kennung erzeugt: Garten-
-und Ozeanwelten mit Meeren, Küsten, Vegetation nach Breite und Temperatur und Eis,
-Steppen trocken mit Salzpfannen, Eiswelten mit Rissen und offenen Rinnen, Felswelten
-voller Krater, Glutwelten mit glühenden Nähten und Lavaseen, Giftwelten mit sauren
-Meeren, Gasriesen mit Bändern und Wirbelstürmen. Welten mit Luft tragen Wolken und
-einen Saum in der Farbe ihrer Atmosphäre, luftlose nicht. Die Sonne steht seitlich:
-Die Nachtseite ist dunkel, Glut und Stadtlichter leuchten darin. Die Oberfläche
-(Texturen 2048×1024) entsteht abseits des Hauptfadens; bis sie fertig ist, zeigt die
-Welt ein Vorabbild, beim zweiten Besuch ist sie sofort da. Kriegsschäden dunkeln sie ab.
+und Ozeanwelten mit Meeren, Küsten, Vegetation nach Breite und Temperatur und Eis, das
+Strömungen weit vor- und zurückschieben und das am Rand in Schollen zerbricht, Steppen
+trocken mit Salzpfannen, Eiswelten mit langen Bruchlinien und offenen Rinnen,
+Felswelten voller Krater, Glutwelten mit tätigen Gebieten, glühenden Nähten und
+Lavaseen unter erstarrter Haut, Giftwelten mit sauren Meeren unter einer dichten,
+gelblichen Wolkendecke, Gasriesen mit Bändern und Wirbelstürmen. Welten mit
+atembarer oder dichter Luft tragen Wolken, Schleier und einen Saum in der Farbe ihrer
+Atmosphäre; dünne Luft hat nur den Saum, luftlose Welten haben nichts davon. Die Sonne
+steht seitlich: Die Nachtseite ist dunkel, die Glut leuchtet darin, und Stadtlichter
+gehen nur dort an, wo es Nacht ist; wie hell, folgt der Bevölkerung. Die Oberfläche
+(Texturen 2048×1024, Wolken und Stadtlichter halb so groß) entsteht abseits des
+Hauptfadens; bis sie fertig ist, zeigt die Welt ein Vorabbild, beim zweiten Besuch ist
+sie sofort da, auch wenn sich die Bevölkerung inzwischen geändert hat. Kriegsschäden
+dunkeln sie ab und löschen Stadtlichter. Aus nächster Nähe bleibt das Gelände weich:
+Die Auflösung der Textur reicht dort nicht mehr für feine Einzelheiten.
 
 **Ende einer Gemeinschaft.** Verliert eine Gemeinschaft ihre letzte Welt oder geht sie
 in einer anderen auf, meldet es das Fenster „Eine Gemeinschaft endet“ mit dem Eintrag

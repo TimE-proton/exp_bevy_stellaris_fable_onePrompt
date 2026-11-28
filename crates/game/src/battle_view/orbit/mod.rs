@@ -13,6 +13,7 @@
 
 mod atmosphere;
 pub mod hud;
+mod night_lights;
 pub mod planet_look;
 mod scene;
 
@@ -536,6 +537,7 @@ pub(super) fn plugin(app: &mut App) {
         );
     scene::plugin(app);
     atmosphere::plugin(app);
+    night_lights::plugin(app);
 }
 
 #[cfg(test)]
