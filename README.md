@@ -751,8 +751,9 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `military`.
 
 ## Militärische Führung der KI
 
-Ob Krieg oder Frieden herrscht, entscheidet die KI noch nicht (das kommt mit der
-Diplomatie); Kriege erklären der Spieler oder ein Drehbuch. In beidem verhält sie sich
+Kriege erklärt die KI noch nicht selbst; das tun der Spieler oder ein Drehbuch. Frieden
+nimmt sie über Vorschläge an oder lehnt ihn ab (siehe „Diplomatie und verborgene
+Haltungen“). In beidem verhält sie sich
 nach einer Grundhaltung. Befehle erteilt sie nur über `crates/sim/src/ai/levers.rs`, nie
 für die Gemeinschaft des Spielers und nur, wenn sich etwas ändern soll.
 
@@ -970,7 +971,9 @@ Die Stellschrauben stehen in `assets/data/balance.ron` unter `research`.
 
 In einer Partie rufen die Abspaltung und die Eroberung diese Vorgänge auf: Jede eroberte
 Welt wechselt über `transfer_planet` den Besitzer, auch eine Hauptwelt und die letzte
-Welt einer Gemeinschaft. Vereinigung und Unterstellung folgen mit der Diplomatie.
+Welt einer Gemeinschaft. Ein angenommener Vorschlag ruft sie ebenso auf: Abtretung im
+Frieden (`transfer_planet`, genommen), Unterwerfung und Schutz (`subordinate`),
+Vereinigung (`absorb`, beigetreten).
 
 ## Belagerung
 
@@ -1166,6 +1169,69 @@ jedem Hafen liegt. `crates/sim/tests/siege_ai.rs` prüft gestellte Lagen:
 Garnisonsbefehle, Entsatz und seinen Vorrang, den Rückzug einer belagernden Flotte und
 das Ausschiffen nach einem Feldzug.
 
+## Diplomatie und verborgene Haltungen
+
+Kriege und Verträge bestehen zwischen Häuptern: Wer einer Schutzmacht oder einem Sieger
+untersteht, teilt dessen Kriege und Verträge und schlägt selbst nichts vor. Alles, was
+eine Gemeinschaft diplomatisch tun kann, ist ein Befehl, für den Spieler wie für die KI:
+`Propose` (Vertrag, Frieden zu Bedingungen, Schutz, Vereinigung), `AnswerProposal`,
+`WithdrawProposal`, `CancelTreaty`, `SetEmbargo`, `SetTransit`, `DeclareWarWithAim`,
+`ReleaseWard`. Die Hebel stehen in `assets/data/diplomacy.ron`.
+
+- **Verträge** in sechs Stufen: Handel; darauf Nichtangriff, Forschung (Zuschlag auf die
+  Forschungspunkte) und Investition; auf Nichtangriff Verteidigung (Durchfahrt,
+  Nachschub und Geleit beim Partner); auf Investition und Verteidigung die Union. Eine
+  Kündigung beendet den Vertrag und alles, was auf ihm aufbaut, nach `notice_days`.
+  Ein Krieg unter Nichtangriff, Verteidigung oder Union ist ein Vertragsbruch: Alle
+  Verträge des Paares erlöschen, das Opfer grollt, die Kurse des Brechenden fallen.
+- **Vorschläge** bleiben `proposal_days` offen; je Paar und Art einer. Nach einer
+  Ablehnung ruht derselbe Vorschlag. Selbst trägt die KI noch keine Bindungen an
+  und bietet keinen Frieden an (`ai_openings` und `ai_peace_offers` stehen aus; das kommt
+  mit ihrer strategischen Führung); ihre Kriege enden durch Spieler, Drehbuch oder das
+  Diktat. Sie antwortet nach drei bis zehn Tagen und nennt
+  einen Grund (Misstrauen, zu wenig Verflechtung, kulturelle Ferne, Stufe zu hoch, wir
+  liegen vorn, Bedingungen zu hart, Eigenständigkeit).
+- **Embargo** schließt Häfen und Durchfahrt für die Frachter beider Seiten und verbietet
+  Anteilskäufe; unter einem Handelsvertrag gibt es keins. **Durchfahrt**: Mit
+  geschlossenen Grenzen (`closed_borders`) betreten Flotten fremdes Gebiet nur im eigenen
+  Verbund, bei Verbündeten (Verteidigung, Union), im Krieg oder mit gewährter
+  Durchfahrt; ihre Wege meiden alles andere. Der Schalter steht vorerst aus, bis die
+  militärische Führung der KI ihre Wege danach plant. Nachschub und Geleit gibt es in
+  den Häfen jedes Verbündeten.
+- **Krieg** trägt ein Ziel (begrenzt oder Unterwerfung) und eine Bilanz aus genommener
+  Bevölkerung, verlorenem Flottenwert und Kriegsmüdigkeit. Je größer der Vorsprung,
+  desto mehr darf der Sieger fordern: ab 20 Punkten Tribut und Abtretungen, ab 55 (oder
+  mit der eroberten Hauptwelt) die Unterwerfung, als Angreifer nur mit diesem Ziel. Wer
+  nachgibt, darf jederzeit alles anbieten. Abgetretene und eroberte Welten gelten als
+  genommen. Nach `war_max_months` (16 Jahre) endet ein Krieg von selbst: Dann diktiert
+  der Vorsprung, es sei denn, beide sind erschöpft; Kriegsmüdigkeit treibt bis dahin die
+  Annahme von Friedensvorschlägen.
+- **Schutz und Vereinigung**: Ein Schützling tritt gewollt unter eine Schutzmacht (seine
+  Welten gelten als beigetreten) und zahlt einen kleinen Tribut, ein Vasall einen
+  größeren. Halten Union, Verflechtung (`merge_tie`) und kulturelle Nähe
+  (`merge_affinity`) lange genug, können zwei sich vereinigen: Die geführte
+  Gemeinschaft geht mit allen Welten als beigetreten in der führenden auf.
+- **Spannung** 0..100 je Paar mit benannten Gründen (Krieg, Embargo, Vertragsbruch,
+  Eroberer, kulturelle Ferne, Verträge, Verflechtung), monatlich neu gemessen, dazu
+  Beteiligungen und Abhängigkeit beider Seiten.
+
+**Verborgene Haltungen.** Jede KI-Gemeinschaft folgt einer Mischung aus vier
+Grundhaltungen: kooperativ, opportunistisch, misstrauisch, expansionistisch. Sie beginnt
+mit einer als Schwerpunkt und treibt unter öffentlichem Druck (Verflechtung,
+Gelegenheit, Bedrohung, Not) langsam davon weg; ein erlittener Vertragsbruch macht sie
+sofort misstrauischer. Eine einzige Wahlfunktion (`choice_probs`) entscheidet für die KI
+und bewertet für jeden Beobachter jede öffentliche Tat an den vier reinen Profilen: Wer
+eine Kriegserklärung, ein Kriegsziel, einen Antrag oder eine Antwort beobachtet,
+verschiebt sein Dossier zu der Haltung, die die Tat am besten erklärt. Die Einschätzung
+ist ein Schluss aus Taten, nie ein Blick in die Führung; die Haltungen sind außerhalb
+der KI nicht lesbar, und der Spieler wird beurteilt wie jede KI. Fremde Flotten und
+Technik kennt niemand genau: Schätzungen sind Spannen, die mit dem Einblick schrumpfen.
+
+Das Lesemodell für die Oberfläche ist `sim::diplomacy::view`: `relation_view` und
+`overview` zeigen je Paar, was der Betrachter wissen darf (Stufenleiter mit Gründen,
+Krieg mit Bilanz und zulässigen Bedingungen, Spannung, Verflechtung, offene Vorschläge,
+Dossier mit Indizien, Schätzungen), `inbox` die offenen und erledigten Vorschläge.
+
 ## Die beiden Enden
 
 Einmal im Monat wird gezählt. Souverän ist eine freie Gemeinschaft, deren Verbund
@@ -1195,7 +1261,7 @@ beiden Spalten der CSV (`ending`, `ending_year`). Die Stellschrauben stehen in
 | 3 | Aktienmarkt, Besitzverteilung, Zusammenhalt, Abspaltung | fertig |
 | 4 | Raumkampf mit Schiffsklassen und Modulen | fertig: Flotten und Werften, Staatshaushalt, Forschung, Gefechte der Partie in der 3D-Ansicht, militärische Führung der KI, Stilllegen von Schiffen |
 | 5 | Belagerung, Orbitalgeschütze, Boden- und Untergrundkampf | fertig: Tagesrechner, Belagerung über Befehle in fünf Phasen, Eroberung über den gemeinsamen Besitzwechsel bis zum Ende einer Gemeinschaft, Verteidigung als Anspruch des Staatshaushalts, Folgen für Produktion, Kurse, Zusammenhalt und Kriegsmüdigkeit, Belagerung und Verteidigung durch die KI; im Spiel Fenster „Belagerung“, Tafel der Verteidigung, Marken auf der Karte, Orbitansicht, Meldung vom Ende einer Gemeinschaft |
-| 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | offen |
+| 6 | KI-Gemeinschaften, Diplomatie, verborgene Dispositionen, Enden | in Arbeit: Verträge, Vorschläge, Embargo, Durchfahrt, Kriegsziele und Friedensbedingungen, Schutz und Vereinigung, verborgene Haltungen mit Dossiers, Antworten der KI; offen: strategische KI, Fenster im Spiel |
 | 7 | Speichern/Laden im Menü, Balance, Feinschliff, Tutorial | offen |
 
 Bereits in Meilenstein 1 enthalten, weil spätere Stufen darauf bauen: Gemeinschaften mit
