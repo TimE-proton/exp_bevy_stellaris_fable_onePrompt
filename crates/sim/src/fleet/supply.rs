@@ -58,6 +58,26 @@ pub fn supply_base(
             .is_none_or(|holder| holder == owner || !diplomacy.at_war(owner, holder))
 }
 
+/// Kann eine Flotte von `owner` in diesem System Munition und Treibstoff fassen? In jedem
+/// eigenen Hafen ([`supply_base`]) und im Hafen eines Verbündeten (derselbe Verbund, also
+/// Schutzmacht und Schützlinge, oder ein Verteidigungs- oder Unionspartner), solange das
+/// System keinem Kriegsgegner untersteht. Gekauft wird am Markt des Systems.
+pub fn supply_port(
+    galaxy: &Galaxy,
+    diplomacy: &Diplomacy,
+    owner: PolityId,
+    system: SystemId,
+) -> bool {
+    supply_base(galaxy, diplomacy, owner, system)
+        || (galaxy.planets_in(system).any(|planet| {
+            planet
+                .owner
+                .is_some_and(|host| host != owner && diplomacy.allied(owner, host))
+        }) && galaxy
+            .system_owner(system)
+            .is_none_or(|holder| !diplomacy.at_war(owner, holder)))
+}
+
 /// Unter diesem Inhalt des knappsten Tanks gilt eine Flotte als leer gefahren.
 pub const DRY_FUEL: f32 = 0.05;
 
@@ -75,7 +95,7 @@ pub fn tally_dry_fleets(galaxy: &Galaxy, diplomacy: &Diplomacy, fleets: &mut Fle
         .filter(|fleet| {
             fleet.alive
                 && fleet.min_fuel() < DRY_FUEL
-                && !supply_base(galaxy, diplomacy, fleet.owner, fleet.system)
+                && !supply_port(galaxy, diplomacy, fleet.owner, fleet.system)
         })
         .map(|fleet| (fleet.id, fleet.owner))
         .collect();
@@ -84,7 +104,7 @@ pub fn tally_dry_fleets(galaxy: &Galaxy, diplomacy: &Diplomacy, fleets: &mut Fle
             galaxy
                 .systems
                 .iter()
-                .any(|system| supply_base(galaxy, diplomacy, owner, system.id))
+                .any(|system| supply_port(galaxy, diplomacy, owner, system.id))
         });
         if !any_port {
             fleets.tally_mut(owner).cut_off_days += 1;
@@ -120,7 +140,7 @@ pub fn resupply_fleets(
         if !fleet.is_docked()
             || fleet.in_battle
             || fleets.is_blockaded(system)
-            || !supply_base(galaxy, diplomacy, owner, system)
+            || !supply_port(galaxy, diplomacy, owner, system)
         {
             continue;
         }

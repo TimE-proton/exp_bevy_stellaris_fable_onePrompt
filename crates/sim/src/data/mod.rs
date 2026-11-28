@@ -5,12 +5,14 @@
 //! mit Dateiname und Ursache gemeldet werden statt irgendwo in der Simulation.
 
 mod defs;
+mod diplomacy_def;
 mod ship_loader;
 mod ships;
 mod siege_loader;
 mod tech_loader;
 
 pub use defs::*;
+pub use diplomacy_def::*;
 pub use ship_loader::arc_covers;
 pub use ships::*;
 pub use siege_loader::siege_day_bound;
@@ -76,6 +78,8 @@ pub struct GameData {
     pub polities: Vec<PolityDef>,
     pub names: NameData,
     pub balance: Balance,
+    /// Hebel der Diplomatie und die vier Grundhaltungen.
+    pub diplomacy: DiplomacyData,
     /// Prüfsumme über die Rohdateien; steht im Spielstand und im Befehlsprotokoll.
     pub hash: u64,
     /// Verzeichnis, aus dem geladen wurde (für das Neuladen im Spiel).
@@ -126,6 +130,7 @@ impl GameData {
         let polities: Vec<PolityDef> = load_ron(dir, "polities.ron", &mut hasher)?;
         let names: NameData = load_ron(dir, "names.ron", &mut hasher)?;
         let balance: Balance = load_ron(dir, "balance.ron", &mut hasher)?;
+        let diplomacy: DiplomacyData = load_ron(dir, "diplomacy.ron", &mut hasher)?;
         let mut data = Self {
             goods,
             planet_kinds,
@@ -138,10 +143,12 @@ impl GameData {
             polities,
             names,
             balance,
+            diplomacy,
             hash: hasher.finish(),
             dir: dir.to_path_buf(),
         };
         data.resolve_and_validate()?;
+        data.diplomacy.validate()?;
         ship_loader::resolve_ships(&mut data)?;
         tech_loader::resolve_research(&mut data)?;
         Ok(data)

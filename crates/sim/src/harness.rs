@@ -389,6 +389,10 @@ pub fn check_invariants(world: &World) -> Result<(), String> {
         return Err(anomaly);
     }
     crate::siege::check(world)?;
+    crate::diplomacy::check(
+        world.resource::<crate::diplomacy::Diplomacy>(),
+        world.resource::<Polities>(),
+    )?;
     Ok(())
 }
 

@@ -315,12 +315,23 @@ pub fn research_month(
         let budget = wanted.min(economy.allowance(id, Claim::Research));
         economy.want(id, Claim::Research, wanted);
         let spent = economy.pay_staff(id, Claim::Research, budget);
+        // Ein Forschungsvertrag mit irgendwem legt einen Zuschlag auf.
+        let partnered = polities.list.iter().any(|other| {
+            other.alive
+                && other.id != id
+                && diplomacy.has_treaty(id, other.id, crate::diplomacy::TreatyKind::Research)
+        });
+        let treaty_bonus = if partnered {
+            1.0 + data.diplomacy.levers.research_bonus
+        } else {
+            1.0
+        };
         let points = research_points(
             balance,
             to_credits(spent),
             population,
             entry.effects.research,
-        );
+        ) * treaty_bonus;
         entry.spent_last_month = spent;
         entry.spent_total += spent;
         entry.points_last_month = points;

@@ -1,0 +1,90 @@
+// Diplomatie: Hebel und die vier Grundhaltungen.
+//
+// Jede KI-Gemeinschaft folgt einer verborgenen Mischung der vier Grundhaltungen. Sie
+// beginnt mit einer davon als Schwerpunkt (anchor_main, die übrigen je anchor_rest) und
+// treibt unter öffentlichem Druck (Verflechtung, Gelegenheit, Bedrohung, Knappheit) davon
+// weg (drift), zieht aber zu ihrem Anker zurück (anchor_weight). Beobachter kennen nur die
+// reinen Profile unten und messen jede öffentliche Tat daran: Ihre Einschätzung ist ein
+// Schluss aus Taten, nie ein Blick in die Führung.
+//
+// Utilitäten (siehe crates/sim/src/diplomacy/occasion.rs):
+//   Zuschlagen = (grab·Beute·(1+Not) + prevent·Fenster)·Sieg − Abhängigkeit
+//                − honor·(Stufen/5 + Waffenruhe) − Kriegsmüdigkeit/100
+//   Binden     = merge·(Fenster + Abhängigkeit + Nähe)·Vertrauen + prevent·gemeinsame
+//                Bedrohung − 0,6·(1−Not)·(1−Fenster)
+//   Wahl       = Softmax(Nutzen / temperature); verlockt nichts (alles unter act), bleibt
+//                jeder Wahl nur tremble.
+(
+    levers: (
+        act: 0.15,
+        temperature: 0.10,
+        tremble: 0.002,
+        anchor_main: 0.55,
+        anchor_rest: 0.15,
+        anchor_weight: 1.0,
+        drift: 0.04,
+        def_adv: 1.2,
+        minor_share: 0.06,
+        leader_share: 0.40,
+        trend_months: 60.0,
+        tension_adjust: 0.08,
+        grievance_decay: 0.03,
+        half_life_months: 60.0,
+        surprise_break: 1.2,
+        notice_days: 180,
+        proposal_days: 60,
+        refusal_block_days: 360,
+        peace_block_days: 90,
+        answer_days: (3, 10),
+        // Handel, Nichtangriff, Forschung, Investition, Verteidigung, Union
+        rung_cost: (0.2, 0.4, 0.5, 0.6, 0.9, 1.2),
+        merge_union_months: 24,
+        merge_tie: 0.15,
+        merge_affinity: 0.70,
+        merge_hold_months: 12,
+        lead_cost: 0.6,
+        vassal_tribute: 0.15,
+        protectorate_tribute: 0.05,
+        reparations: 0.10,
+        terms_years: 10,
+        terms_tribute: 20.0,
+        terms_subjugate: 55.0,
+        max_cede: 3,
+        // Frist eines Krieges: Danach diktiert der Vorsprung den Frieden (über 15 Jahre,
+        // damit die Kriege des Drehbuchs „feldzug“ ihr Ende nach Plan erreichen).
+        war_max_months: 192,
+        exhaustion: 85.0,
+        score_weights: (50.0, 25.0, 10.0),
+        peace_min_months: 6,
+        breach_shock: 0.9,
+        research_bonus: 0.10,
+        clue_weight: (opening: 1.5, answer: 0.8, terms: 1.0, continuous: 0.6),
+        clues_kept: 16,
+        acts_kept: 256,
+        continuous_evidence: false,
+        // Die KI trägt selbst Bindungen an. Kommt mit der strategischen Führung; bis dahin
+        // beantwortet sie nur Vorschläge.
+        ai_openings: false,
+        // Die KI bietet im Krieg selbst Frieden an. Kommt mit der strategischen Führung;
+        // bis dahin enden ihre Kriege durch Drehbuch, Spieler oder das Diktat.
+        ai_peace_offers: false,
+        // Geschlossene Grenzen: Flotten brauchen fremdes Gebiet Durchfahrt (eigener
+        // Verbund, Verbündete, Krieg oder gewährte Durchfahrt). Wird eingeschaltet, sobald
+        // die militärische Führung der KI ihre Wege danach plant.
+        closed_borders: false,
+    ),
+    archetypes: [
+        (key: "kooperativ", label: "kooperativ",
+         arm0: 0.08, arm1: 0.15, forward: 0.15, grab: 0.05, prevent: 0.15, merge: 1.0,
+         honor: 1.0, spread: 0.9, open: 0.9, patience: 25.0, caution: 0.5),
+        (key: "opportunistisch", label: "opportunistisch",
+         arm0: 0.12, arm1: 0.20, forward: 0.40, grab: 0.8, prevent: 0.2, merge: 0.5,
+         honor: 0.25, spread: 0.5, open: 0.7, patience: 8.0, caution: 0.3),
+        (key: "misstrauisch", label: "misstrauisch",
+         arm0: 0.22, arm1: 0.45, forward: 0.10, grab: 0.1, prevent: 1.0, merge: 0.25,
+         honor: 0.7, spread: 0.3, open: 0.15, patience: 12.0, caution: 0.9),
+        (key: "expansionistisch", label: "expansionistisch",
+         arm0: 0.25, arm1: 0.20, forward: 0.70, grab: 1.0, prevent: 0.5, merge: 0.15,
+         honor: 0.5, spread: 0.1, open: 0.5, patience: 15.0, caution: 0.2),
+    ],
+)

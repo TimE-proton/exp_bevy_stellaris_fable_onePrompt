@@ -267,7 +267,7 @@ impl<'a> Succession<'a> {
     ) -> Result<PolityId, String> {
         let Succession {
             data,
-            config: _,
+            config,
             galaxy,
             polities,
             economy,
@@ -279,8 +279,9 @@ impl<'a> Succession<'a> {
             diplomacy,
             endgame,
             chronicle: _,
-            // Der Plan der Neuen entsteht, sobald ihre Führung zum ersten Mal plant.
-            ai: _,
+            // Der Plan der Neuen entsteht, sobald ihre Führung zum ersten Mal plant; ihre
+            // Haltung zieht sie sofort aus dem Stapel.
+            ai,
         } = self;
         let Founding {
             name,
@@ -369,6 +370,7 @@ impl<'a> Succession<'a> {
         grow(states, count, fresh.clone(), fresh);
 
         fleet_succession::size_for_polities(fleets, battles, count + 1);
+        ai.minds.ensure(data, config.seed, count + 1);
 
         let Diplomacy {
             wars: _,
@@ -377,6 +379,21 @@ impl<'a> Succession<'a> {
             truces: _,
             standing,
             culture,
+            // Beziehungen, Vorschläge, Taten und Dossiers entstehen erst, wenn die Neue
+            // handelt oder beobachtet wird.
+            relations: _,
+            proposals: _,
+            history: _,
+            next_proposal: _,
+            blocked: _,
+            acts: _,
+            pending_acts: _,
+            dossiers: _,
+            public_face: _,
+            // Die Messung wächst im nächsten Monatsabschluss mit.
+            survey: _,
+            battles_counted_until: _,
+            bind_year: _,
         } = &mut **diplomacy;
         let inherited = culture
             .get(parent.index())
@@ -554,6 +571,17 @@ impl<'a> Succession<'a> {
         } = galaxy.planet_mut(planet);
         *owner = Some(to);
         let (system, population) = (*system, *population);
+        if path == Path::Forced {
+            // Im Krieg genommen: in die Bilanz des Krieges.
+            crate::diplomacy::war::record_taken(
+                diplomacy,
+                from,
+                to,
+                population,
+                planet,
+                was_capital,
+            );
+        }
 
         let PlanetEconomy {
             capital: _,
@@ -935,6 +963,8 @@ impl<'a> Succession<'a> {
             plans,
             reserved,
             defense_hold: _,
+            // Die Haltung der Beendeten bleibt als Geschichte an ihrer Stelle stehen.
+            minds: _,
         } = &mut **ai;
         modes.remove(&from);
         if let Some(plan) = plans.get_mut(from.index()) {
@@ -1041,9 +1071,11 @@ impl<'a> Succession<'a> {
         research.absorb(data, from, into);
         research.publish_effects(economy, logistics);
 
-        // Kriege und Waffenruhen enden, Unterstellte gehen an das Haupt der Erbin.
+        // Kriege und Waffenruhen enden, Unterstellte gehen an das Haupt der Erbin. Ihre
+        // Beziehungen, Vorschläge und Dossiers vergehen mit ihr.
         drop_wars_of(diplomacy, from);
         drop_truces_of(diplomacy, from);
+        crate::diplomacy::forget_polity(diplomacy, from);
         let free = Standing {
             overlord: None,
             voluntary: false,
@@ -1170,6 +1202,7 @@ impl<'a> Succession<'a> {
         }
 
         drop_wars_of(diplomacy, ward);
+        crate::diplomacy::on_subordinated(diplomacy, ward);
         let wards: Vec<PolityId> = diplomacy.wards_of(ward).collect();
         for other in wards {
             diplomacy.standing[other.index()].overlord = Some(lord);

@@ -143,7 +143,9 @@ pub fn raid_chance(base: f64, raiders: f32, escorts: f32) -> f64 {
     base * (raiders / (raiders + 2.0 * escorts.max(0.0))) as f64
 }
 
-/// Darf ein Frachter der Gemeinschaft `polity` das System betreten?
+/// Darf ein Frachter der Gemeinschaft `polity` das System betreten? Nicht, wenn es
+/// blockiert ist oder einer Gemeinschaft untersteht, mit der Krieg oder ein Embargo
+/// herrscht.
 fn open_for(
     polity: PolityId,
     system: SystemId,
@@ -151,8 +153,11 @@ fn open_for(
     fleets: &Fleets,
     diplomacy: &Diplomacy,
 ) -> bool {
+    // Ein Embargo schließt Häfen und Durchfahrt wie ein Krieg, nur ohne Kaperei.
     !fleets.is_blockaded(system)
-        && owners[system.index()].is_none_or(|owner| !diplomacy.at_war(owner, polity))
+        && owners[system.index()].is_none_or(|owner| {
+            !diplomacy.at_war(owner, polity) && !diplomacy.embargoed(owner, polity)
+        })
 }
 
 /// Tagesschritt aller Frachter in ID-Reihenfolge.

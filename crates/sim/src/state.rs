@@ -146,6 +146,8 @@ impl SimState {
         let diplomacy = setup_diplomacy(data, &polities);
         let endgame = Endgame::new(galaxy.planets.len());
         let sieges = setup_sieges(data, &galaxy, &polities);
+        let polity_count = polities.list.len();
+        let minds = crate::ai::mind::Minds::deal(data, config.seed, polity_count);
         Self {
             config,
             clock: SimClock::default(),
@@ -163,7 +165,10 @@ impl SimState {
             queue: CommandQueue::default(),
             log: CommandLog::default(),
             chronicle,
-            ai: AiState::default(),
+            ai: AiState {
+                minds,
+                ..AiState::default()
+            },
         }
     }
 

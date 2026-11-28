@@ -28,6 +28,8 @@ impl Plugin for AiPlugin {
             sim_schedule(),
             (
                 expand.run_if(day_start),
+                answer_proposals.run_if(day_start),
+                diplomatic_month.run_if(month_start),
                 steward_finances.run_if(month_start),
                 plan_military.run_if(month_start),
                 plan_defense.run_if(month_start),
@@ -75,6 +77,43 @@ impl MilitaryView<'_> {
             day: self.clock.day(),
         }
     }
+}
+
+impl MilitaryView<'_> {
+    fn ground(&self, seed: u64) -> crate::diplomacy::sight::Ground<'_> {
+        crate::diplomacy::sight::Ground {
+            data: &self.data,
+            galaxy: &self.galaxy,
+            polities: &self.polities,
+            diplomacy: &self.diplomacy,
+            fleets: &self.fleets,
+            research: &self.research,
+            finance: &self.finance,
+            seed,
+            day: self.clock.day(),
+        }
+    }
+}
+
+/// Tagesbeginn: Antworten auf Vorschläge ([`super::diplomat::answer_proposals`]).
+fn answer_proposals(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    ai: Res<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    super::diplomat::answer_proposals(&view.ground(config.seed), &config, &ai, &mut queue);
+}
+
+/// Monatsbeginn: Haltungen, Eröffnungen, Frieden, Vereinigung
+/// ([`super::diplomat::diplomatic_month`]).
+fn diplomatic_month(
+    view: MilitaryView,
+    config: Res<SimConfig>,
+    mut ai: ResMut<AiState>,
+    mut queue: ResMut<CommandQueue>,
+) {
+    super::diplomat::diplomatic_month(&view.ground(config.seed), &config, &mut ai, &mut queue);
 }
 
 /// Monatsbeginn: Forschungspolitik, Rüstung und Stilllegung ([`plan_month`]).

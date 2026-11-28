@@ -10,7 +10,12 @@ use crate::battle::{Doctrine, Formation};
 use crate::chronicle::{Chronicle, ChronicleKind};
 use crate::clock::SimClock;
 use crate::data::{GameData, ShipClass};
-use crate::diplomacy::{self, Diplomacy};
+use crate::diplomacy::evidence::{Act, ActKind, Audience, log_act};
+use crate::diplomacy::occasion::{
+    ACCEPT, BIND, DECLINE, LIMITED, Observed, Occasion, STRIKE, SUBJUGATE, decline_reason,
+};
+use crate::diplomacy::sight::{Ground, Perspective};
+use crate::diplomacy::{self, Deal, Diplomacy, ProposalStatus, TreatyKind, WarAim, proposals};
 use crate::economy::{Economy, to_credits, to_money};
 use crate::endgame::Endgame;
 use crate::finance::shares::ExpropriationScope;
@@ -53,11 +58,57 @@ pub enum SimCommand {
         fleet: FleetId,
         stance: Stance,
     },
+    /// Krieg erklären, mit begrenztem Ziel.
     DeclareWar {
         target: PolityId,
     },
+    /// Sofortiger Frieden ohne Bedingungen, ohne Zustimmung der Gegenseite. Bleibt für
+    /// Drehbücher und Prüfungen; die Oberfläche bietet Frieden als Vorschlag an
+    /// (`Propose` mit `Deal::Peace`).
     MakePeace {
         target: PolityId,
+    },
+    /// Krieg erklären, mit einem Kriegsziel. Bestehen Nichtangriff, Verteidigung oder
+    /// Union, ist das ein Vertragsbruch.
+    DeclareWarWithAim {
+        target: PolityId,
+        aim: WarAim,
+    },
+    /// Einer anderen freien Gemeinschaft etwas vorschlagen: Vertrag, Frieden zu
+    /// Bedingungen, Schutz, Vereinigung.
+    Propose {
+        to: PolityId,
+        deal: Deal,
+    },
+    /// Einen Vorschlag an die eigene Gemeinschaft annehmen oder ablehnen.
+    AnswerProposal {
+        proposal: u32,
+        accept: bool,
+    },
+    /// Einen eigenen offenen Vorschlag zurückziehen.
+    WithdrawProposal {
+        proposal: u32,
+    },
+    /// Einen Vertrag kündigen: Er und alle, die auf ihm aufbauen, enden nach der Frist
+    /// (`notice_days`).
+    CancelTreaty {
+        with: PolityId,
+        kind: TreatyKind,
+    },
+    /// Embargo gegen eine andere Gemeinschaft verhängen oder aufheben. Unter einem
+    /// Handelsvertrag nicht möglich.
+    SetEmbargo {
+        target: PolityId,
+        on: bool,
+    },
+    /// Den Flotten einer anderen Gemeinschaft Durchfahrt gewähren oder entziehen.
+    SetTransit {
+        target: PolityId,
+        open: bool,
+    },
+    /// Einen eigenen Schützling oder Vasallen in die Eigenständigkeit entlassen.
+    ReleaseWard {
+        ward: PolityId,
     },
     /// Der Staat kauft Anteile am Markt, höchstens für `max_spend` Credits.
     BuyShares {
@@ -297,6 +348,21 @@ pub struct CommandContext<'w> {
 }
 
 impl CommandContext<'_> {
+    /// Lesender Blick für Schätzungen und das öffentliche Bild einer Lage.
+    pub fn ground(&self) -> Ground<'_> {
+        Ground {
+            data: &self.data,
+            galaxy: &self.galaxy,
+            polities: &self.polities,
+            diplomacy: &self.diplomacy,
+            fleets: &self.fleets,
+            research: &self.research,
+            finance: &self.finance,
+            seed: self.config.seed,
+            day: self.clock.day(),
+        }
+    }
+
     /// Leihgabe für Besitzwechsel, Gründung und Ende einer Gemeinschaft: So greift ein
     /// Befehl auf [`crate::polity::succession`] zu.
     pub fn succession(&mut self) -> Succession<'_> {
@@ -408,36 +474,148 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             tech::set_budget(&mut ctx.research, &ctx.data, &ctx.polities, polity, *share)
         }
         SimCommand::MoveFleet { fleet, to } => {
-            fleet::order_move(&ctx.galaxy, &mut ctx.fleets, polity, *fleet, *to)
+            let owners: Vec<Option<PolityId>> = ctx
+                .galaxy
+                .systems
+                .iter()
+                .map(|system| ctx.galaxy.system_owner(system.id))
+                .collect();
+            let diplomacy = &*ctx.diplomacy;
+            let closed = ctx.data.diplomacy.levers.closed_borders;
+            let mover = ctx.fleets.get(*fleet).map_or(polity, |found| found.owner);
+            if closed
+                && let Some(owner) = owners.get(to.index()).copied().flatten()
+                && !diplomacy.may_enter(mover, Some(owner))
+            {
+                return Err(format!(
+                    "keine Durchfahrt: {} gewährt den Flotten von {} keinen Zugang",
+                    ctx.polities.get(owner).name,
+                    ctx.polities.get(polity).name
+                ));
+            }
+            fleet::order_move_within(
+                &ctx.galaxy,
+                &mut ctx.fleets,
+                polity,
+                *fleet,
+                *to,
+                |system| !closed || diplomacy.may_enter(mover, owners[system.index()]),
+            )
         }
         SimCommand::SetStance { fleet, stance } => {
             fleet::set_stance(&mut ctx.fleets, polity, *fleet, *stance)
         }
-        SimCommand::DeclareWar { target } => {
-            diplomacy::declare_war(
-                &mut ctx.diplomacy,
-                &ctx.polities,
-                &mut ctx.chronicle,
-                tick,
-                polity,
-                *target,
-            )?;
-            // Kriegsausbruch: Die Kurse beider Seiten geben nach, samt derer, die ihnen
-            // unterstehen und den Krieg teilen.
-            let factor = ctx.data.balance.finance.war_shock;
-            let mut sides = ctx.diplomacy.bloc(polity);
-            sides.extend(ctx.diplomacy.bloc(*target));
-            for side in sides {
-                finance::shares::shock_polity(
-                    &mut ctx.finance,
-                    &ctx.galaxy,
-                    &ctx.logistics,
-                    side,
-                    factor,
-                );
+        SimCommand::DeclareWar { target } => declare(ctx, polity, *target, WarAim::Limited),
+        SimCommand::DeclareWarWithAim { target, aim } => declare(ctx, polity, *target, *aim),
+        SimCommand::Propose { to, deal } => propose(ctx, polity, *to, deal),
+        SimCommand::AnswerProposal { proposal, accept } => answer(ctx, polity, *proposal, *accept),
+        SimCommand::WithdrawProposal { proposal } => {
+            let day = ctx.clock.day();
+            match ctx
+                .diplomacy
+                .proposals
+                .iter()
+                .find(|open| open.id == *proposal)
+            {
+                Some(open) if open.from == polity => {}
+                Some(_) => return Err("nur der Absender kann einen Vorschlag zurückziehen".into()),
+                None => return Err("kein offener Vorschlag mit dieser Nummer".into()),
+            }
+            if let Some(open) = proposals::take(&mut ctx.diplomacy, *proposal) {
+                proposals::record(&mut ctx.diplomacy, open, ProposalStatus::Withdrawn, day);
             }
             Ok(())
         }
+        SimCommand::CancelTreaty { with, kind } => diplomacy::treaties::denounce(
+            &mut ctx.diplomacy,
+            &ctx.polities,
+            &mut ctx.chronicle,
+            tick,
+            polity,
+            *with,
+            *kind,
+            ctx.data.diplomacy.levers.notice_days,
+        ),
+        SimCommand::SetEmbargo { target, on } => {
+            diplomacy::check_pair(&ctx.diplomacy, &ctx.polities, polity, *target)?;
+            let relation = ctx.diplomacy.relation(polity, *target);
+            let side = diplomacy::relations::side(polity, *target);
+            if relation.is_some_and(|relation| relation.embargo[side] == *on) {
+                return Err(if *on {
+                    "das Embargo besteht bereits".into()
+                } else {
+                    "es besteht kein Embargo".into()
+                });
+            }
+            if *on
+                && relation.is_some_and(|relation| {
+                    relation.has(TreatyKind::Trade) || relation.has(TreatyKind::Union)
+                })
+            {
+                return Err(
+                    "unter einem Handelsvertrag gibt es kein Embargo; erst kündigen".into(),
+                );
+            }
+            ctx.diplomacy.relation_mut(polity, *target).embargo[side] = *on;
+            let (who, whom) = (
+                ctx.polities.get(polity).name.clone(),
+                ctx.polities.get(*target).name.clone(),
+            );
+            ctx.chronicle.push(
+                tick,
+                ChronicleKind::Diplomacy,
+                Some(polity),
+                None,
+                if *on {
+                    format!("{who} verhängt ein Embargo gegen {whom}.")
+                } else {
+                    format!("{who} hebt das Embargo gegen {whom} auf.")
+                },
+            );
+            Ok(())
+        }
+        SimCommand::SetTransit { target, open } => {
+            diplomacy::check_pair(&ctx.diplomacy, &ctx.polities, polity, *target)?;
+            if *open && ctx.diplomacy.at_war(polity, *target) {
+                return Err("einem Kriegsgegner wird keine Durchfahrt gewährt".into());
+            }
+            let side = diplomacy::relations::side(polity, *target);
+            let relation = ctx.diplomacy.relation_mut(polity, *target);
+            if relation.transit[side] == *open {
+                return Err(if *open {
+                    "die Durchfahrt ist bereits gewährt".into()
+                } else {
+                    "es ist keine Durchfahrt gewährt".into()
+                });
+            }
+            relation.transit[side] = *open;
+            let (who, whom) = (
+                ctx.polities.get(polity).name.clone(),
+                ctx.polities.get(*target).name.clone(),
+            );
+            ctx.chronicle.push(
+                tick,
+                ChronicleKind::Diplomacy,
+                Some(polity),
+                None,
+                if *open {
+                    format!("{who} gewährt den Flotten von {whom} Durchfahrt.")
+                } else {
+                    format!("{who} entzieht den Flotten von {whom} die Durchfahrt.")
+                },
+            );
+            Ok(())
+        }
+        SimCommand::ReleaseWard { ward } => diplomacy::proposals::release_ward(
+            &mut ctx.diplomacy,
+            &ctx.polities,
+            &ctx.galaxy,
+            &mut ctx.endgame,
+            &mut ctx.chronicle,
+            tick,
+            polity,
+            *ward,
+        ),
         SimCommand::MakePeace { target } => {
             // Wer belagert wird, kann den Frieden nicht selbst schließen.
             siege::peace_veto(&ctx.galaxy, &ctx.polities, &ctx.sieges, polity, *target)?;
@@ -456,6 +634,7 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             shares,
             max_spend,
         } => {
+            across_hostility(ctx, polity, *issuer)?;
             let capitals: Vec<_> = ctx.polities.list.iter().map(|p| p.capital).collect();
             let seat =
                 finance::shares::seat_of_issuer(&ctx.galaxy, &ctx.logistics, &capitals, *issuer);
@@ -505,17 +684,20 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             )
             .map(|_| ())
         }
-        SimCommand::TakeoverBid { issuer, premium } => finance::takeover_bid(
-            &mut ctx.finance,
-            &mut ctx.economy,
-            &ctx.galaxy,
-            HolderId::State(polity),
-            *issuer,
-            *premium,
-        )
-        .map(|_| ()),
+        SimCommand::TakeoverBid { issuer, premium } => {
+            across_hostility(ctx, polity, *issuer)?;
+            finance::takeover_bid(
+                &mut ctx.finance,
+                &mut ctx.economy,
+                &ctx.galaxy,
+                HolderId::State(polity),
+                *issuer,
+                *premium,
+            )
+            .map(|_| ())
+        }
         SimCommand::Expropriate { issuer, scope } => {
-            finance::expropriate(
+            let expropriation = finance::expropriate(
                 &mut ctx.finance,
                 &ctx.galaxy,
                 &ctx.logistics,
@@ -524,6 +706,16 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
                 *issuer,
                 *scope,
             )?;
+            // Wer Anteile eines Investitionspartners einzieht, bricht den Vertrag.
+            for wronged in expropriation.wronged {
+                if wronged != polity
+                    && ctx
+                        .diplomacy
+                        .has_treaty(polity, wronged, TreatyKind::Investment)
+                {
+                    breach(ctx, polity, wronged, &[TreatyKind::Investment]);
+                }
+            }
             let name = finance::issuer_name(&ctx.galaxy, &ctx.logistics, *issuer);
             let who = ctx.polities.get(polity).name.clone();
             ctx.chronicle.push(
@@ -756,4 +948,273 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
             plan,
         ),
     }
+}
+
+/// Keine Käufe über Krieg und Embargo hinweg.
+fn across_hostility(
+    ctx: &CommandContext,
+    polity: PolityId,
+    issuer: IssuerId,
+) -> Result<(), String> {
+    if let Some(seat) = finance::polity_of_issuer(&ctx.galaxy, &ctx.logistics, issuer)
+        && seat != polity
+        && (ctx.diplomacy.at_war(polity, seat) || ctx.diplomacy.embargoed(polity, seat))
+    {
+        return Err(format!(
+            "über Krieg und Embargo hinweg kauft niemand Anteile an Betrieben von {}",
+            ctx.polities.get(seat).name
+        ));
+    }
+    Ok(())
+}
+
+/// Vertragsbruch: Verträge enden, das Opfer grollt, die Kurse des Brechenden fallen,
+/// und das Opfer wird misstrauischer.
+fn breach(ctx: &mut CommandContext, breaker: PolityId, victim: PolityId, broken: &[TreatyKind]) {
+    let tick = ctx.clock.tick;
+    diplomacy::treaties::breach(
+        &mut ctx.diplomacy,
+        &ctx.polities,
+        &mut ctx.chronicle,
+        tick,
+        breaker,
+        victim,
+        broken,
+    );
+    finance::shares::shock_polity(
+        &mut ctx.finance,
+        &ctx.galaxy,
+        &ctx.logistics,
+        breaker,
+        ctx.data.diplomacy.levers.breach_shock,
+    );
+    ctx.ai.minds.jolt(victim, crate::ai::mind::Jolt::Betrayed);
+}
+
+/// Kriegserklärung mit Ziel. Die Erklärung und das Ziel sind öffentliche Taten.
+fn declare(
+    ctx: &mut CommandContext,
+    polity: PolityId,
+    target: PolityId,
+    aim: WarAim,
+) -> Result<(), String> {
+    let tick = ctx.clock.tick;
+    let day = ctx.clock.day();
+    diplomacy::check_pair(&ctx.diplomacy, &ctx.polities, polity, target)?;
+    // Das öffentliche Bild der Lage vor der Erklärung.
+    let picture = ctx.ground().picture(Perspective::Public, polity, target);
+    let figures = diplomacy::war::figures(
+        &ctx.data,
+        &ctx.galaxy,
+        &ctx.diplomacy,
+        &ctx.fleets,
+        polity,
+        target,
+    );
+    let declared = diplomacy::declare_war_with(
+        &mut ctx.diplomacy,
+        &ctx.polities,
+        &mut ctx.chronicle,
+        tick,
+        polity,
+        target,
+        aim,
+        Some(figures),
+    )?;
+    if !declared.breached.is_empty() {
+        finance::shares::shock_polity(
+            &mut ctx.finance,
+            &ctx.galaxy,
+            &ctx.logistics,
+            polity,
+            ctx.data.diplomacy.levers.breach_shock,
+        );
+        ctx.ai.minds.jolt(target, crate::ai::mind::Jolt::Betrayed);
+    }
+    // Kriegsausbruch: Die Kurse beider Seiten geben nach, samt derer, die ihnen
+    // unterstehen und den Krieg teilen.
+    let factor = ctx.data.balance.finance.war_shock;
+    let mut sides = ctx.diplomacy.bloc(polity);
+    sides.extend(ctx.diplomacy.bloc(target));
+    for side in sides {
+        finance::shares::shock_polity(&mut ctx.finance, &ctx.galaxy, &ctx.logistics, side, factor);
+    }
+    let whom = ctx.polities.get(target).name.clone();
+    log_act(
+        &mut ctx.diplomacy,
+        Act {
+            day,
+            actor: polity,
+            toward: target,
+            kind: ActKind::Strike,
+            occasion: Occasion::Opening(picture),
+            observed: Observed::Option(STRIKE),
+            audience: Audience::Public,
+            source: format!("erklärt {whom} den Krieg"),
+        },
+    );
+    log_act(
+        &mut ctx.diplomacy,
+        Act {
+            day,
+            actor: polity,
+            toward: target,
+            kind: ActKind::Aim,
+            occasion: Occasion::Aim(picture),
+            observed: Observed::Option(match aim {
+                WarAim::Subjugation => SUBJUGATE,
+                WarAim::Limited => LIMITED,
+            }),
+            audience: Audience::Public,
+            source: format!("Kriegsziel gegen {whom}: {}", aim.label()),
+        },
+    );
+    Ok(())
+}
+
+/// Einen Vorschlag einstellen. Der erste Antrag einer Bindung im Jahr ist eine
+/// öffentliche Tat.
+fn propose(
+    ctx: &mut CommandContext,
+    polity: PolityId,
+    to: PolityId,
+    deal: &Deal,
+) -> Result<(), String> {
+    let tick = ctx.clock.tick;
+    let day = ctx.clock.day();
+    diplomacy::check_pair(&ctx.diplomacy, &ctx.polities, polity, to)?;
+    let picture = ctx.ground().picture(Perspective::Public, polity, to);
+    proposals::propose(
+        &ctx.data,
+        &ctx.galaxy,
+        &ctx.polities,
+        &mut ctx.diplomacy,
+        &ctx.finance,
+        tick,
+        polity,
+        to,
+        deal.clone(),
+    )?;
+    let year = day / crate::clock::DAYS_PER_YEAR;
+    let whom = ctx.polities.get(to).name.clone();
+    if let Deal::Treaty(kind) = deal
+        && ctx.diplomacy.bind_year.get(&(polity, to)) != Some(&year)
+    {
+        ctx.diplomacy.bind_year.insert((polity, to), year);
+        log_act(
+            &mut ctx.diplomacy,
+            Act {
+                day,
+                actor: polity,
+                toward: to,
+                kind: ActKind::Bind,
+                occasion: Occasion::Opening(picture),
+                observed: Observed::Option(BIND),
+                audience: Audience::Public,
+                source: format!("trägt {whom} den Vertrag „{}“ an", kind.label()),
+            },
+        );
+    }
+    if !matches!(deal, Deal::Treaty(_)) {
+        let who = ctx.polities.get(polity).name.clone();
+        let label = deal.label(&ctx.polities);
+        ctx.chronicle.push(
+            tick,
+            ChronicleKind::Diplomacy,
+            Some(polity),
+            None,
+            format!("{who} schlägt {whom} vor: {label}."),
+        );
+    }
+    Ok(())
+}
+
+/// Einen Vorschlag annehmen oder ablehnen. Die Annahme ist öffentlich, die Ablehnung
+/// sieht nur der Absender.
+fn answer(ctx: &mut CommandContext, polity: PolityId, id: u32, accept: bool) -> Result<(), String> {
+    let tick = ctx.clock.tick;
+    let day = ctx.clock.day();
+    let proposal = match ctx.diplomacy.proposals.iter().find(|open| open.id == id) {
+        Some(open) if open.to == polity => open.clone(),
+        Some(_) => return Err("nur der Empfänger kann einen Vorschlag beantworten".into()),
+        None => return Err("kein offener Vorschlag mit dieser Nummer".into()),
+    };
+    let levers = ctx.data.diplomacy.levers.clone();
+    let picture = ctx
+        .ground()
+        .picture(Perspective::Public, polity, proposal.from);
+    let answering = proposals::answering(&ctx.galaxy, &proposal.deal, polity, &ctx.data);
+    let sender = ctx.polities.get(proposal.from).name.clone();
+    let label = proposal.deal.label(&ctx.polities);
+    let occasion = Occasion::Answer(answering, picture);
+    proposals::take(&mut ctx.diplomacy, id);
+    if accept {
+        if let Err(reason) = proposals::conclude(&mut ctx.succession(), &proposal, tick) {
+            proposals::record(&mut ctx.diplomacy, proposal, ProposalStatus::Void, day);
+            return Err(format!("Vorschlag hinfällig: {reason}"));
+        }
+        if let Deal::Peace(terms) = &proposal.deal
+            && terms.subjugate
+            && let Some(yielder) = terms.yielder
+        {
+            let victor = if yielder == proposal.from {
+                proposal.to
+            } else {
+                proposal.from
+            };
+            ctx.ai.minds.jolt(victor, crate::ai::mind::Jolt::Subjugated);
+        }
+        // Wer eben aufgegangen ist, hinterlässt keine Tat mehr.
+        if ctx.polities.list[polity.index()].alive && ctx.polities.list[proposal.from.index()].alive
+        {
+            log_act(
+                &mut ctx.diplomacy,
+                Act {
+                    day,
+                    actor: polity,
+                    toward: proposal.from,
+                    kind: ActKind::Answer,
+                    occasion,
+                    observed: Observed::Option(ACCEPT),
+                    audience: Audience::Public,
+                    source: format!("nimmt an: {label} ({sender})"),
+                },
+            );
+        }
+        proposals::record(&mut ctx.diplomacy, proposal, ProposalStatus::Accepted, day);
+    } else {
+        let uniform = crate::data::ArchetypeDef::blend(&ctx.data.diplomacy.archetypes, &[0.25; 4]);
+        let reason = decline_reason(answering, &picture, &uniform, &levers);
+        log_act(
+            &mut ctx.diplomacy,
+            Act {
+                day,
+                actor: polity,
+                toward: proposal.from,
+                kind: ActKind::Answer,
+                occasion,
+                observed: Observed::Option(DECLINE),
+                audience: Audience::Counterpart,
+                source: format!("lehnt ab: {label} ({})", reason.label()),
+            },
+        );
+        if matches!(
+            proposal.deal,
+            Deal::Peace(_) | Deal::Merge { .. } | Deal::Protectorate { .. }
+        ) {
+            let who = ctx.polities.get(polity).name.clone();
+            ctx.chronicle.push(
+                tick,
+                ChronicleKind::Diplomacy,
+                Some(polity),
+                None,
+                format!(
+                    "{who} lehnt ab: {label} ({sender}). Grund: {}.",
+                    reason.label()
+                ),
+            );
+        }
+        proposals::decline(&mut ctx.diplomacy, &ctx.data, proposal, Some(reason), day);
+    }
+    Ok(())
 }

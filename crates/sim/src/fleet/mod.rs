@@ -38,7 +38,8 @@ pub use movement::{day_travel, move_fleets, recompute_blockades, update_blockade
 pub use plugin::FleetPlugin;
 pub use supply::{
     DRY_FUEL, fleet_claim, maintain_fleets, maintenance_parts, monthly_upkeep, pay_upkeep,
-    procurement_estimate, repair_fleets, resupply_fleets, supply_base, tally_dry_fleets,
+    procurement_estimate, repair_fleets, resupply_fleets, supply_base, supply_port,
+    tally_dry_fleets,
 };
 pub use yard::{
     BuildOrder, BuildStatus, advance_yards, arms_capital, cancel_order, design_buildable, lay_up,
@@ -553,7 +554,8 @@ impl Fleets {
             if fleet.stance == Stance::Raid && diplomacy.at_war(fleet.owner, victim) {
                 raiders += fleet.strength;
                 raider.get_or_insert(fleet.owner);
-            } else if fleet.owner == victim && fleet.stance == Stance::Escort {
+            } else if fleet.stance == Stance::Escort && diplomacy.allied(fleet.owner, victim) {
+                // Geleit gibt jeder Verbündete: Schutzmacht, Schützling, Vertragspartner.
                 escorts += fleet.strength;
             }
         }
@@ -665,13 +667,28 @@ fn own_fleet(fleets: &mut Fleets, polity: PolityId, fleet: FleetId) -> Result<&m
     }
 }
 
-/// Schickt eine Flotte auf dem kürzesten Weg in ein System.
+/// Schickt eine Flotte auf dem kürzesten Weg in ein System, ohne Rücksicht auf fremdes
+/// Gebiet. Für Prüfungen und Werkzeuge; Befehle gehen über [`order_move_within`].
 pub fn order_move(
     galaxy: &Galaxy,
     fleets: &mut Fleets,
     polity: PolityId,
     fleet: FleetId,
     to: SystemId,
+) -> Result<(), String> {
+    order_move_within(galaxy, fleets, polity, fleet, to, |_| true)
+}
+
+/// Schickt eine Flotte auf dem kürzesten Weg in ein System, der nur Systeme berührt, die
+/// sie betreten darf (`passable`; Diplomatie: `Diplomacy::may_enter`). Das Ziel prüft der
+/// Aufrufer.
+pub fn order_move_within(
+    galaxy: &Galaxy,
+    fleets: &mut Fleets,
+    polity: PolityId,
+    fleet: FleetId,
+    to: SystemId,
+    passable: impl Fn(SystemId) -> bool,
 ) -> Result<(), String> {
     if to.index() >= galaxy.systems.len() {
         return Err("Zielsystem unbekannt".into());
@@ -698,8 +715,8 @@ pub fn order_move(
         let mut route = vec![next];
         if next != to {
             let path = galaxy
-                .shortest_path(next, to, |_| true)
-                .ok_or("kein Weg zum Ziel")?;
+                .shortest_path(next, to, &passable)
+                .ok_or("kein Weg zum Ziel, der nur offenes Gebiet berührt")?;
             route.extend(path.into_iter().skip(1));
         }
         fleet.route = route;
@@ -710,8 +727,8 @@ pub fn order_move(
         return Ok(());
     }
     let path = galaxy
-        .shortest_path(fleet.system, to, |_| true)
-        .ok_or("kein Weg zum Ziel")?;
+        .shortest_path(fleet.system, to, &passable)
+        .ok_or("kein Weg zum Ziel, der nur offenes Gebiet berührt")?;
     fleet.route = path.into_iter().skip(1).collect();
     fleet.progress = 0.0;
     Ok(())

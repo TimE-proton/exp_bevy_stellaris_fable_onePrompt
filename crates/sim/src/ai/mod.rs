@@ -10,10 +10,14 @@
 //!   Belagerungsbefehle erteilt.
 //! - [`siege`]: Belagerung und Verteidigung der Welten: Zielwahl, Truppen, die Wahl
 //!   zwischen Aushungern, Sturm und Beschuss, Verteidigungspläne, Übergabe.
+//! - [`mind`]: die verborgenen Haltungen der Gemeinschaften. Nur die KI liest sie.
+//! - [`diplomat`]: Antworten auf Vorschläge, Annäherung, Frieden, Vereinigung.
 
+pub mod diplomat;
 pub mod estimate;
 pub mod levers;
 pub mod military;
+pub mod mind;
 mod plugin;
 pub mod siege;
 
@@ -226,6 +230,9 @@ pub struct AiState {
     /// Welten, deren Verteidigungsplan die KI nicht anrührt: Ein Drehbuch hat ihn gesetzt.
     #[serde(default)]
     pub defense_hold: BTreeSet<PlanetId>,
+    /// Verborgene Haltungen je Gemeinschaft. Von außerhalb der KI nicht lesbar.
+    #[serde(default)]
+    pub minds: mind::Minds,
 }
 
 impl AiState {
