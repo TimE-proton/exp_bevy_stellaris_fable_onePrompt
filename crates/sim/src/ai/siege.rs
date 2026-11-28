@@ -1000,6 +1000,17 @@ fn start_campaign(
         })
         .filter(|world| ways[world.system.index()].is_finite())
         .map(|world| target_facts(sit, id, world.id, &ways, &own, &foes))
+        .map(|mut facts| {
+            // Ein Krieg mit dem Ziel der Unterwerfung sucht die Hauptwelt des Gegners.
+            let owner = sit.galaxy.planet(facts.planet).owner;
+            let subjugating = owner.and_then(|owner| sit.diplomacy.war_between(id, owner)).is_some_and(
+                |war| war.attacker == id && war.aim == crate::diplomacy::WarAim::Subjugation,
+            );
+            if facts.capital && subjugating {
+                facts.value *= data.diplomacy.levers.aim_capital_bonus;
+            }
+            facts
+        })
         .collect();
     let Some((target, troops)) = choose_target(data, &candidates, &force, wide) else {
         plan.searching_since.get_or_insert(sit.day);

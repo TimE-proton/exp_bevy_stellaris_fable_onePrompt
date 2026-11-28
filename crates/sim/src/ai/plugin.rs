@@ -113,7 +113,12 @@ fn diplomatic_month(
     mut ai: ResMut<AiState>,
     mut queue: ResMut<CommandQueue>,
 ) {
-    super::diplomat::diplomatic_month(&view.ground(config.seed), &config, &mut ai, &mut queue);
+    super::diplomat::diplomatic_month(
+        &view.ground(config.seed),
+        &config,
+        &mut ai,
+        &mut queue,
+    );
 }
 
 /// Monatsbeginn: Forschungspolitik, Rüstung und Stilllegung ([`plan_month`]).
@@ -276,7 +281,15 @@ fn steward_finances(
             let local = issuer.share_of(HolderId::Public(*planet))
                 + issuer.share_of(HolderId::Elite(*planet));
             let spend = (issuer.market_value() * 0.05).min(budget);
-            if local < 0.5 && spend > 20.0 {
+            // Staaten verkaufen nicht von selbst: Ohne Anteile in privater Hand gibt es
+            // nichts zu kaufen.
+            let float: u64 = issuer
+                .holdings
+                .iter()
+                .filter(|(holder, _)| !matches!(holder, HolderId::State(_)))
+                .map(|(_, shares)| shares / 60)
+                .sum();
+            if local < 0.5 && spend > 20.0 && float > 0 {
                 budget -= spend;
                 queue.push(
                     polity.id,

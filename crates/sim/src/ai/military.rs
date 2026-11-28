@@ -207,6 +207,14 @@ pub fn plan_month(
         let mode = ai.mode(id);
         let at_war = sit.diplomacy.is_at_war(id);
         let mut hand = Hand::new(queue, id);
+        // Ein Plan zum Zuschlagen hebt die Rüstung schon vor dem Krieg.
+        let mobilizing = ai.minds.mobilizing(id);
+        // Nach der Gründerzeit rüstet jede nach ihrer Haltung.
+        let arming = if super::diplomat::strategy_open(data, sit.day) {
+            ai.minds.arming_factor(data, id)
+        } else {
+            1.0
+        };
         let plan = ai.plan_mut(id);
 
         // Ist wieder Sold ausgeblieben? Der Rückstand folgt dem ausgebliebenen Anteil
@@ -339,9 +347,16 @@ pub fn plan_month(
         let excess = threat.map_or(0.0, |(_, value)| {
             (value / afloat.max(military.starting_fleet_value) - 1.0).clamp(0.0, 2.0)
         });
-        let war = if at_war { levers.war_factor } else { 1.0 };
+        let war = if at_war {
+            levers.war_factor
+        } else if mobilizing {
+            data.diplomacy.levers.mobilize_factor
+        } else {
+            1.0
+        };
         let share =
-            (levers.peace_share * (1.0 + levers.threat_gain * excess) * war).min(levers.max_share);
+            (levers.peace_share * arming * (1.0 + levers.threat_gain * excess) * war)
+                .min(levers.max_share);
         // Im Frieden urteilt die Rüstung erst über ein ganzes Jahr: Die ersten Monate
         // einer jungen Gemeinschaft sagen wenig darüber, was sie auf Dauer trägt.
         let months_needed = if at_war {

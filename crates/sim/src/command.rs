@@ -557,6 +557,10 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
                 );
             }
             ctx.diplomacy.relation_mut(polity, *target).embargo[side] = *on;
+            if *on {
+                ctx.diplomacy.tally.embargoes += 1;
+                ctx.diplomacy.tally.actor(polity).embargoes += 1;
+            }
             let (who, whom) = (
                 ctx.polities.get(polity).name.clone(),
                 ctx.polities.get(*target).name.clone(),
@@ -627,7 +631,9 @@ fn execute(ctx: &mut CommandContext, polity: PolityId, command: &SimCommand) -> 
                 polity,
                 *target,
                 ctx.data.balance.military.truce_days,
-            )
+            )?;
+            ctx.diplomacy.tally.peace(diplomacy::PeaceKind::Imposed);
+            Ok(())
         }
         SimCommand::BuyShares {
             issuer,
@@ -1115,7 +1121,8 @@ fn propose(
             },
         );
     }
-    if !matches!(deal, Deal::Treaty(_)) {
+    // Verträge und Anteilstausch sind Alltag: Die Chronik nennt nur, was geschlossen wird.
+    if !matches!(deal, Deal::Treaty(_) | Deal::Swap { .. }) {
         let who = ctx.polities.get(polity).name.clone();
         let label = deal.label(&ctx.polities);
         ctx.chronicle.push(

@@ -350,7 +350,7 @@ pub fn relation_view(ground: &Ground, viewer: PolityId, other: PolityId) -> Rela
         our_dependence: relation.dep[us],
         tie: relation.tie,
         merge_tie: levers.merge_tie,
-        merge_affinity: levers.merge_affinity,
+        merge_affinity: diplomacy.merge_affinity_needed(levers, viewer, other),
         merge_months: relation.merge_months,
         merge_months_needed: levers.merge_hold_months,
         merge_possible: relation.has(TreatyKind::Union)

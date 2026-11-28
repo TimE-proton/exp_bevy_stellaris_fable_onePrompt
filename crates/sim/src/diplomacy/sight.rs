@@ -268,10 +268,7 @@ impl Ground<'_> {
                 ))
             })
             .fold(0.0, f32::max);
-        let mut want = (-me.trend * 10.0).clamp(0.0, 1.0);
-        if me.can_claim {
-            want *= 0.3;
-        }
+        let want = me.want(levers);
         Picture {
             ratio,
             trend_gap: them.trend - me.trend,

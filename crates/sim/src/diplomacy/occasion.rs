@@ -117,6 +117,8 @@ pub enum Answering {
     Merge {
         i_lead: bool,
     },
+    /// Anteilstausch.
+    Swap,
 }
 
 /// Eine Gelegenheit zur Wahl.
@@ -225,11 +227,17 @@ pub fn u_accept(
         Answering::Protectorate { as_ward: false } => {
             profile.grab + profile.merge * picture.aff - 0.2
         }
+        Answering::Swap => u_bind(picture, profile) + profile.open - 0.5,
         Answering::Merge { i_lead } => {
             let follow = if i_lead { 0.0 } else { 1.0 };
             let weight = picture.share_me / (picture.share_me + picture.share_other).max(1e-6);
+            // Der Preis der Eigenständigkeit schwindet mit der Not, bis auf die Hälfte.
             u_bind(picture, profile)
-                - levers.lead_cost * follow * weight * (1.0 - window(picture, profile).min(1.0))
+                - levers.lead_cost
+                    * follow
+                    * weight
+                    * (1.0 - window(picture, profile).min(1.0))
+                    * (1.0 - 0.5 * picture.want)
         }
     }
 }
@@ -369,9 +377,21 @@ pub fn decline_reason(
                 -levers.rung_cost[kind.index()] * (1.0 - uniform.open),
             ),
         ],
-        Answering::Peace { cost, .. } => vec![
-            (DeclineReason::Ahead, -picture.lead / 50.0),
-            (DeclineReason::TermsTooHarsh, -cost),
+        Answering::Peace { cost, .. } => {
+            let mut terms = vec![(DeclineReason::Ahead, -picture.lead / 50.0)];
+            // Wer nichts gibt, nennt keine harten Bedingungen.
+            if cost > 0.0 {
+                terms.push((DeclineReason::TermsTooHarsh, -cost));
+            }
+            terms
+        }
+        Answering::Swap => vec![
+            (DeclineReason::Distrust, picture.trust - 0.7),
+            (
+                DeclineReason::TooLittleEntanglement,
+                uniform.merge * (window + picture.dep) * picture.trust + sovereignty,
+            ),
+            (DeclineReason::Sovereignty, uniform.open - 0.5),
         ],
         Answering::Protectorate { .. } | Answering::Merge { .. } => vec![
             (DeclineReason::Sovereignty, sovereignty),

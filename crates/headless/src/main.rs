@@ -3,6 +3,7 @@
 
 mod battle;
 mod budget;
+mod diplo;
 mod fleets;
 mod research;
 mod script;
@@ -421,6 +422,7 @@ fn main() -> ExitCode {
                     println!("  {ending}");
                 }
             }
+            diplo::print(&runs, years);
             let violations: Vec<_> = runs
                 .iter()
                 .filter_map(|run| run.violation.as_ref().map(|v| (run.seed, v.clone())))
@@ -430,12 +432,14 @@ fn main() -> ExitCode {
             }
             if let Some(path) = csv {
                 let mut text = String::from(
-                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won,ending,ending_year,defense_paid,sieges_begun,sieges_stormed,sieges_starved,sieges_capitulated,sieges_lifted,worlds_fallen,communities_ended,ai_campaigns,siege_days,siege_longest,siege_troops_lost_attackers,siege_troops_lost_defenders,colonies,colonies_without_stores,dry_fleet_days,dry_longest,cut_off_days\n",
+                    "seed,hash,days,free_planets,essentials_met,utilization,employment,price_level,price_spread,pinned_prices,freighters,polity,alive,planets,population,fleets,ships,strength,arrears,battles,ships_lost,needs_met,revenue,fleet_paid,research_paid,handout,ships_built,ships_laid_up,fleets_lost,battles_decided,battles_stalemate,battles_timed_out,battles_called_off,battles_abandoned,months_at_war,months_in_arrears,fleet_value,blockade_days,offensives,ai_applied,ai_rejected,battles_won,ending,ending_year,defense_paid,sieges_begun,sieges_stormed,sieges_starved,sieges_capitulated,sieges_lifted,worlds_fallen,communities_ended,ai_campaigns,siege_days,siege_longest,siege_troops_lost_attackers,siege_troops_lost_defenders,colonies,colonies_without_stores,dry_fleet_days,dry_longest,cut_off_days",
                 );
+                text.push_str(diplo::CSV_HEADER);
+                text.push('\n');
                 for run in &runs {
-                    for polity in &run.polities {
+                    for (index, polity) in run.polities.iter().enumerate() {
                         text.push_str(&format!(
-                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{},{},{},{},{}\n",
+                            "{},{:x},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.1},{},{},{:.1},{:.3},{},{},{:.3},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{},{:.0},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{},{},{},{},{}{}\n",
                             run.seed,
                             run.hash,
                             run.days,
@@ -500,7 +504,8 @@ fn main() -> ExitCode {
                             run.colonies_without_stores,
                             run.dry_fleet_days,
                             run.dry_longest,
-                            run.cut_off_days
+                            run.cut_off_days,
+                            diplo::csv_fields(run, index)
                         ));
                     }
                 }

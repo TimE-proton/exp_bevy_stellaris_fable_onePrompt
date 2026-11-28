@@ -43,6 +43,47 @@ pub struct SurveyEntry {
     pub power: f32,
     /// Sie kann noch Welten besiedeln.
     pub can_claim: bool,
+    /// Monatsabschlüsse in Folge, an denen keine freie Welt mehr in ihrer Reichweite lag
+    /// (gleich, was die Kasse hergäbe): die Enge.
+    #[serde(default)]
+    pub crowded_months: u32,
+    /// Knappheit σ: Anteil der Ergiebigkeit ihrer nicht nachwachsenden Vorkommen, der
+    /// schon abgebaut ist (0 = unberührt, 1 = erschöpft).
+    #[serde(default)]
+    pub scarcity: f32,
+}
+
+impl SurveyEntry {
+    /// Not, wie sie jeder aus öffentlichen Zahlen ablesen kann, 0..1: Schrumpfen (nur
+    /// ein Drittel, solange noch Welten frei sind), Enge und Knappheit.
+    pub fn want(&self, levers: &crate::data::DiplomacyLevers) -> f32 {
+        let mut shrinking = (-self.trend * 10.0).clamp(0.0, 1.0);
+        if self.can_claim {
+            shrinking *= 0.3;
+        }
+        let crowding = (self.crowded_months as f32 / (12.0 * levers.crowding_years)).min(1.0);
+        (shrinking + levers.crowding_weight * crowding + levers.scarcity_weight * self.scarcity)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Knappheit der nicht nachwachsenden Vorkommen auf den Welten einer Gemeinschaft.
+pub fn scarcity(data: &GameData, galaxy: &Galaxy, polity: PolityId) -> f32 {
+    let (mut rich, mut left) = (0.0f64, 0.0f64);
+    for planet in galaxy.planets_of(polity) {
+        for deposit in &planet.deposits {
+            if data.good(deposit.good).renewable {
+                continue;
+            }
+            rich += deposit.richness as f64;
+            left += (deposit.richness * deposit.reserve) as f64;
+        }
+    }
+    if rich > 0.0 {
+        (1.0 - left / rich).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
 }
 
 /// Bauwert der Flotten einer Gemeinschaft (ohne Verbündete), Credits.
@@ -185,6 +226,23 @@ pub fn survey(inputs: &SurveyInputs, diplomacy: &mut Diplomacy, economy: &Econom
             day,
         )
         .is_empty();
+        // Enge: keine freie Welt in Reichweite, gleich was die Kasse hergäbe.
+        let room = entry.can_claim
+            || !claimable_planets(
+                galaxy,
+                polities,
+                &data.balance.colonization,
+                crate::economy::Money::MAX,
+                *id,
+                day,
+            )
+            .is_empty();
+        entry.crowded_months = if room {
+            0
+        } else {
+            entry.crowded_months.saturating_add(1)
+        };
+        entry.scarcity = scarcity(data, galaxy, *id);
     }
     for (index, entry) in diplomacy.survey.iter_mut().enumerate() {
         if !polities.list[index].alive {
@@ -217,6 +275,7 @@ pub fn survey(inputs: &SurveyInputs, diplomacy: &mut Diplomacy, economy: &Econom
                     (day.saturating_sub(treaty.since_day) / DAYS_PER_MONTH) as u32
                 });
             let conqueror = conquerors.contains(&a) || conquerors.contains(&b);
+            let needed = diplomacy.merge_affinity_needed(levers, a, b);
             let relation: &mut Relation = diplomacy.relation_mut(a, b);
             let (sa, sb) = (side(a, b), side(b, a));
             relation.stake[sa] = ratio(held[ia][ib], value[ib]).min(1.0);
@@ -254,7 +313,7 @@ pub fn survey(inputs: &SurveyInputs, diplomacy: &mut Diplomacy, economy: &Econom
             if rungs > 0 {
                 reasons.push((TensionReason::Treaties, -6.0 * rungs as f32));
             }
-            let entangled = (relation.tie / levers.merge_tie).min(1.0);
+            let entangled = (relation.tie / levers.tie_scale).min(1.0);
             if entangled > 0.0 {
                 reasons.push((TensionReason::Entanglement, -20.0 * entangled));
             }
@@ -270,8 +329,45 @@ pub fn survey(inputs: &SurveyInputs, diplomacy: &mut Diplomacy, economy: &Econom
             let ready = !at_war
                 && union_months >= levers.merge_union_months
                 && relation.tie >= levers.merge_tie
-                && aff >= levers.merge_affinity;
+                && aff >= needed;
             relation.merge_months = if ready { relation.merge_months + 1 } else { 0 };
+        }
+    }
+
+    // Gelebte Kultur gleicht sich an, wo man miteinander handelt und verbunden ist: je
+    // Abhängigkeit, verstärkt unter Handels- und Unionsvertrag, nie im Krieg oder Embargo.
+    if levers.contact_rate > 0.0 {
+        let before = diplomacy.culture.clone();
+        for a in &alive {
+            let Some(own) = before.get(a.index()).copied() else {
+                continue;
+            };
+            let mut shift = [0.0f32; 3];
+            for b in alive.iter().filter(|b| *b != a) {
+                let Some(relation) = diplomacy.relation(*a, *b) else {
+                    continue;
+                };
+                if relation.war.is_some() || relation.any_embargo() {
+                    continue;
+                }
+                let bond = if relation.has(TreatyKind::Union) {
+                    levers.contact_union
+                } else if relation.has(TreatyKind::Trade) {
+                    levers.contact_trade
+                } else {
+                    0.0
+                };
+                let weight = levers.contact_rate * relation.dep[side(*a, *b)] * bond;
+                let other = before.get(b.index()).copied().unwrap_or(own);
+                for (slot, (mine, theirs)) in shift.iter_mut().zip(own.iter().zip(&other)) {
+                    *slot += weight * (theirs - mine);
+                }
+            }
+            if let Some(culture) = diplomacy.culture.get_mut(a.index()) {
+                for (value, delta) in culture.iter_mut().zip(shift) {
+                    *value = (*value + delta).clamp(0.0, 1.0);
+                }
+            }
         }
     }
 

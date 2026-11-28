@@ -14,6 +14,9 @@
 //! - Schutz: Der Schützling unterstellt sich der Schutzmacht (gewollt, `Path::Joined`).
 //! - Vereinigung: Die geführte Gemeinschaft geht in der führenden auf
 //!   (`Succession::absorb` auf dem Weg `Path::Joined`).
+//! - Anteilstausch: Jeder Staat überträgt dem anderen eigene Anteile an Betrieben auf
+//!   seinem Gebiet im Wert von `value` Credits (soweit er sie hält). Es fließt kein Geld;
+//!   die Verflechtung beider wächst.
 
 use super::occasion::{Answering, DeclineReason};
 use super::relations::{TreatyKind, Tribute};
@@ -89,6 +92,9 @@ pub enum Deal {
     Protectorate { ward: PolityId },
     /// Vereinigung unter der Führung von `lead` (einer der beiden).
     Merge { lead: PolityId },
+    /// Anteilstausch: Jeder gibt dem anderen eigene Anteile im Wert von `value` Credits.
+    /// Setzt einen Investitionsvertrag voraus.
+    Swap { value: u64 },
 }
 
 impl Deal {
@@ -99,6 +105,7 @@ impl Deal {
             Deal::Peace(_) => 10,
             Deal::Protectorate { .. } => 11,
             Deal::Merge { .. } => 12,
+            Deal::Swap { .. } => 13,
         }
     }
 
@@ -109,6 +116,7 @@ impl Deal {
             Deal::Peace(terms) => terms.yielder == Some(polity),
             Deal::Protectorate { ward } => *ward == polity,
             Deal::Merge { lead } => *lead == polity,
+            Deal::Swap { .. } => false,
         }
     }
 
@@ -122,6 +130,7 @@ impl Deal {
             Deal::Merge { lead } => {
                 format!("Vereinigung unter Führung von {}", polities.get(*lead).name)
             }
+            Deal::Swap { value } => format!("Anteilstausch über {value} Credits je Seite"),
         }
     }
 }
@@ -258,6 +267,18 @@ pub fn check_deal(
             }
             Ok(())
         }
+        Deal::Swap { value } => {
+            if *value == 0 {
+                return Err("ein Tausch braucht einen Wert".into());
+            }
+            if !diplomacy.has_treaty(from, to, TreatyKind::Investment) {
+                return Err("ein Anteilstausch setzt den Investitionsvertrag voraus".into());
+            }
+            if diplomacy.embargoed(from, to) {
+                return Err("unter einem Embargo wird nicht getauscht".into());
+            }
+            Ok(())
+        }
         Deal::Merge { lead } => {
             if *lead != from && *lead != to {
                 return Err("führen kann nur eine der beiden".into());
@@ -334,6 +355,9 @@ pub fn propose(
     }
     let id = diplomacy.next_proposal;
     diplomacy.next_proposal += 1;
+    if matches!(deal, Deal::Treaty(_)) {
+        diplomacy.tally.actor(from).bind_proposals += 1;
+    }
     diplomacy.proposals.push(Proposal {
         id,
         from,
@@ -395,6 +419,7 @@ pub fn decline(
     let levers = &data.diplomacy.levers;
     let block = match proposal.deal {
         Deal::Peace(_) => levers.peace_block_days,
+        Deal::Merge { .. } => levers.merge_block_days,
         _ => levers.refusal_block_days,
     };
     diplomacy.blocked.retain(|_, until| *until > day);
@@ -468,6 +493,7 @@ pub fn answering(galaxy: &Galaxy, deal: &Deal, me: PolityId, data: &GameData) ->
         Deal::Merge { lead } => Answering::Merge {
             i_lead: *lead == me,
         },
+        Deal::Swap { .. } => Answering::Swap,
     }
 }
 
@@ -530,6 +556,20 @@ pub fn conclude(succession: &mut Succession, proposal: &Proposal, tick: u64) -> 
                 to,
                 truce,
             )?;
+            // Das Diktat (ohne eigene Nummer) zählt sein Aufrufer.
+            if proposal.id != u32::MAX {
+                succession.diplomacy.tally.peace(if terms.subjugate {
+                    super::PeaceKind::Subjugation
+                } else if yielder.is_some() {
+                    super::PeaceKind::Terms
+                } else {
+                    super::PeaceKind::White
+                });
+            }
+            if let (Some(victor), true) = (victor, terms.subjugate) {
+                succession.diplomacy.tally.subjugations += 1;
+                succession.diplomacy.tally.actor(victor).subjugated += 1;
+            }
             if let (Some(yielder), Some(victor)) = (yielder, victor) {
                 if terms.tribute_years > 0 {
                     succession.diplomacy.relation_mut(yielder, victor).tribute = Some(Tribute {
@@ -555,12 +595,23 @@ pub fn conclude(succession: &mut Succession, proposal: &Proposal, tick: u64) -> 
         }
         Deal::Protectorate { ward } => {
             let lord = if *ward == from { to } else { from };
-            succession.subordinate(*ward, lord, true, tick)
+            succession.subordinate(*ward, lord, true, tick)?;
+            succession.diplomacy.tally.protectorates += 1;
+            Ok(())
+        }
+        Deal::Swap { value } => {
+            for (giver, taker) in [(from, to), (to, from)] {
+                swap_out(succession, giver, taker, *value as f64);
+            }
+            Ok(())
         }
         Deal::Merge { lead } => {
             let junior = if *lead == from { to } else { from };
             let player_joins = succession.config.player == Some(junior);
             succession.absorb(junior, *lead, Path::Joined, tick)?;
+            succession.diplomacy.tally.merges += 1;
+            succession.diplomacy.tally.actor(junior).merges += 1;
+            succession.diplomacy.tally.actor(*lead).merges += 1;
             if player_joins {
                 succession.endgame.player = PlayerFate::Merged;
             }
@@ -608,4 +659,46 @@ pub fn release_ward(
         ),
     );
     Ok(())
+}
+
+/// Überträgt eigene Anteile des Staates `giver` an Betrieben auf seinem Gebiet an den Staat
+/// `taker`, bis `value` Credits erreicht sind oder nichts mehr da ist. Größte Betriebe
+/// zuerst, bei Gleichstand die kleinere Nummer.
+fn swap_out(succession: &mut Succession, giver: PolityId, taker: PolityId, value: f64) {
+    let state = HolderId::State(giver);
+    let mut offers: Vec<(f64, crate::ids::IssuerId, u64, f64)> = succession
+        .finance
+        .issuers
+        .iter()
+        .filter(|(id, _)| {
+            matches!(id, crate::ids::IssuerId::Firm { planet, .. }
+                if succession.galaxy.planet(*planet).owner == Some(giver))
+        })
+        .filter_map(|(id, issuer)| {
+            let held = issuer.held_by(state);
+            (held > 0 && issuer.price > 0.0).then(|| (issuer.market_value(), *id, held, issuer.price))
+        })
+        .collect();
+    offers.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut left = value;
+    for (_, issuer, held, price) in offers {
+        if left <= 0.0 {
+            break;
+        }
+        let shares = ((left / price).ceil() as u64).min(held);
+        if shares == 0 {
+            continue;
+        }
+        if crate::finance::distribute_shares(
+            succession.finance,
+            state,
+            issuer,
+            shares,
+            HolderId::State(taker),
+        )
+        .is_ok()
+        {
+            left -= shares as f64 * price;
+        }
+    }
 }

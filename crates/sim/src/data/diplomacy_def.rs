@@ -117,6 +117,8 @@ pub struct DiplomacyLevers {
     pub refusal_block_days: u64,
     /// Nach einem abgelehnten Frieden ruht ein neuer Friedensvorschlag so lange.
     pub peace_block_days: u64,
+    /// Nach einer abgelehnten Vereinigung ruht derselbe Vorschlag so lange.
+    pub merge_block_days: u64,
     /// Eine KI antwortet frühestens und spätestens so viele Tage nach dem Vorschlag.
     pub answer_days: (u64, u64),
     /// Kosten einer Vertragsstufe in der Reihenfolge von `TreatyKind::ALL`.
@@ -125,7 +127,12 @@ pub struct DiplomacyLevers {
     /// lange alles gehalten haben muss.
     pub merge_union_months: u32,
     pub merge_tie: f32,
+    /// Maß der Verflechtung, an dem Spannung und Druck auf die Haltung sie messen (voll
+    /// ab diesem Wert).
+    pub tie_scale: f32,
     pub merge_affinity: f32,
+    /// So weit sinkt die verlangte kulturelle Nähe bei voller Not beider.
+    pub affinity_relief: f32,
     pub merge_hold_months: u32,
     /// Preis, sich einer anderen Führung anzuschließen.
     pub lead_cost: f32,
@@ -169,6 +176,45 @@ pub struct DiplomacyLevers {
     /// Verbündeten, im Krieg oder mit gewährter Durchfahrt. Falsch: Alle Grenzen stehen
     /// offen wie bisher, und gewährte Durchfahrt ändert nichts.
     pub closed_borders: bool,
+    /// Gründerzeit in Jahren: So lange besiedeln die Gemeinschaften nur. Die KI eröffnet
+    /// nichts, schlägt nichts vor und bietet keinen Frieden an; Vorschläge beantwortet
+    /// sie von Anfang an.
+    pub founding_years: u64,
+    /// Zuschlagen: Tage der Vorbereitung bis zur Erklärung, Jahre, die ein Plan gilt, und
+    /// die geringste Aussicht auf den Sieg, mit der die KI noch erklärt.
+    pub prep_days: u64,
+    pub plan_years: u64,
+    pub strike_win: f32,
+    /// Rüstungsfaktor, solange ein Plan zum Zuschlagen besteht.
+    pub mobilize_factor: f64,
+    /// Enge: Nach so vielen Jahren ohne besiedelbare Welt ist die Not ganz da; ihr Gewicht
+    /// in der Not.
+    pub crowding_years: f32,
+    pub crowding_weight: f32,
+    /// Gewicht der Knappheit (Anteil erschöpfter Vorkommen) in der Not.
+    pub scarcity_weight: f32,
+    /// Anteilstausch: eine Tranche ist dieser Anteil am Marktwert der Betriebe der
+    /// kleineren Seite.
+    pub swap_tranche: f64,
+    /// Ein Frieden ohne Bedingungen, ohne dass jemand zurückliegt oder müde ist: erst nach
+    /// so vielen Monaten Krieg.
+    pub status_quo_months: u32,
+    /// Eine kleine Gemeinschaft sucht Schutz, sobald ihr Nutzen so hoch ist.
+    pub shelter_act: f32,
+    /// Faktor auf den Wert der gegnerischen Hauptwelt als Ziel eines Feldzugs, wenn der
+    /// Krieg ihrer Unterwerfung gilt.
+    pub aim_capital_bonus: f64,
+    /// Angleichung der Kultur je Monat: Rate je Abhängigkeit, und ihr Faktor unter
+    /// Handels- und unter Unionsvertrag (ohne beide gleicht sich nichts an).
+    pub contact_rate: f32,
+    /// Eine Vertragsstufe folgt erst, wenn ihre Voraussetzungen so viele Monate gehalten
+    /// haben (für die KI und ihre Antworten).
+    pub rung_hold_months: u32,
+    /// Eine KI schlägt eine Vereinigung unter eigener Führung nur vor, wenn ihr Gewicht der
+    /// Verbindung (`merge`) mindestens so hoch ist.
+    pub merge_lead_min: f32,
+    pub contact_trade: f32,
+    pub contact_union: f32,
 }
 
 /// Inhalt von `diplomacy.ron`.
@@ -234,6 +280,7 @@ impl DiplomacyData {
             ("half_life_months", levers.half_life_months),
             ("def_adv", levers.def_adv),
             ("merge_tie", levers.merge_tie),
+            ("tie_scale", levers.tie_scale),
         ];
         for (name, value) in positive {
             if !value.is_finite() || value <= 0.0 {
@@ -287,6 +334,20 @@ impl DiplomacyData {
         }
         if !(0.0..=100.0).contains(&levers.exhaustion) {
             return Err(invalid("exhaustion muss zwischen 0 und 100 liegen".into()));
+        }
+        if !(0.0..=1.0).contains(&levers.strike_win)
+            || !(levers.crowding_years > 0.0)
+            || levers.crowding_weight < 0.0
+            || levers.scarcity_weight < 0.0
+            || !(0.0..=1.0).contains(&levers.swap_tranche)
+            || levers.mobilize_factor < 1.0
+            || levers.plan_years == 0
+        {
+            return Err(invalid(
+                "strike_win und swap_tranche in 0..1, crowding_years positiv, Gewichte nicht \
+                 negativ, mobilize_factor ab 1, plan_years positiv erwartet"
+                    .into(),
+            ));
         }
         if levers.clues_kept == 0 || levers.acts_kept == 0 || levers.war_max_months == 0 {
             return Err(invalid(

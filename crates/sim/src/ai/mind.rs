@@ -14,10 +14,11 @@
 //! bewerten (`diplomacy::occasion::choice_probs`); Beobachter sehen nur die Taten.
 
 use crate::data::{ArchetypeDef, GameData};
-use crate::diplomacy::Archetype;
+use crate::diplomacy::{Archetype, WarAim};
 use crate::ids::PolityId;
 use crate::rng::{Domain, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Haltung einer Gemeinschaft.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -28,6 +29,33 @@ pub struct Mind {
     pub(in crate::ai) weights: [f32; 4],
     /// Zuletzt gemessener Druck (Verflechtung, Gelegenheit, Bedrohung, Not), 0..1.
     pub(in crate::ai) pressure: [f32; 4],
+    /// Laufende Pläne gegenüber anderen Gemeinschaften: zuschlagen oder binden.
+    #[serde(default)]
+    pub(in crate::ai) plans: BTreeMap<PolityId, Plan>,
+}
+
+/// Was eine Gemeinschaft gegenüber einer anderen vorhat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanKind {
+    /// Krieg mit diesem Ziel, sobald die Vorbereitung steht und die Aussicht reicht.
+    Strike(WarAim),
+    /// Annäherung: Vertragsstufen, Beteiligungen, am Ende die Vereinigung.
+    Bind,
+}
+
+/// Ein Plan gegenüber einer anderen Gemeinschaft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plan {
+    pub(in crate::ai) kind: PlanKind,
+    /// Tag des Entschlusses.
+    pub(in crate::ai) made_day: u64,
+    /// Frühester Tag der Erklärung (Zuschlagen).
+    pub(in crate::ai) ready_day: u64,
+    /// Danach verfällt der Plan, wenn er nicht ausgeführt ist.
+    pub(in crate::ai) until_day: u64,
+    /// Die Verträge mit dem Ziel sind gekündigt: Die Gemeinschaft wartet die Frist ab,
+    /// statt zu brechen.
+    pub(in crate::ai) denounced: bool,
 }
 
 /// Haltungen aller Gemeinschaften, in der Reihenfolge von `Polities::list`.
@@ -88,6 +116,7 @@ impl Minds {
                 anchor,
                 weights: anchor,
                 pressure: [0.0; 4],
+                plans: BTreeMap::new(),
             });
         }
     }
@@ -139,6 +168,80 @@ impl Minds {
         };
         mind.weights[archetype.index()] += amount;
         mind.weights = normalize(mind.weights);
+    }
+
+    /// Der Plan einer Gemeinschaft gegenüber einer anderen.
+    pub(in crate::ai) fn plan(&self, polity: PolityId, other: PolityId) -> Option<Plan> {
+        self.list
+            .get(polity.index())
+            .and_then(|mind| mind.plans.get(&other))
+            .copied()
+    }
+
+    pub(in crate::ai) fn set_plan(&mut self, polity: PolityId, other: PolityId, plan: Option<Plan>) {
+        let Some(mind) = self.list.get_mut(polity.index()) else {
+            return;
+        };
+        match plan {
+            Some(plan) => {
+                mind.plans.insert(other, plan);
+            }
+            None => {
+                mind.plans.remove(&other);
+            }
+        }
+    }
+
+    /// Rüstungsfaktor aus der Haltung: Ihr Rüstungsziel (`arm0 + arm1 · Bedrohung`) gegen
+    /// das mittlere der vier Grundhaltungen bei derselben Bedrohung.
+    pub(in crate::ai) fn arming_factor(&self, data: &GameData, polity: PolityId) -> f64 {
+        let Some(mind) = self.list.get(polity.index()) else {
+            return 1.0;
+        };
+        let threat = mind.pressure[Archetype::Paranoid.index()];
+        let profile = self.profile(data, polity);
+        let archetypes = &data.diplomacy.archetypes;
+        let mean = archetypes
+            .iter()
+            .map(|archetype| archetype.arm0 + archetype.arm1 * threat)
+            .sum::<f32>()
+            / archetypes.len().max(1) as f32;
+        let own = profile.arm0 + profile.arm1 * threat;
+        if mean > 0.0 {
+            (own / mean) as f64
+        } else {
+            1.0
+        }
+    }
+
+    /// Rüstet die Gemeinschaft für einen Schlag (ein Plan zum Zuschlagen besteht)?
+    pub(in crate::ai) fn mobilizing(&self, polity: PolityId) -> bool {
+        self.list.get(polity.index()).is_some_and(|mind| {
+            mind.plans
+                .values()
+                .any(|plan| matches!(plan.kind, PlanKind::Strike(_)))
+        })
+    }
+
+    /// Vergisst alle Pläne gegenüber einer Gemeinschaft, die endete oder nicht mehr frei
+    /// ist, und ihre eigenen.
+    pub(crate) fn forget(&mut self, polity: PolityId) {
+        for mind in &mut self.list {
+            mind.plans.remove(&polity);
+        }
+        if let Some(mind) = self.list.get_mut(polity.index()) {
+            mind.plans.clear();
+        }
+    }
+
+    /// Grundhaltung, mit der eine Gemeinschaft begann (ihr Anker). Nur für Auswertungen
+    /// der Läufe ohne Grafik (Merkmal `reveal`) und für Prüfungen: Die Oberfläche liest
+    /// sie nie.
+    #[cfg(any(test, feature = "reveal"))]
+    pub fn anchor_archetype(&self, polity: PolityId) -> Option<Archetype> {
+        let mind = self.list.get(polity.index())?;
+        let main = (0..4).max_by(|a, b| mind.anchor[*a].total_cmp(&mind.anchor[*b]))?;
+        Some(Archetype::from_index(main))
     }
 
     /// Gewichte einer Gemeinschaft, nur für Prüfungen innerhalb der KI.

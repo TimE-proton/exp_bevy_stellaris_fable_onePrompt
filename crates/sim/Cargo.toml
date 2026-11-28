@@ -13,5 +13,10 @@ serde.workspace = true
 ron.workspace = true
 postcard.workspace = true
 
+[features]
+# Gibt Auswertungen ohne Grafik (`crates/headless`) die wahre Grundhaltung jeder
+# Gemeinschaft frei, um die Einschätzungen daran zu messen. Das Spiel nutzt es nicht.
+reveal = []
+
 [lints]
 workspace = true

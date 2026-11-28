@@ -17,13 +17,13 @@
 (
     levers: (
         act: 0.15,
-        temperature: 0.10,
+        temperature: 0.05,
         tremble: 0.002,
-        anchor_main: 0.55,
-        anchor_rest: 0.15,
+        anchor_main: 0.70,
+        anchor_rest: 0.10,
         anchor_weight: 1.0,
         drift: 0.04,
-        def_adv: 1.2,
+        def_adv: 0.8,
         minor_share: 0.06,
         leader_share: 0.40,
         trend_months: 60.0,
@@ -35,14 +35,23 @@
         proposal_days: 60,
         refusal_block_days: 360,
         peace_block_days: 90,
+        // Eine abgelehnte Vereinigung wird erst nach Jahren wieder angetragen.
+        merge_block_days: 1800,
         answer_days: (3, 10),
         // Handel, Nichtangriff, Forschung, Investition, Verteidigung, Union
-        rung_cost: (0.2, 0.4, 0.5, 0.6, 0.9, 1.2),
-        merge_union_months: 24,
-        merge_tie: 0.15,
-        merge_affinity: 0.70,
+        rung_cost: (0.2, 0.4, 0.5, 0.6, 1.2, 1.8),
+        merge_union_months: 144,
+        // Gemessen: Die Verflechtung benachbarter Partner liegt nach Jahrzehnten unter
+        // Union und Anteilstausch bei 0,02 bis 0,07.
+        merge_tie: 0.04,
+        // Spannung und Druck auf die Haltung messen die Verflechtung bis zu diesem Wert.
+        tie_scale: 0.15,
+        merge_affinity: 0.82,
+        // Bei voller Not beider genügt weniger Nähe: Wo niemand mehr wachsen kann,
+        // rücken auch Fremde zusammen.
+        affinity_relief: 0.12,
         merge_hold_months: 12,
-        lead_cost: 0.6,
+        lead_cost: 3.0,
         vassal_tribute: 0.15,
         protectorate_tribute: 0.05,
         reparations: 0.10,
@@ -62,16 +71,41 @@
         clues_kept: 16,
         acts_kept: 256,
         continuous_evidence: false,
-        // Die KI trägt selbst Bindungen an. Kommt mit der strategischen Führung; bis dahin
-        // beantwortet sie nur Vorschläge.
-        ai_openings: false,
-        // Die KI bietet im Krieg selbst Frieden an. Kommt mit der strategischen Führung;
-        // bis dahin enden ihre Kriege durch Drehbuch, Spieler oder das Diktat.
-        ai_peace_offers: false,
+        // Die KI trägt selbst Bindungen an und plant Kriege (nach der Gründerzeit).
+        ai_openings: true,
+        // Die KI bietet im Krieg selbst Frieden an oder fordert Bedingungen. Kriege, die
+        // ein Drehbuch erklärt hat, beendet nur das Drehbuch (oder das Diktat).
+        ai_peace_offers: true,
         // Geschlossene Grenzen: Flotten brauchen fremdes Gebiet Durchfahrt (eigener
-        // Verbund, Verbündete, Krieg oder gewährte Durchfahrt). Wird eingeschaltet, sobald
-        // die militärische Führung der KI ihre Wege danach plant.
+        // Verbund, Verbündete, Krieg oder gewährte Durchfahrt). Bleibt aus, bis die
+        // militärische Führung der KI ihre Wege danach plant.
         closed_borders: false,
+        // Gründerzeit: In den ersten Jahrzehnten besiedeln die Gemeinschaften nur.
+        founding_years: 40,
+        // Zuschlagen: Vorbereitung, Gültigkeit des Plans, geringste Siegaussicht.
+        prep_days: 180,
+        plan_years: 2,
+        strike_win: 0.30,
+        mobilize_factor: 1.5,
+        // Not aus Enge (Jahre ohne freie Welt) und aus Knappheit (erschöpfte Vorkommen).
+        crowding_years: 100.0,
+        crowding_weight: 1.0,
+        scarcity_weight: 1.0,
+        // Wer sich bindet, tauscht Anteile in Tranchen dieses Anteils am Marktwert der
+        // Betriebe der kleineren Seite.
+        swap_tranche: 0.02,
+        status_quo_months: 12,
+        shelter_act: 0.15,
+        // Ein Feldzug mit dem Ziel der Unterwerfung sucht die Hauptwelt des Gegners.
+        aim_capital_bonus: 3.0,
+        // Kulturen gleichen sich an, wo Handel und Union verbinden.
+        contact_rate: 0.02,
+        // Vertrauen wächst langsam: Jede Stufe muss Jahre halten, bevor die nächste folgt.
+        rung_hold_months: 48,
+        // Wer wenig auf Verbindung gibt, führt keine Vereinigung: Er wächst durch Krieg.
+        merge_lead_min: 0.40,
+        contact_trade: 0.2,
+        contact_union: 1.5,
     ),
     archetypes: [
         (key: "kooperativ", label: "kooperativ",

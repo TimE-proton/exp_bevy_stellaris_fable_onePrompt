@@ -18,6 +18,9 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemState;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod player;
+pub use player::{CONQUEST_FROM_YEAR, PlayerStyle};
+
 /// Eine Partie ohne Fenster. Ruft das Simulations-Schedule direkt auf, ohne Wanduhr.
 pub struct Headless {
     app: App,
@@ -437,6 +440,78 @@ pub struct RunSummary {
     /// Flottentage mit leerem Tank einer Gemeinschaft ohne jeden Hafen
     /// (`FleetTally::cut_off_days`): Dort kann keine Führung auftanken.
     pub cut_off_days: u32,
+    /// Zählwerk der Diplomatie über die Partie.
+    pub diplomacy: crate::diplomacy::DiplomacyTally,
+    /// Wahre Grundhaltung (Anker) je Gemeinschaft, in der Reihenfolge von `polities`;
+    /// nur mit dem Merkmal `reveal` bekannt, sonst leer.
+    pub archetypes: Vec<Option<crate::diplomacy::Archetype>>,
+    /// Treffer der Einschätzungen am Ende: Anteil der Dossiers lebender Gemeinschaften
+    /// über lebende andere, deren führende Grundhaltung die wahre ist, und deren Zahl;
+    /// ebenso für die öffentlichen Bilder. Nur mit `reveal`.
+    pub dossier_accuracy: Option<f64>,
+    pub dossiers_judged: u32,
+    pub public_accuracy: Option<f64>,
+    /// Jahresmarken der Partie (aus `run_tracked`); leer, wenn nicht verfolgt.
+    pub marks: Vec<YearMark>,
+}
+
+/// Stand der Partie zu einem Jahresbeginn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct YearMark {
+    pub year: u64,
+    /// Freie lebende Gemeinschaften und souveräne Verbünde.
+    pub free: u32,
+    pub sovereigns: u32,
+}
+
+impl YearMark {
+    /// Stand einer laufenden Partie.
+    pub fn of(sim: &Headless) -> Self {
+        let world = sim.world();
+        let data = world.resource::<GameData>();
+        let diplomacy = world.resource::<crate::diplomacy::Diplomacy>();
+        let endgame = world.resource::<Endgame>();
+        let census = crate::endgame::census(sim.galaxy(), sim.polities(), diplomacy, endgame);
+        let sovereigns = census
+            .blocs
+            .iter()
+            .filter(|bloc| {
+                crate::endgame::is_sovereign(bloc, census.population, &data.balance.endgame)
+            })
+            .count() as u32;
+        YearMark {
+            year: sim.clock().day() / crate::clock::DAYS_PER_YEAR,
+            free: census.blocs.len() as u32,
+            sovereigns,
+        }
+    }
+}
+
+impl RunSummary {
+    /// Souveräne Verbünde zu Beginn des Jahres (die letzte Marke davor, wenn die Partie
+    /// vorher endete).
+    pub fn sovereigns_at(&self, year: u64) -> Option<u32> {
+        self.marks
+            .iter()
+            .rfind(|mark| mark.year <= year)
+            .map(|mark| mark.sovereigns)
+    }
+
+    /// Längste Folge von Jahren, in denen sich die Zahl der freien Gemeinschaften nicht
+    /// änderte (bis zum Ende der Partie oder der Laufzeit).
+    pub fn longest_still(&self) -> u64 {
+        let mut longest = 0;
+        let mut since = None::<(u64, u32)>;
+        for mark in &self.marks {
+            match since {
+                Some((start, free)) if free == mark.free => {
+                    longest = longest.max(mark.year - start);
+                }
+                _ => since = Some((mark.year, mark.free)),
+            }
+        }
+        longest
+    }
 }
 
 impl RunSummary {
@@ -607,7 +682,64 @@ pub fn summarize(sim: &Headless) -> RunSummary {
         ai_applied: sim.command_log().ai_applied,
         ai_rejected: sim.command_log().ai_rejected,
         outcome: sim.outcome(),
+        diplomacy: sim
+            .world()
+            .resource::<crate::diplomacy::Diplomacy>()
+            .tally
+            .clone(),
+        archetypes: truth(sim),
+        dossier_accuracy: accuracy(sim, false).map(|(share, _)| share),
+        dossiers_judged: accuracy(sim, false).map_or(0, |(_, count)| count),
+        public_accuracy: accuracy(sim, true).map(|(share, _)| share),
+        marks: Vec::new(),
     }
+}
+
+/// Wahre Grundhaltungen (Anker) aller Gemeinschaften, wenn das Merkmal `reveal` sie
+/// freigibt.
+fn truth(sim: &Headless) -> Vec<Option<crate::diplomacy::Archetype>> {
+    #[cfg(feature = "reveal")]
+    {
+        let ai = sim.world().resource::<AiState>();
+        sim.polities()
+            .list
+            .iter()
+            .map(|polity| ai.minds.anchor_archetype(polity.id))
+            .collect()
+    }
+    #[cfg(not(feature = "reveal"))]
+    {
+        vec![None; sim.polities().list.len()]
+    }
+}
+
+/// Anteil der Einschätzungen, deren führende Grundhaltung die wahre ist: über alle
+/// Dossiers lebender Beobachter über lebende andere mit mindestens einem Indiz, oder über
+/// die öffentlichen Bilder lebender Gemeinschaften.
+fn accuracy(sim: &Headless, public: bool) -> Option<(f64, u32)> {
+    let truth = truth(sim);
+    let diplomacy = sim.world().resource::<crate::diplomacy::Diplomacy>();
+    let alive: Vec<PolityId> = sim.polities().alive().map(|polity| polity.id).collect();
+    let (mut hits, mut count) = (0u32, 0u32);
+    for subject in &alive {
+        let Some(true_archetype) = truth.get(subject.index()).copied().flatten() else {
+            continue;
+        };
+        let dossiers: Vec<crate::diplomacy::Dossier> = if public {
+            vec![diplomacy.public_face_of(*subject)]
+        } else {
+            alive
+                .iter()
+                .filter(|observer| *observer != subject)
+                .map(|observer| diplomacy.dossier(*observer, *subject))
+                .collect()
+        };
+        for dossier in dossiers.iter().filter(|dossier| dossier.weight > 0.0) {
+            count += 1;
+            hits += u32::from(dossier.leading().0 == true_archetype);
+        }
+    }
+    (count > 0).then(|| (hits as f64 / count as f64, count))
 }
 
 /// Ein kompletter KI-gegen-KI-Lauf.
@@ -670,13 +802,18 @@ pub enum ScriptedAct {
     /// Welt des Gegners, die nicht sein Sitz ist, und dann seinen Sitz, bis er endet oder
     /// Frieden herrscht. Siehe [`WarScript::conduct`].
     Conquest { a: PolityId },
+    /// Ein Spieler nach Drehbuch: Von diesem Tag an führt die Strategie `style` die
+    /// Diplomatie von `who` und handelt zu jedem Monatsbeginn ([`player`]).
+    Player { who: PolityId, style: PlayerStyle },
 }
 
 impl ScriptedAct {
     /// Reihenfolge am selben Tag: erst die Führung, dann Frieden, Krieg, Bestellungen.
     fn rank(&self) -> u8 {
         match self {
-            ScriptedAct::Mode { .. } | ScriptedAct::NeighbourMode { .. } => 0,
+            ScriptedAct::Mode { .. }
+            | ScriptedAct::NeighbourMode { .. }
+            | ScriptedAct::Player { .. } => 0,
             ScriptedAct::Peace { .. } | ScriptedAct::PeaceWithAll { .. } => 1,
             ScriptedAct::War { .. }
             | ScriptedAct::BorderWar { .. }
@@ -765,7 +902,10 @@ impl WarScript {
 
     fn issue(sim: &mut Headless, event: &ScriptedEvent) {
         match &event.act {
-            ScriptedAct::Peace { a, b } => sim.issue(*a, SimCommand::MakePeace { target: *b }),
+            ScriptedAct::Peace { a, b } => {
+                Self::mark_scripted(sim, *a, *b, false);
+                sim.issue(*a, SimCommand::MakePeace { target: *b })
+            }
             ScriptedAct::War { a, b } => Self::open_war(sim, *a, *b),
             ScriptedAct::BorderWar { a } => {
                 if let Some(b) = nearest_neighbour(sim.galaxy(), sim.polities(), *a) {
@@ -798,6 +938,7 @@ impl WarScript {
                 if let Some(b) = nearest_neighbour(sim.galaxy(), sim.polities(), *a) {
                     // Die Flotten führt von nun an das Drehbuch; gerüstet wird weiter.
                     sim.set_military_mode(Some(*a), MilitaryMode::PassiveFleet);
+                    Self::mark_scripted(sim, *a, b, true);
                     sim.issue(*a, SimCommand::DeclareWar { target: b });
                 }
             }
@@ -808,6 +949,7 @@ impl WarScript {
                     .enemies_of(*a)
                     .collect();
                 for target in enemies {
+                    Self::mark_scripted(sim, *a, target, false);
                     // Frieden kann nur der Belagerer anbieten: Belagert der Gegner eine
                     // Welt von A, schließt er ihn.
                     let besieged = crate::siege::peace_veto(
@@ -826,6 +968,7 @@ impl WarScript {
                 }
             }
             ScriptedAct::Mode { who, mode } => sim.set_military_mode(*who, *mode),
+            ScriptedAct::Player { who, .. } => player::take_over(sim, *who),
             ScriptedAct::NeighbourMode { of, mode } => {
                 if let Some(neighbour) = nearest_neighbour(sim.galaxy(), sim.polities(), *of) {
                     sim.set_military_mode(Some(neighbour), *mode);
@@ -905,7 +1048,20 @@ impl WarScript {
             .map(|(_, _, planet)| planet)
     }
 
+    /// Vermerkt einen Krieg als einen des Drehbuchs (oder nimmt den Vermerk zurück): Die KI
+    /// bietet darin keinen Frieden an.
+    fn mark_scripted(sim: &mut Headless, a: PolityId, b: PolityId, on: bool) {
+        let mut ai = sim.world_mut().resource_mut::<AiState>();
+        let key = crate::diplomacy::pair(a, b);
+        if on {
+            ai.scripted_wars.insert(key);
+        } else {
+            ai.scripted_wars.remove(&key);
+        }
+    }
+
     fn open_war(sim: &mut Headless, a: PolityId, b: PolityId) {
+        Self::mark_scripted(sim, a, b, true);
         sim.issue(a, SimCommand::DeclareWar { target: b });
         // Nennt das Drehbuch eine Gemeinschaft, die es nicht gibt, wird die Erklärung
         // abgelehnt und steht so im Protokoll; Flottenbefehle folgen ihr dann nicht.
@@ -1272,7 +1428,12 @@ impl WarScript {
         let first_programme = self
             .events
             .iter()
-            .filter(|event| matches!(event.act, ScriptedAct::Navy { .. }))
+            .filter(|event| {
+                matches!(
+                    event.act,
+                    ScriptedAct::Navy { .. } | ScriptedAct::Player { .. }
+                )
+            })
             .map(|event| event.day)
             .min();
         if let Some(first) = first_programme {
@@ -1307,6 +1468,11 @@ impl WarScript {
             if stop.is_multiple_of(DAYS_PER_MONTH) {
                 for (polity, factor) in self.programmes(sim, stop) {
                     Self::top_up(sim, polity, factor);
+                }
+                for event in self.events.iter().filter(|event| event.day <= stop) {
+                    if let ScriptedAct::Player { who, style } = event.act {
+                        player::play(sim, who, style);
+                    }
                 }
             }
         }
@@ -1411,6 +1577,49 @@ pub fn campaign_wars() -> Vec<ScriptedEvent> {
         .collect()
 }
 
+/// Das Drehbuch „Diplomat“: Die erste Gemeinschaft wird vom ersten Tag an von einem
+/// Spieler nach Drehbuch geführt, der die Vereinigung sucht ([`PlayerStyle::Diplomat`]).
+pub fn diplomat_player() -> Vec<ScriptedEvent> {
+    vec![ScriptedEvent {
+        day: 0,
+        act: ScriptedAct::Player {
+            who: PolityId(0),
+            style: PlayerStyle::Diplomat,
+        },
+    }]
+}
+
+/// Das Drehbuch „Eroberer“: Die erste Gemeinschaft führt ein Spieler nach Drehbuch, der
+/// erobert ([`PlayerStyle::Conqueror`]). Er hebt vom Jahr 20 an Truppen aus und hält
+/// seine Marine auf dem Dreifachen der Startflotte; die Flotten führt die KI.
+pub fn conqueror_player() -> Vec<ScriptedEvent> {
+    let year = crate::clock::DAYS_PER_YEAR;
+    let a = PolityId(0);
+    vec![
+        ScriptedEvent {
+            day: 0,
+            act: ScriptedAct::Player {
+                who: a,
+                style: PlayerStyle::Conqueror,
+            },
+        },
+        ScriptedEvent {
+            day: 20 * year,
+            act: ScriptedAct::Garrison {
+                who: a,
+                regulars: 25.0,
+            },
+        },
+        ScriptedEvent {
+            day: 20 * year,
+            act: ScriptedAct::Navy {
+                who: Some(a),
+                factor: 3.0,
+            },
+        },
+    ]
+}
+
 /// Wie [`run_ai_game`], prüft aber jährlich die Invarianten und meldet den ersten Verstoß.
 pub fn run_checked(data: &GameData, seed: u64, days: u64) -> (Headless, Option<String>) {
     run_scripted(data, seed, days, &WarScript::default())
@@ -1423,8 +1632,21 @@ pub fn run_scripted(
     days: u64,
     script: &WarScript,
 ) -> (Headless, Option<String>) {
+    let (sim, violation, _) = run_tracked(data, seed, days, script);
+    (sim, violation)
+}
+
+/// Wie [`run_scripted`], mit einer Marke zu jedem Jahresbeginn ([`YearMark`]). Endet die
+/// Partie, steht die Uhr: Danach wird weder geprüft noch markiert.
+pub fn run_tracked(
+    data: &GameData,
+    seed: u64,
+    days: u64,
+    script: &WarScript,
+) -> (Headless, Option<String>, Vec<YearMark>) {
     let mut sim = Headless::new(data.clone(), SimConfig { seed, player: None });
     let mut violation = None;
+    let mut marks = vec![YearMark::of(&sim)];
     let mut done = 0;
     while done < days {
         let step = crate::clock::DAYS_PER_YEAR.min(days - done);
@@ -1435,8 +1657,12 @@ pub fn run_scripted(
         {
             violation = Some(format!("Tag {done}: {message}"));
         }
+        if sim.outcome().is_some() {
+            break;
+        }
+        marks.push(YearMark::of(&sim));
     }
-    (sim, violation)
+    (sim, violation, marks)
 }
 
 /// Viele Seeds parallel. Jeder Lauf ist für sich einfädig und deterministisch; die
@@ -1464,9 +1690,10 @@ pub fn sweep_scripted(
                     let Some(seed) = seeds.get(index) else {
                         break;
                     };
-                    let (sim, violation) = run_scripted(data, *seed, days, script);
+                    let (sim, violation, marks) = run_tracked(data, *seed, days, script);
                     let mut summary = summarize(&sim);
                     summary.violation = violation.or(summary.violation);
+                    summary.marks = marks;
                     results
                         .lock()
                         .expect("Sweep-Thread abgestürzt")

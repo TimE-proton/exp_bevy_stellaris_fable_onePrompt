@@ -132,6 +132,89 @@ pub struct Diplomacy {
     /// Nur der erste Antrag eines Jahres zählt als Indiz.
     #[serde(default)]
     pub bind_year: BTreeMap<(PolityId, PolityId), u64>,
+    /// Zählwerk über die ganze Partie, für Berichte und Sweeps.
+    #[serde(default)]
+    pub tally: DiplomacyTally,
+}
+
+/// Zählwerk der Diplomatie über die ganze Partie. Es zählt nur, was öffentlich geschah.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiplomacyTally {
+    /// Geschlossene Verträge je Art, in der Reihenfolge von `TreatyKind::ALL`.
+    pub treaties: [u32; 6],
+    /// Erklärte Kriege je Ziel: begrenzt, Unterwerfung.
+    pub wars: [u32; 2],
+    /// Friedensschlüsse: [`PeaceKind`] als Stelle.
+    pub peaces: [u32; 5],
+    /// Vertragsbrüche, Kündigungen, verhängte Embargos.
+    pub breaches: u32,
+    pub denounced: u32,
+    pub embargoes: u32,
+    /// Vereinigungen, gewollte Unterstellungen (Schutz) und Unterwerfungen.
+    pub merges: u32,
+    pub protectorates: u32,
+    pub subjugations: u32,
+    /// Je Gemeinschaft (Stelle = Nummer).
+    pub by_polity: Vec<ActorTally>,
+}
+
+/// Wie ein Krieg endete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeaceKind {
+    /// Vereinbart, ohne Bedingungen.
+    White = 0,
+    /// Vereinbart, mit Tribut oder Abtretungen.
+    Terms = 1,
+    /// Vereinbart, mit Unterwerfung.
+    Subjugation = 2,
+    /// Durch das Diktat (Frist oder volle Bilanz).
+    Diktat = 3,
+    /// Durch einen Befehl ohne Zustimmung der anderen Seite (Drehbücher, Prüfungen).
+    Imposed = 4,
+}
+
+/// Was eine Gemeinschaft über die Partie getan hat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorTally {
+    /// Erklärte Kriege, davon mit dem Ziel der Unterwerfung.
+    pub wars: u32,
+    pub subjugation_wars: u32,
+    /// Geschlossene Verträge (als eine der beiden Seiten).
+    pub treaties: u32,
+    /// Angetragene Bindungen (Vertragsvorschläge).
+    pub bind_proposals: u32,
+    /// Gebrochene und gekündigte Verträge.
+    pub breaches: u32,
+    pub denounced: u32,
+    /// Verhängte Embargos.
+    pub embargoes: u32,
+    /// Vereinigungen, an denen sie beteiligt war.
+    pub merges: u32,
+    /// Unterwerfungen, die sie als Siegerin durchsetzte.
+    pub subjugated: u32,
+}
+
+impl DiplomacyTally {
+    /// Das Zählwerk einer Gemeinschaft.
+    pub fn actor(&mut self, polity: PolityId) -> &mut ActorTally {
+        if self.by_polity.len() <= polity.index() {
+            self.by_polity
+                .resize(polity.index() + 1, ActorTally::default());
+        }
+        &mut self.by_polity[polity.index()]
+    }
+
+    /// Das Zählwerk einer Gemeinschaft zum Lesen.
+    pub fn of(&self, polity: PolityId) -> ActorTally {
+        self.by_polity
+            .get(polity.index())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn peace(&mut self, kind: PeaceKind) {
+        self.peaces[kind as usize] += 1;
+    }
 }
 
 impl Diplomacy {
@@ -187,6 +270,22 @@ impl Diplomacy {
             .sum::<f32>()
             .sqrt();
         (1.0 - distance / 3.0f32.sqrt()).clamp(0.0, 1.0)
+    }
+
+    /// Kulturelle Nähe, die eine Union und eine Vereinigung der beiden heute verlangen:
+    /// `merge_affinity`, gesenkt um `affinity_relief` mal der kleineren Not der beiden.
+    /// Wo niemand mehr wachsen kann, rücken auch Fremde zusammen.
+    pub fn merge_affinity_needed(
+        &self,
+        levers: &crate::data::DiplomacyLevers,
+        a: PolityId,
+        b: PolityId,
+    ) -> f32 {
+        let want = self
+            .surveyed(a)
+            .want(levers)
+            .min(self.surveyed(b).want(levers));
+        (levers.merge_affinity - levers.affinity_relief * want).clamp(0.0, 1.0)
     }
 
     /// Herrscht zwischen den Verbünden der beiden Krieg? Wer untersteht, teilt die Kriege
@@ -464,6 +563,11 @@ pub fn declare_war_with(
         took_capital: [false; 2],
     });
     diplomacy.wars.insert(pair(aggressor, target));
+    let subjugation = aim == WarAim::Subjugation;
+    diplomacy.tally.wars[usize::from(subjugation)] += 1;
+    let actor = diplomacy.tally.actor(aggressor);
+    actor.wars += 1;
+    actor.subjugation_wars += u32::from(subjugation);
     // Offene Vorschläge zwischen den beiden außer Frieden verfallen.
     proposals::drop_between(diplomacy, aggressor, target, |deal| {
         !matches!(deal, Deal::Peace(_))
@@ -829,6 +933,7 @@ fn settle_wars(
             };
             proposals::conclude(&mut succession, &proposal, tick).is_ok()
         });
+        succession.diplomacy.tally.peace(PeaceKind::Diktat);
         if !concluded {
             let _ = make_peace(
                 succession.diplomacy,

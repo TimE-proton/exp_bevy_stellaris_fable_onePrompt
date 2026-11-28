@@ -11,7 +11,9 @@
 //! - [`siege`]: Belagerung und Verteidigung der Welten: Zielwahl, Truppen, die Wahl
 //!   zwischen Aushungern, Sturm und Beschuss, Verteidigungspläne, Übergabe.
 //! - [`mind`]: die verborgenen Haltungen der Gemeinschaften. Nur die KI liest sie.
-//! - [`diplomat`]: Antworten auf Vorschläge, Annäherung, Frieden, Vereinigung.
+//! - [`diplomat`]: die strategische Führung: Antworten auf Vorschläge, Pläne zum
+//!   Zuschlagen oder Binden, Kriegserklärung mit Ziel, Embargo, Kündigung oder Bruch,
+//!   Frieden nach Bilanz und Ziel, Beteiligungen, Schutz, Vereinigung.
 
 pub mod diplomat;
 pub mod estimate;
@@ -233,6 +235,15 @@ pub struct AiState {
     /// Verborgene Haltungen je Gemeinschaft. Von außerhalb der KI nicht lesbar.
     #[serde(default)]
     pub minds: mind::Minds,
+    /// Kriege (Paare, kleinere Nummer zuerst), die ein Drehbuch erklärt hat: Sie beendet
+    /// nur das Drehbuch oder das Diktat, die KI bietet darin keinen Frieden an.
+    #[serde(default)]
+    pub scripted_wars: BTreeSet<(PolityId, PolityId)>,
+    /// Gemeinschaften, deren Diplomatie ein Drehbuch führt (ein Spieler nach Drehbuch): Die
+    /// KI eröffnet, schlägt und antwortet für sie nichts; Wirtschaft und Flotten führt
+    /// sie weiter.
+    #[serde(default)]
+    pub diplomacy_hold: BTreeSet<PolityId>,
 }
 
 impl AiState {

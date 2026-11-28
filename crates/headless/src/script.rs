@@ -44,6 +44,11 @@ pub struct ScriptArgs {
     /// `feldzug`: Die Gemeinschaften 0 bis 3 erklären zu Beginn der Jahre 20, 25, 30 und
     /// 35 ihrem nächsten Nachbarn den Krieg und schließen je 15 Jahre später Frieden;
     /// Flotten, Belagerungen und Verteidigung führt auf allen Seiten die KI.
+    /// `diplomat`: Gemeinschaft 0 führt vom ersten Tag an ein Spieler nach Drehbuch, der
+    /// die Vereinigung sucht (Verträge, Beteiligungen, Vereinigung unter eigener Führung,
+    /// Schutz für Kleine, nie Krieg). `eroberer`: Gemeinschaft 0 führt ein Spieler nach
+    /// Drehbuch, der vom Jahr 25 an schwache Nachbarn mit dem Ziel der Unterwerfung angreift;
+    /// er rüstet vom Jahr 20 an auf das Dreifache der Startflotte und hebt Truppen aus.
     #[arg(long, value_enum)]
     pub preset: Option<Preset>,
     /// Militärische Führung durch die KI, beliebig oft: WER (Nummer ab 0, `alle` für
@@ -61,6 +66,8 @@ pub enum Preset {
     GrenzkriegNachbarRuht,
     Eroberung,
     Feldzug,
+    Diplomat,
+    Eroberer,
 }
 
 impl ScriptArgs {
@@ -81,11 +88,13 @@ impl ScriptArgs {
             match preset {
                 Preset::Eroberung => events.extend(sim::harness::conquest_war()),
                 Preset::Feldzug => events.extend(sim::harness::campaign_wars()),
+                Preset::Diplomat => events.extend(sim::harness::diplomat_player()),
+                Preset::Eroberer => events.extend(sim::harness::conqueror_player()),
                 _ => events.extend(sim::harness::border_war()),
             }
             let passive = MilitaryMode::PassiveFleet;
             match preset {
-                Preset::Eroberung | Preset::Feldzug => {}
+                Preset::Eroberung | Preset::Feldzug | Preset::Diplomat | Preset::Eroberer => {}
                 Preset::Grenzkrieg => {}
                 Preset::GrenzkriegAngreiferRuht => events.push(ScriptedEvent {
                     day: 0,

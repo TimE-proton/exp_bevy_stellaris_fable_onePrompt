@@ -61,10 +61,20 @@ pub fn sign(
     kind: TreatyKind,
 ) {
     let day = tick / TICKS_PER_DAY;
-    diplomacy.relation_mut(a, b).treaties[kind.index()] = Some(super::Treaty {
+    let relation = diplomacy.relation_mut(a, b);
+    // Ist eine Voraussetzung gekündigt, endet der neue Vertrag mit ihr.
+    let ends_day = kind
+        .requires()
+        .iter()
+        .filter_map(|need| relation.treaties[need.index()].and_then(|treaty| treaty.ends_day))
+        .min();
+    relation.treaties[kind.index()] = Some(super::Treaty {
         since_day: day,
-        ends_day: None,
+        ends_day,
     });
+    diplomacy.tally.treaties[kind.index()] += 1;
+    diplomacy.tally.actor(a).treaties += 1;
+    diplomacy.tally.actor(b).treaties += 1;
     chronicle.push(
         tick,
         ChronicleKind::Diplomacy,
@@ -118,6 +128,11 @@ pub fn denounce(
         return Err(format!("„{}“ ist bereits gekündigt", kind.label()));
     }
     let ends = day + notice_days;
+    diplomacy.tally.denounced += 1;
+    diplomacy.tally.actor(actor).denounced += 1;
+    let Some(relation) = diplomacy.relations.get_mut(&super::pair(actor, other)) else {
+        return Ok(());
+    };
     for dependent in dependents(kind) {
         if let Some(treaty) = relation.treaties[dependent.index()].as_mut() {
             treaty.ends_day = Some(treaty.ends_day.map_or(ends, |old| old.min(ends)));
@@ -183,6 +198,8 @@ pub fn breach(
     let relation = diplomacy.relation_mut(breaker, victim);
     relation.treaties = [None; 6];
     relation.grievance[side(victim, breaker)] = 1.0;
+    diplomacy.tally.breaches += 1;
+    diplomacy.tally.actor(breaker).breaches += 1;
     let names = broken
         .iter()
         .map(|kind| format!("„{}“", kind.label()))

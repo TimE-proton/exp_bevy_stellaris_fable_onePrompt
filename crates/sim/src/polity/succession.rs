@@ -394,6 +394,8 @@ impl<'a> Succession<'a> {
             survey: _,
             battles_counted_until: _,
             bind_year: _,
+            // Das Zählwerk wächst mit, wenn die Neue etwas tut.
+            tally: _,
         } = &mut **diplomacy;
         let inherited = culture
             .get(parent.index())
@@ -963,10 +965,16 @@ impl<'a> Succession<'a> {
             plans,
             reserved,
             defense_hold: _,
-            // Die Haltung der Beendeten bleibt als Geschichte an ihrer Stelle stehen.
-            minds: _,
+            // Die Haltung der Beendeten bleibt als Geschichte an ihrer Stelle stehen; ihre
+            // Pläne und die Pläne gegen sie sind vergessen.
+            minds,
+            scripted_wars,
+            diplomacy_hold,
         } = &mut **ai;
         modes.remove(&from);
+        minds.forget(from);
+        scripted_wars.retain(|(a, b)| *a != from && *b != from);
+        diplomacy_hold.remove(&from);
         if let Some(plan) = plans.get_mut(from.index()) {
             *plan = MilitaryPlan {
                 offensives: plan.offensives,
