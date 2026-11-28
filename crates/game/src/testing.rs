@@ -544,6 +544,192 @@ pub mod conquest {
     }
 }
 
+/// Eine Partie mit Diplomatie (Seed 3, Spieler ist die erste Gemeinschaft): Nach vier
+/// Jahren hat der Spieler mit seinem nächsten Nachbarn Handel, Nichtangriff und Forschung
+/// geschlossen, mit einer dritten Gemeinschaft Handel; zwei KI-Gemeinschaften haben
+/// Handel und Nichtangriff; der Spieler hat einer vierten mit dem Ziel Unterwerfung den
+/// Krieg erklärt, der seit zwei Jahren läuft, und hält ein Embargo gegen eine fünfte;
+/// kurz vor dem Halt hat die dritte ihm Nichtangriff angetragen. Für Bilder und Tests der
+/// Fenster „Diplomatie“ und „Analyse“.
+pub mod diplomacy_scene {
+    use sim::GameData;
+    use sim::command::{CommandOutcome, SimCommand};
+    use sim::diplomacy::Diplomacy;
+    use sim::diplomacy::proposals::Deal;
+    use sim::diplomacy::relations::{TreatyKind, WarAim};
+    use sim::harness::{Headless, nearest_neighbour};
+    use sim::ids::PolityId;
+    use sim::state::{SAVE_FORMAT, SaveGame, SimConfig, SimState};
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    pub const SEED: u64 = 3;
+    pub const PLAYER: PolityId = PolityId(0);
+
+    /// Wer in der Szene welche Rolle hat.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Cast {
+        pub partner: PolityId,
+        pub trader: PolityId,
+        pub enemy: PolityId,
+        pub embargoed: PolityId,
+    }
+
+    fn applied(sim: &mut Headless, polity: PolityId, command: SimCommand) {
+        sim.issue(polity, command.clone());
+        sim.tick();
+        let outcome = sim
+            .command_log()
+            .entries
+            .last()
+            .map(|entry| entry.outcome.clone());
+        assert_eq!(outcome, Some(CommandOutcome::Applied), "{command:?}");
+    }
+
+    fn agree(sim: &mut Headless, from: PolityId, to: PolityId, kind: TreatyKind) {
+        let deal = Deal::Treaty(kind);
+        applied(
+            sim,
+            from,
+            SimCommand::Propose {
+                to,
+                deal: deal.clone(),
+            },
+        );
+        let id = sim
+            .world()
+            .resource::<Diplomacy>()
+            .proposals
+            .iter()
+            .find(|open| open.from == from && open.to == to && open.deal == deal)
+            .expect("offener Vorschlag")
+            .id;
+        applied(
+            sim,
+            to,
+            SimCommand::AnswerProposal {
+                proposal: id,
+                accept: true,
+            },
+        );
+    }
+
+    fn scene() -> &'static (GameData, SimState, Cast) {
+        static SCENE: OnceLock<(GameData, SimState, Cast)> = OnceLock::new();
+        SCENE.get_or_init(|| {
+            let data = GameData::load_workspace().expect("Spieldaten");
+            let mut sim = Headless::new(
+                data.clone(),
+                SimConfig {
+                    seed: SEED,
+                    player: Some(PLAYER),
+                },
+            );
+            sim.run_days(4 * sim::clock::DAYS_PER_YEAR);
+            let partner = nearest_neighbour(sim.galaxy(), sim.polities(), PLAYER).expect("Nachbar");
+            let mut rest: Vec<PolityId> = sim
+                .polities()
+                .alive()
+                .map(|polity| polity.id)
+                .filter(|id| *id != PLAYER && *id != partner)
+                .collect();
+            assert!(rest.len() >= 3, "zu wenige Gemeinschaften: {rest:?}");
+            let trader = rest.remove(0);
+            let enemy = rest.remove(0);
+            let embargoed = rest.remove(0);
+            for kind in [
+                TreatyKind::Trade,
+                TreatyKind::NonAggression,
+                TreatyKind::Research,
+            ] {
+                agree(&mut sim, PLAYER, partner, kind);
+            }
+            agree(&mut sim, PLAYER, trader, TreatyKind::Trade);
+            agree(&mut sim, partner, trader, TreatyKind::Trade);
+            agree(&mut sim, trader, partner, TreatyKind::NonAggression);
+            applied(
+                &mut sim,
+                PLAYER,
+                SimCommand::DeclareWarWithAim {
+                    target: enemy,
+                    aim: WarAim::Subjugation,
+                },
+            );
+            applied(
+                &mut sim,
+                PLAYER,
+                SimCommand::SetEmbargo {
+                    target: embargoed,
+                    on: true,
+                },
+            );
+            applied(
+                &mut sim,
+                PLAYER,
+                SimCommand::SetTransit {
+                    target: partner,
+                    open: true,
+                },
+            );
+            sim.run_days(2 * sim::clock::DAYS_PER_YEAR - 20);
+            applied(
+                &mut sim,
+                trader,
+                SimCommand::Propose {
+                    to: PLAYER,
+                    deal: Deal::Treaty(TreatyKind::NonAggression),
+                },
+            );
+            sim.run_days(10);
+            let mut state = sim.state();
+            state.galaxy.rebuild_index();
+            (
+                data,
+                state,
+                Cast {
+                    partner,
+                    trader,
+                    enemy,
+                    embargoed,
+                },
+            )
+        })
+    }
+
+    pub fn cast() -> Cast {
+        scene().2
+    }
+
+    /// Schreibt die Szene als Spielstand an diesen Ort.
+    pub fn write(path: &std::path::Path) {
+        let (data, state, _) = scene();
+        SaveGame {
+            format: SAVE_FORMAT,
+            data_hash: data.hash,
+            state: state.clone(),
+        }
+        .write(path)
+        .expect("Spielstand schreiben");
+    }
+
+    /// Die Szene als Spielstand, den nur dieser Testlauf kennt.
+    pub fn save_file(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("konfluenz_test_{}_{name}.ron", std::process::id()));
+        write(&path);
+        path
+    }
+
+    /// Schreibt die Szene nach `KONFLUENZ_SZENE` (für Bilder unter Xvfb):
+    /// `KONFLUENZ_SZENE=/pfad/szene.ron cargo test -p game -- --ignored write_scene`.
+    #[test]
+    #[ignore]
+    fn write_scene() {
+        let path = std::env::var("KONFLUENZ_SZENE").expect("KONFLUENZ_SZENE setzen");
+        write(std::path::Path::new(&path));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

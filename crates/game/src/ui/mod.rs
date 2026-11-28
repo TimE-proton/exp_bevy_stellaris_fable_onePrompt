@@ -1,7 +1,9 @@
 //! Oberfläche (egui). Die Fenster sind reine Funktionen über dem Simulationszustand:
 //! Sie lesen, zeichnen und geben Aktionen zurück. Erst das System unten wendet sie an.
 
+pub(crate) mod analysis;
 pub(crate) mod budget;
+pub(crate) mod diplomacy;
 mod economy;
 mod finance;
 pub(crate) mod fleets;
@@ -115,6 +117,8 @@ pub struct UiState {
     pub bond_amount: f32,
     /// Fenster „Belagerung“ und die Tafeln der Verteidigung.
     pub siege: siege::SiegeUi,
+    /// Fenster „Diplomatie“ und „Analyse“ mit Wahl und Entwürfen.
+    pub diplomacy: diplomacy::DiplomacyUi,
     /// Was aus der Gemeinschaft des Spielers geworden ist; die Kopfleiste nennt es, wenn
     /// er nur noch zusieht.
     pub player_fate: PlayerFate,
@@ -138,6 +142,7 @@ impl UiState {
         self.yard_chosen = fresh.yard_chosen;
         self.design_chosen = fresh.design_chosen;
         self.siege.forget_game();
+        self.diplomacy.forget_game();
     }
 }
 
@@ -171,6 +176,7 @@ impl Default for UiState {
             reserve_target: 0.0,
             bond_amount: 20_000.0,
             siege: siege::SiegeUi::default(),
+            diplomacy: diplomacy::DiplomacyUi::default(),
             player_fate: PlayerFate::default(),
         }
     }
@@ -246,6 +252,12 @@ fn hotkeys(
     }
     if keys.just_pressed(KeyCode::F1) {
         ui_state.help_open = !ui_state.help_open;
+    }
+    if keys.just_pressed(KeyCode::F2) {
+        ui_state.diplomacy.open = !ui_state.diplomacy.open;
+    }
+    if keys.just_pressed(KeyCode::F3) {
+        ui_state.diplomacy.analysis_open = !ui_state.diplomacy.analysis_open;
     }
     if keys.just_pressed(KeyCode::F5) {
         session.write(SessionRequest::Save(quicksave_path()));
@@ -415,6 +427,7 @@ fn draw_ui(
                 }
             }
             UiAction::ShowSiege(planet) => ui_state.siege.show(planet),
+            UiAction::ShowDiplomacy(polity) => ui_state.diplomacy.show(polity),
             UiAction::WatchSiege(planet) => {
                 practice.watch_siege.write(WatchSiege(planet));
             }

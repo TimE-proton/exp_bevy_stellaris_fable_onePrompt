@@ -194,17 +194,19 @@ die Gefechtsübung.
 | + / − | schneller / langsamer |
 | F5 / F9 | Schnellspeichern / Schnellladen (`saves/schnell.ron`) |
 | Reiter links | Übersicht, Markt (Preise mit Verlauf), Produktion (Werke, „Was sich hier lohnt"), Besitz (Zusammenhalt, Eigentümer) |
-| Knöpfe oben rechts | Warenflüsse, Produktionsketten, Börse, Staat (Finanzen, Haushalt, Verteidigung), Forschung, Belagerung (mit der Zahl der eigenen Belagerungen), Flotten (Schiffe, Werften, Kosten) |
+| Knöpfe oben rechts | Flüsse (Warenflüsse), Ketten (Produktionsketten), Börse, Staat (Finanzen, Haushalt, Verteidigung), Forschung, Belagerung (mit der Zahl der eigenen Belagerungen), Flotten (Schiffe, Werften, Kosten), Analyse, Diplomatie (mit der Zahl offener Vorschläge an uns) |
 | F1 | Hilfe |
+| F2 / F3 | Diplomatie / Analyse |
 | Esc | Menü |
 
 Mit Meilenstein 4 führt der Spieler Flotten und Werften, sieht den Staatshaushalt, lenkt
 die Forschung, verfolgt die Gefechte der Partie in 3D und kann Schiffe stilllegen; die
 anderen Gemeinschaften rüsten, führen ihre Flotten und legen Schiffe still, ohne dass
-jemand sie lenkt. „Krieg“ und „Frieden“ stehen in der Übersicht bei den Gemeinschaften;
-nach einem Friedensschluss gilt eine Waffenruhe, so lange ist der Knopf „Krieg“ gesperrt,
-und eine Zeile unter der Liste nennt die verbleibenden Tage. Die Liste nennt je
-Gemeinschaft die Zahl ihrer Schiffe und darunter jeden laufenden Krieg.
+jemand sie lenkt. Die Liste der Gemeinschaften rechts nennt je Gemeinschaft die Zahl ihrer
+Schiffe und den Stand der Beziehung zur eigenen (Krieg, Waffenruhe, Embargo, Verträge,
+Frieden, Schützling, Oberhaupt); ein Klick darauf öffnet das Fenster „Diplomatie“ bei ihr.
+Unter der Liste stehen jeder laufende Krieg und jede Waffenruhe mit ihren verbleibenden
+Tagen.
 
 Die Tabelle gilt für die Karte der Partie. Die Schlachtansicht hat eine eigene Steuerung,
 siehe unten.
@@ -250,6 +252,39 @@ eigenen Einblick möglich ist, etwa 0–4. In der Leiste daneben sind volle Käs
 (mindestens diese Stufe), getönte möglich und leere ausgeschlossen; eine einzelne grüne
 Zahl ist genau bekannt. Der Einblick wächst durch Besitz an den Betrieben der anderen und
 durch Gefechte gegen sie; was Gefechte an Einblick bringen, verblasst ohne neue wieder.
+
+### Diplomatie und Analyse
+
+„Diplomatie“ in der Kopfleiste (F2) öffnet das Fenster der Beziehungen. Oben steht der
+**Eingang**: Vorschläge an die eigene Gemeinschaft mit ihrer Frist und den Knöpfen
+„Annehmen“ und „Ablehnen“, darunter der Ausgang (eigene Vorschläge, „Zurückziehen“) und
+die zuletzt erledigten mit dem Grund einer Ablehnung. Die Zahl am Knopf der Kopfleiste
+nennt die offenen Vorschläge an uns. Links stehen die anderen Gemeinschaften mit dem Stand
+der Beziehung und der Spannung; rechts die gewählte:
+
+| Abschnitt | Inhalt und Handlungen |
+|---|---|
+| Spannung | 0 bis 100 mit ihren Gründen und Punkten (Nachbarschaft, Krieg, Embargo, Vertragsbruch, Eroberer, kulturelle Ferne, Verträge, Verflechtung) und dem Groll beider Seiten |
+| Krieg | Ohne Krieg: Kriegsziel wählen (begrenzt oder Unterwerfung) und „Krieg erklären“; besteht Nichtangriff, Verteidigung oder Union, sagt der Knopf „(Vertragsbruch)“ und der Schwebetext, was folgt. Im Krieg: Beginn, Angreifer, Ziel, Bilanz von −100 bis 100, genommene Bevölkerung, verlorener Flottenwert, Kriegsmüdigkeit, die Monate bis zum Diktat und was der Vorsprung zu fordern erlaubt. Darunter das **Friedensangebot**: ohne Bedingungen, „wir geben nach“ oder „… gibt nach“, mit Jahren Tribut, Vasallentum und abzutretenden Welten (mit ihrem Anteil an der Bevölkerung); „Frieden anbieten“ schickt es als Vorschlag |
+| Offene Vorschläge | zwischen beiden, mit Annehmen, Ablehnen oder Zurückziehen |
+| Verträge | die sechs Stufen mit ihrem Stand: besteht seit, gekündigt zum, möglich oder der Grund, warum nicht; „Vorschlagen“ und „Kündigen“ |
+| Handel und Grenzen | Embargo beider Seiten mit „Embargo verhängen/aufheben“, Durchfahrt beider Seiten mit „Durchfahrt gewähren/entziehen“, laufender Tribut |
+| Nähe und Verflechtung | kulturelle Nähe, Beteiligungen in beide Richtungen, Handelsabhängigkeit, Verflechtung gegen die Schwelle der Vereinigung und, unter einer Union, wie lange ihre Bedingungen gehalten haben |
+| Schutz und Vereinigung | „Um Schutz bitten“, „Schutz anbieten“, „Vereinigung unter unserer/ihrer Führung“; bei einem eigenen Schützling „In die Eigenständigkeit entlassen“ |
+
+Was die Simulation ablehnen würde, ist gesperrt, und der Schwebetext nennt ihren Grund;
+ein vorgemerkter Befehl wird nicht noch einmal angeboten. Frieden gibt es nur als
+Vorschlag, dem die Gegenseite zustimmen muss.
+
+„Analyse“ (F3) zeigt je anderer Gemeinschaft das eigene Dossier: die **vermutete Haltung**
+als vier Balken (kooperativ, opportunistisch, misstrauisch, expansionistisch) mit der
+Mitte der Einschätzung und ihrer Spanne, etwa „45 % (35–55 %)“, den Stand der Aufklärung,
+einen Hinweis, wenn ihr jüngstes Verhalten nicht mehr zur bisherigen Einschätzung passt,
+die **Indizien** (Tag, Tat, gegenüber wem, wofür sie spricht), die **geschätzte Stärke**
+von Flotte und Technik als Spanne neben den eigenen Zahlen und dem Einblick,
+die Verflechtung, „Was wir nicht wissen“ und **unser öffentliches Bild**: wie die anderen
+uns aus unseren Taten lesen. Alles dort ist ein Schluss aus öffentlichen Taten; die
+Haltung selbst zeigt das Spiel nie, auch nicht am Ende.
 
 ### Staat und Haushalt
 

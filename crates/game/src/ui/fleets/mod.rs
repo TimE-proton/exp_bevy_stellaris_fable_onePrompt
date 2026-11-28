@@ -1194,30 +1194,37 @@ mod tests {
             .resource::<sim::diplomacy::Diplomacy>()
             .truce_until(me, enemy, day)
             .expect("nach dem Frieden gilt eine Waffenruhe");
-        // Der Knopf ist gesperrt, die Tage des Kerns stehen unter der Liste. Knopf und Zeile
-        // liegen in beiden Fenstergrößen ganz im Fenster: Der gesperrte Knopf steht in der
-        // Spalte der übrigen und ist nicht breiter als sie.
+        // Im Fenster „Diplomatie“ ist der Knopf gesperrt; die Liste der Gemeinschaften nennt
+        // die Waffenruhe, und eine Zeile unter ihr die Tage des Kerns. Knopf und Zeile liegen
+        // in beiden Fenstergrößen ganz im Fenster.
         let name = game.resource::<Polities>().get(enemy).name.clone();
         let line = truce_line(&name, until - day);
+        game.world_mut()
+            .resource_mut::<crate::ui::UiState>()
+            .diplomacy
+            .show(enemy);
         for size in [Vec2::new(1280.0, 720.0), Vec2::new(1600.0, 900.0)] {
             game.resize(size);
             game.frames(4);
             let locked = game
-                .disabled_button("Krieg")
-                .expect("kein gesperrter Knopf „Krieg“");
-            let open = game.button("Krieg").expect("kein offener Knopf „Krieg“");
-            assert!(
-                (locked.x - open.x).abs() < 0.5,
-                "gesperrt bei {}, offen bei {}",
-                locked.x,
-                open.x
-            );
+                .disabled_button(crate::ui::diplomacy::DECLARE)
+                .expect("kein gesperrter Knopf „Krieg erklären“");
             assert!(
                 locked.x + 24.0 < size.x,
                 "Knopf bei {} von {}",
                 locked.x,
                 size.x
             );
+            let status = game
+                .button(&format!("{}: {name}", crate::ui::diplomacy::TITLE))
+                .expect("die Liste nennt den Stand");
+            assert!(
+                status.x + 12.0 < size.x,
+                "Stand bei {} von {}",
+                status.x,
+                size.x
+            );
+            assert!(game.text("Waffenruhe").is_some());
             let (_, rect) = game
                 .labels()
                 .into_iter()

@@ -1,7 +1,7 @@
 //! Die einzelnen Fenster und Leisten.
 
 use super::format::{decimal, percent, population};
-use super::{LeftTab, UiState, economy, finance, fleets, siege, tech};
+use super::{LeftTab, UiState, analysis, diplomacy, economy, finance, fleets, siege, tech};
 use crate::battle_view::campaign::{BattleMarker, WATCH, can_watch};
 use crate::endings;
 use crate::history::PriceHistory;
@@ -76,6 +76,8 @@ pub enum UiAction {
     WatchBattle(sim::ids::BattleId),
     /// Das Fenster „Belagerung“ bei der Belagerung dieser Welt öffnen.
     ShowSiege(PlanetId),
+    /// Das Fenster „Diplomatie“ bei dieser Gemeinschaft öffnen.
+    ShowDiplomacy(PolityId),
     /// Die Belagerung dieser Welt in der Orbitansicht zeigen.
     WatchSiege(PlanetId),
     Quit,
@@ -257,6 +259,8 @@ pub fn in_game(
     fleets::fleets_window(&ctx, area, sim, state, selection, actions);
     tech::tech_window(&ctx, area, sim, state, actions);
     siege::siege_window(&ctx, area, sim, &mut state.siege, actions);
+    diplomacy::diplomacy_window(&ctx, area, sim, &mut state.diplomacy, actions);
+    analysis::analysis_window(&ctx, area, sim, &mut state.diplomacy);
     finance::exchange_window(&ctx, area, sim, state, actions);
     finance::treasury_window(&ctx, area, sim, state, actions);
     if state.menu_open {
@@ -367,6 +371,9 @@ pub fn free_label(free: usize, total: usize) -> String {
     format!("{free}/{total} frei")
 }
 
+/// Knopf der Kopfleiste für das Fenster „Warenflüsse“, kurz gehalten.
+pub const FLOWS: &str = "Flüsse";
+
 /// Beschriftung des Pausenknopfs, solange die Zeit läuft und solange sie steht.
 pub const RUNNING_LABEL: &str = "⏸ Pause";
 pub const PAUSED_LABEL: &str = "▶ PAUSIERT";
@@ -436,12 +443,14 @@ fn top_bar(
                         .color(color32(polity.color)),
                 );
                 ui.separator();
+                // Kurz gehalten, damit die Leiste bei 1600 Pixeln in einer Zeile bleibt.
                 ui.label(format!(
-                    "{} Planeten · {} · Staatskasse {}",
+                    "{} Planeten · {} · Kasse {}",
                     sim.galaxy.planets_of(player).count(),
                     population(sim.galaxy.population_of(player)),
                     decimal(to_credits(sim.economy.treasury(player)), 0)
-                ));
+                ))
+                .on_hover_text("Planeten, Bevölkerung und Staatskasse (Credits)");
                 if sim.diplomacy.is_at_war(player) {
                     ui.label(
                         RichText::new("IM KRIEG")
@@ -472,6 +481,8 @@ fn top_bar(
         }
     };
     let right = |ui: &mut egui::Ui| {
+        // Etwas enger als sonst: So bleibt die Leiste bei 1600 Pixeln Breite in einer Zeile.
+        ui.spacing_mut().item_spacing.x = 6.0;
         if ui.button("Menü").on_hover_text("Esc").clicked() {
             state.menu_open = !state.menu_open;
         }
@@ -479,6 +490,13 @@ fn top_bar(
             state.help_open = !state.help_open;
         }
         ui.separator();
+        ui.toggle_value(&mut state.diplomacy.open, diplomacy_label(sim))
+            .on_hover_text(
+                "F2 · Beziehungen, Verträge, Krieg und Frieden. Die Zahl nennt offene \
+                 Vorschläge an uns.",
+            );
+        ui.toggle_value(&mut state.diplomacy.analysis_open, analysis::TITLE)
+            .on_hover_text("F3 · Was wir über die Haltung der anderen zu wissen glauben.");
         ui.toggle_value(&mut state.fleets_open, fleets::TITLE);
         ui.toggle_value(
             &mut state.siege.open,
@@ -492,7 +510,8 @@ fn top_bar(
         ui.toggle_value(&mut state.treasury_open, "Staat");
         ui.toggle_value(&mut state.exchange_open, "Börse");
         ui.toggle_value(&mut state.chains_open, "Ketten");
-        ui.toggle_value(&mut state.flows_open, "Warenflüsse");
+        ui.toggle_value(&mut state.flows_open, FLOWS)
+            .on_hover_text("Warenflüsse zwischen den Systemen");
         ui.separator();
         let free = sim
             .galaxy
@@ -941,37 +960,29 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
                 ));
                 match sim.config.player {
                     Some(player) if player != polity.id && polity.alive => {
-                        if sim.diplomacy.at_war(player, polity.id) {
-                            if ui
-                                .small_button(RichText::new("Frieden").color(ACCENT))
-                                .on_hover_text("Der Krieg endet sofort.")
-                                .clicked()
-                            {
-                                actions.push(UiAction::Command(SimCommand::MakePeace {
-                                    target: polity.id,
-                                }));
-                            }
-                        } else if let Some(until) =
+                        let status = diplomacy::status(sim, player, polity.id);
+                        if let Some(until) =
                             sim.diplomacy
                                 .truce_until(player, polity.id, sim.clock.day())
                         {
-                            // Der Kern lehnte die Erklärung ab; die Frist nennt er selbst.
-                            // Der Knopf bleibt so schmal wie seine Spalte, die Tage stehen
-                            // unter der Liste: Eine längere Beschriftung liefe aus dem Fenster.
-                            let days = until - sim.clock.day();
-                            ui.add_enabled(false, egui::Button::new("Krieg").small())
-                                .on_disabled_hover_text(truce_text(days));
-                            truces.push((polity.id, days));
-                        } else if ui
-                            .small_button("Krieg")
-                            .on_hover_text(
-                                "Krieg erklären. Erst im Krieg wirken Blockade und Kaperfahrt.",
+                            truces.push((polity.id, until - sim.clock.day()));
+                        }
+                        let button = ui
+                            // Klein gesetzt: Die Spalte ist schmal, und die Tafel soll bei
+                            // ihrer Grundbreite alles zeigen.
+                            .small_button(
+                                RichText::new(&status.label).size(11.0).color(status.color),
                             )
-                            .clicked()
-                        {
-                            actions.push(UiAction::Command(SimCommand::DeclareWar {
-                                target: polity.id,
-                            }));
+                            .on_hover_text(format!(
+                                "{}\nEin Klick öffnet das Fenster „Diplomatie“.",
+                                status.hover
+                            ));
+                        let name = format!("{}: {}", diplomacy::TITLE, polity.name);
+                        button.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name)
+                        });
+                        if button.clicked() {
+                            actions.push(UiAction::ShowDiplomacy(polity.id));
                         }
                     }
                     _ if !polity.alive => {
@@ -990,6 +1001,23 @@ fn polities_panel(ui: &mut egui::Ui, sim: &SimRefs, actions: &mut Vec<UiAction>)
     }
     for (polity, days) in truces {
         ui.label(detail(truce_line(&sim.polities.get(polity).name, days)).color(MUTED));
+    }
+}
+
+/// Beschriftung des Knopfs „Diplomatie“ in der Kopfleiste, mit der Zahl offener
+/// Vorschläge an die eigene Gemeinschaft.
+pub fn diplomacy_label(sim: &SimRefs) -> String {
+    let waiting = sim.config.player.map_or(0, |player| {
+        sim.diplomacy
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.to == player)
+            .count()
+    });
+    if waiting == 0 {
+        diplomacy::TITLE.to_string()
+    } else {
+        format!("{} ({waiting})", diplomacy::TITLE)
     }
 }
 
@@ -1046,7 +1074,7 @@ fn pause_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiActi
 }
 
 /// Tasten der Galaxiekarte.
-const MAP_KEYS: [(&str, &str); 9] = [
+const MAP_KEYS: [(&str, &str); 11] = [
     ("Linksklick", "System wählen"),
     ("Rechte/mittlere Maustaste ziehen", "Karte verschieben"),
     ("W A S D / Pfeile", "Karte verschieben"),
@@ -1054,6 +1082,8 @@ const MAP_KEYS: [(&str, &str); 9] = [
     ("Leertaste", "Pause"),
     ("1 – 6", "Geschwindigkeit ½× bis 25×"),
     ("+ / −", "schneller / langsamer"),
+    ("F2", "Diplomatie"),
+    ("F3", "Analyse"),
     ("F5 / F9", "Schnellspeichern / Schnellladen"),
     ("Esc", "Menü"),
 ];

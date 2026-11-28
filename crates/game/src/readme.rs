@@ -56,12 +56,35 @@ fn the_manual_has_its_parts() {
     let manual = section("## Bedienung");
     // Die Unterabschnitte gehören zur Bedienung und nicht hinter den nächsten Abschnitt.
     assert!(manual.contains("\n### Forschung\n"));
+    assert!(manual.contains("\n### Diplomatie und Analyse\n"));
     assert!(manual.contains("\n### Flotten\n"));
     assert!(manual.contains("\n### Belagerung und Verteidigung\n"));
     assert!(manual.contains("\n### Gefechtsübung\n"));
     assert!(manual.contains("\n### Schlachtansicht\n"));
     assert!(!manual.contains("\n## "));
     assert!(section("### Gefechtsübung").len() < manual.len());
+}
+
+#[test]
+fn the_manual_names_what_the_diplomacy_and_analysis_windows_offer() {
+    use crate::ui::{analysis, diplomacy};
+    let text = section("### Diplomatie und Analyse").replace('\n', " ");
+    for label in [
+        diplomacy::TITLE,
+        analysis::TITLE,
+        diplomacy::ACCEPT,
+        diplomacy::DECLINE,
+        diplomacy::WITHDRAW,
+        diplomacy::PROPOSE,
+        diplomacy::CANCEL,
+        diplomacy::DECLARE,
+        diplomacy::OFFER_PEACE,
+        diplomacy::ASK_PROTECTION,
+        diplomacy::OFFER_PROTECTION,
+        diplomacy::RELEASE,
+    ] {
+        assert!(text.contains(&format!("„{label}“")), "„{label}“ fehlt");
+    }
 }
 
 #[test]
