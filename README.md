@@ -410,7 +410,7 @@ Belagerer, Verteidiger, Lage und die Legende, ein Klick öffnet das Fenster „B
 bei dieser Welt.
 
 **Orbitansicht.** „Ansehen“ neben dem Namen der Welt im Fenster „Belagerung“ zeigt die
-Belagerung in 3D, mit Kamera, Licht und Schiffsmodellen der Schlachtansicht: die Welt,
+Belagerung in 3D, mit Kamera und Schiffsmodellen der Schlachtansicht: die Welt,
 die Flotten des Belagerers nach Schiffsklassen im Orbit (große Flotten im Maßstab, die
 Tafel nennt ihn), Orbitalstationen auf ihrer Bahn, Geschütze und Bunker am Boden und den
 Schild als Schale, so hell wie seine Ladung. Die Flotte rückt mit den Phasen näher an
@@ -419,7 +419,8 @@ Partie; Pause und Geschwindigkeit gelten wie auf der Karte. Geschossen wird in d
 Szene nur, wo der Tagesbericht der Simulation Beschuss, Gegenfeuer oder Bodenkampf
 meldet: Feuer aus dem Orbit trifft den Schild oder die Oberfläche, Geschütze und
 Stationen schießen zurück, nach einer Landung gehen Boote von der Flotte zu Boden. Am
-Boden zeigen Scheiben die Zonen in der Farbe dessen, der sie hält; wo gekämpft wird,
+Boden zeigen Kappen, die der Krümmung folgen, die Zonen in der Farbe dessen, der sie
+hält; wo gekämpft wird,
 pulsiert ein Ring, und im Untergrund flackert es im ganzen Landegebiet. Die Tafel links
 nennt Phase, „Lage“ (Dauer, Fortschritt, Vorräte, Truppen, Flotte, Schild), die
 „Prognose“ und unter „Meldungen“, was sich geändert hat, seit die Ansicht offen ist
@@ -433,6 +434,16 @@ führt zur Karte mit dem Fenster „Belagerung“ bei dieser Welt, „Übersicht
 Welt und Flotte ins Bild. Fällt die Welt oder wird die Belagerung aufgehoben, hält die
 Partie an, und „Ausgang der Belagerung“ nennt in den Worten der Chronik, was geschah;
 die Tafel links zeigt danach den „Stand am Ende der Belagerung“, ohne Prognose.
+
+Jede Welt sieht nach ihrer Art aus, deterministisch aus ihrer Kennung erzeugt: Garten-
+und Ozeanwelten mit Meeren, Küsten, Vegetation nach Breite und Temperatur und Eis,
+Steppen trocken mit Salzpfannen, Eiswelten mit Rissen und offenen Rinnen, Felswelten
+voller Krater, Glutwelten mit glühenden Nähten und Lavaseen, Giftwelten mit sauren
+Meeren, Gasriesen mit Bändern und Wirbelstürmen. Welten mit Luft tragen Wolken und
+einen Saum in der Farbe ihrer Atmosphäre, luftlose nicht. Die Sonne steht seitlich:
+Die Nachtseite ist dunkel, Glut und Stadtlichter leuchten darin. Die Oberfläche
+(Texturen 2048×1024) entsteht abseits des Hauptfadens; bis sie fertig ist, zeigt die
+Welt ein Vorabbild, beim zweiten Besuch ist sie sofort da. Kriegsschäden dunkeln sie ab.
 
 **Ende einer Gemeinschaft.** Verliert eine Gemeinschaft ihre letzte Welt oder geht sie
 in einer anderen auf, meldet es das Fenster „Eine Gemeinschaft endet“ mit dem Eintrag
