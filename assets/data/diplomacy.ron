@@ -89,6 +89,9 @@
         prep_days: 180,
         plan_years: 2,
         strike_win: 0.30,
+        // In der Not wagt eine Gemeinschaft mehr: Die geringste Siegaussicht sinkt bis auf
+        // die Hälfte.
+        want_boldness: 0.5,
         mobilize_factor: 1.5,
         // Not aus Enge (Jahre ohne freie Welt) und aus Knappheit (erschöpfte Vorkommen).
         crowding_years: 100.0,

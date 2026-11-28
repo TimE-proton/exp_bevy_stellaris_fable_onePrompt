@@ -188,6 +188,9 @@ pub struct DiplomacyLevers {
     pub prep_days: u64,
     pub plan_years: u64,
     pub strike_win: f32,
+    /// In der Not sinkt die geringste Siegaussicht bis auf (1 − `want_boldness`) ihres
+    /// Werts: Wer nicht mehr wachsen kann, wagt mehr.
+    pub want_boldness: f32,
     /// Rüstungsfaktor, solange ein Plan zum Zuschlagen besteht.
     pub mobilize_factor: f64,
     /// Enge: Nach so vielen Jahren ohne besiedelbare Welt ist die Not ganz da; ihr Gewicht
@@ -346,6 +349,7 @@ impl DiplomacyData {
             return Err(invalid("exhaustion muss zwischen 0 und 100 liegen".into()));
         }
         if !(0.0..=1.0).contains(&levers.strike_win)
+            || !(0.0..=1.0).contains(&levers.want_boldness)
             || !(levers.crowding_years > 0.0)
             || levers.crowding_weight < 0.0
             || levers.scarcity_weight < 0.0

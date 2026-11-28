@@ -387,6 +387,16 @@ fn open_toward(
     let key = ((me.index() as u64) << 16) | other.index() as u64;
     let mut rng = Rng::stream(config.seed, Domain::Ai, key, year);
     let until_day = day + levers.plan_years * DAYS_PER_YEAR;
+    // Binden ohne Ziel: Alle Stufen gelten, und eine Vereinigung wird es mit ihr nicht
+    // geben (sie selbst führte keine und folgte keiner). Das weiß nur sie selbst.
+    let mut probs = probs;
+    if bind_is_spent(ground, me, other, profile, &picture) {
+        probs[BIND] = 0.0;
+        let sum: f32 = probs.iter().sum();
+        if sum > 0.0 {
+            probs.iter_mut().for_each(|p| *p /= sum);
+        }
+    }
     let kind = match draw(&probs, rng.f64()) {
         STRIKE => {
             let aims = choice_probs(profile, &Occasion::Aim(picture), levers);
@@ -411,6 +421,28 @@ fn open_toward(
             denounced: false,
         }),
     );
+}
+
+/// Hat Binden gegenüber `other` kein Ziel mehr? Keine Stufe ist mehr offen, und die
+/// Vereinigung käme nicht zustande, weil `me` sie weder führen noch ihr folgen will.
+fn bind_is_spent(
+    ground: &Ground,
+    me: PolityId,
+    other: PolityId,
+    profile: &ArchetypeDef,
+    picture: &crate::diplomacy::occasion::Picture,
+) -> bool {
+    let levers = &ground.data.diplomacy.levers;
+    if next_rung(ground, me, other).is_some()
+        || !ground.diplomacy.has_treaty(me, other, TreatyKind::Union)
+    {
+        return false;
+    }
+    let would_lead = profile.merge >= levers.merge_lead_min
+        && u_accept(Answering::Merge { i_lead: true }, picture, profile, levers) >= levers.act;
+    let would_follow =
+        u_accept(Answering::Merge { i_lead: false }, picture, profile, levers) >= levers.act;
+    !would_lead && !would_follow
 }
 
 /// Verträge des Paares, die gelten.
@@ -478,7 +510,8 @@ fn pursue_strike(
         return;
     }
     let picture = ground.picture(Perspective::Own, me, other);
-    if win_chance(&picture, profile, levers) < levers.strike_win {
+    let needed = levers.strike_win * (1.0 - levers.want_boldness * picture.want);
+    if win_chance(&picture, profile, levers) < needed {
         return;
     }
     push(
