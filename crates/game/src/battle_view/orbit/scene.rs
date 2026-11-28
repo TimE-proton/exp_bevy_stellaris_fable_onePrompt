@@ -6,30 +6,49 @@
 //! Landungsboote sind kurzlebige Entities; wie viele fliegen, folgt dem Tagesbericht des
 //! Kerns. Ihre Zufallsfolge ist rein kosmetisch und hat mit der Simulation nichts zu tun.
 
+use super::super::BattleViewShown;
 use super::super::camera::{self, BattleCamera, FLY_SPEED_MAX, FLY_SPEED_MIN};
 use super::super::meshes;
 use super::super::overlay::BattleGizmos;
-use super::super::scene::{BattleAssets, Cosmetic, SideKit, additive, side_tint};
+use super::super::scene::{
+    BattleAssets, Cosmetic, Lighting, SideKit, additive, show_lit, side_tint,
+};
+use super::atmosphere::AtmosphereMaterial;
+use super::planet_look::{self, LookInput, Surface};
 use super::{Layout, WatchedSiege};
-use crate::map::camera_shows;
+use crate::map::{MapCamera, camera_shows};
 use crate::state::ViewState;
 use bevy::camera::visibility::VisibleEntities;
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input};
 use sim::GameData;
 use sim::clock::SimClock;
 use sim::data::ShipClass;
-use sim::galaxy::{Galaxy, Planet};
+use sim::galaxy::Galaxy;
 use sim::siege::{Fire, Phase};
 use std::f32::consts::TAU;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Halbmesser des Planeten in der Szene. Die Schiffe behalten ihre Größe aus der
 /// Schlachtansicht; die Welt ist dagegen klein gehalten, damit beides ins Bild passt.
 pub const PLANET_RADIUS: f32 = 420.0;
 /// Der Schild liegt als Schale über der Oberfläche.
 pub const SHIELD_RADIUS: f32 = PLANET_RADIUS * 1.09;
+/// Höhe der Wolkendecke und der Zonen über der Oberfläche (Anteil am Halbmesser). Die
+/// Zonen liegen über den Wolken: Sie sind Lagebild, nicht Gelände.
+const CLOUD_LIFT: f32 = 1.012;
+const ZONE_LIFT: f32 = 1.015;
+/// So schnell dreht sich die Wolkendecke (Bogenmaß je Sekunde Szenenzeit).
+const CLOUD_DRIFT: f32 = 0.006;
+/// Stärke des Leuchtens: Glut und Stadtlichter (direkt in Bildwerten, ohne Belichtung).
+const LAVA_GLOW: f32 = 2.6;
+const CITY_GLOW: f32 = 0.32;
+/// So viele Oberflächen behält das Spiel, damit ein zweiter Besuch sofort fertig ist.
+const KEPT_LOOKS: usize = 3;
 /// Bahn der Orbitalstationen.
 const STATION_ORBIT: f32 = PLANET_RADIUS * 1.34;
 const STATION_SIZE: f32 = 46.0;
@@ -191,57 +210,271 @@ fn bunker_direction(index: u32) -> Vec3 {
     offset_direction(landing_direction(), 0.17, 0.9 + index as f32 * 2.399_963)
 }
 
-/// Einfaches Rauschen in −1..1 über der Kugel, für Land und Meer.
-fn noise(point: Vec3, seed: f32) -> f32 {
-    let q = point * 2.3 + Vec3::splat(seed);
-    let wide = (q.x * 1.7 + (q.y * 2.1).sin() * 1.3).sin()
-        * (q.y * 1.9 + (q.z * 1.6).sin() * 1.2).sin()
-        * (q.z * 2.3 + (q.x * 1.4).sin()).sin();
-    let mid = ((q.x * 4.1 + q.z * 3.3).sin()
-        + (q.y * 5.2 - q.x * 2.7).sin()
-        + (q.z * 4.7 + q.y * 3.9).sin())
-        / 3.0;
-    let fine = (q.x * 9.3 + q.y * 7.1).sin() * (q.z * 8.7 - q.y * 6.3).sin();
-    (wide * 1.3 + mid * 0.8 + fine * 0.25).clamp(-1.0, 1.0)
+/// Richtung zur Sonne der Orbitansicht: seitlich hinter der Übersicht, damit die
+/// Tag-Nacht-Grenze über die Scheibe läuft und das Landegebiet im Licht liegt.
+pub fn sun_direction() -> Vec3 {
+    (Quat::from_rotation_y(0.9) * attack_direction() + Vec3::Y * 0.55).normalize()
 }
 
-fn blend(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    let t = t.clamp(0.0, 1.0);
-    [0, 1, 2].map(|channel| a[channel] + (b[channel] - a[channel]) * t)
+/// Licht der Orbitansicht: eine kräftige Sonne, kaum Gegen- und Umgebungslicht. So ist
+/// die Nachtseite wirklich dunkel, und Glut und Stadtlichter leuchten darin.
+pub fn orbit_lighting() -> Lighting {
+    let sun = sun_direction();
+    Lighting {
+        key: (sun, 4_000.0),
+        key_color: Color::srgb(1.0, 0.985, 0.96),
+        fill: ((-sun + Vec3::new(0.0, -0.3, 0.2)).normalize(), 70.0),
+        ambient: 22.0,
+    }
 }
 
-/// Farbe eines Punkts der Oberfläche aus dem, was die Simulation über die Welt weiß:
-/// Wasseranteil, Temperatur und Bewohnbarkeit. Kriegsschäden dunkeln sie ab.
-fn surface_color(planet: &Planet, scar: f32, point: Vec3) -> meshes::Paint {
-    let seed = planet.id.0 as f32 * 1.37;
-    let height = noise(point, seed);
-    let sea_level = (planet.water * 2.0 - 1.0) * 0.8;
-    let barren = planet.habitability < 0.25;
-    let warm = ((planet.temperature + 10.0) / 50.0).clamp(0.0, 1.0);
-    let land = if barren {
-        blend([0.2, 0.17, 0.15], [0.36, 0.3, 0.25], height * 0.5 + 0.5)
-    } else {
-        let green = blend([0.3, 0.33, 0.3], [0.1, 0.22, 0.08], warm * 1.4);
-        let dry = blend(green, [0.4, 0.31, 0.16], (warm - 0.6) * 2.5);
-        blend(dry, [0.3, 0.26, 0.2], (height - sea_level - 0.35) * 2.0)
+/// Orbitansicht einschalten: wie die Schlachtansicht, aber mit eigenem Licht.
+pub(super) fn show_view(
+    commands: Commands,
+    shown: ResMut<BattleViewShown>,
+    assets: Res<BattleAssets>,
+    battle_camera: Single<
+        (
+            &mut Camera,
+            &mut FreeCameraState,
+            &mut Transform,
+            &mut AmbientLight,
+        ),
+        (With<BattleCamera>, Without<MapCamera>),
+    >,
+    map_camera: Single<&mut Camera, (With<MapCamera>, Without<BattleCamera>)>,
+) {
+    show_lit(
+        orbit_lighting(),
+        commands,
+        shown,
+        assets,
+        battle_camera,
+        map_camera,
+    );
+}
+
+/// Kriegsschäden der Welt, 0..1.
+fn scar_of(watched: &WatchedSiege) -> f32 {
+    (watched.card.view.defense.scar as f32).clamp(0.0, 1.0)
+}
+
+/// Wie weit die Oberfläche der gezeigten Welt ist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LookStage {
+    None,
+    Preview,
+    Full,
+}
+
+/// Texturen einer fertigen Oberfläche.
+#[derive(Clone)]
+struct LookImages {
+    albedo: Handle<Image>,
+    normal: Option<Handle<Image>>,
+    roughness: Handle<Image>,
+    emissive: Option<Handle<Image>>,
+    clouds: Option<Handle<Image>>,
+}
+
+/// Eine fertige Oberfläche auf dem Weg zur Grafikkarte: eine Textur je Frame, damit kein
+/// einzelner Frame alles auf einmal hochlädt.
+struct Staging {
+    input: LookInput,
+    stage: LookStage,
+    /// Noch hochzuladen: Platz (Farbe, Normalen, Rauheit, Leuchten, Wolken) und Bild.
+    layers: Vec<(usize, planet_look::Layer)>,
+    handles: [Option<Handle<Image>>; 5],
+}
+
+impl Staging {
+    fn new(input: LookInput, stage: LookStage, surface: Surface) -> Self {
+        let layers = [
+            Some(surface.albedo),
+            surface.normal,
+            Some(surface.roughness),
+            surface.emissive,
+            surface.clouds,
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(slot, layer)| layer.map(|layer| (slot, layer)))
+        .collect();
+        Self {
+            input,
+            stage,
+            layers,
+            handles: Default::default(),
+        }
+    }
+
+    /// Lädt das nächste Bild hoch; liefert die Texturen, sobald alle da sind.
+    fn step(&mut self, images: &mut Assets<Image>) -> Option<LookImages> {
+        if let Some((slot, layer)) = self.layers.pop() {
+            self.handles[slot] = Some(images.add(layer.image()));
+            return None;
+        }
+        let [albedo, normal, roughness, emissive, clouds] = self.handles.clone();
+        Some(LookImages {
+            albedo: albedo?,
+            normal,
+            roughness: roughness?,
+            emissive,
+            clouds,
+        })
+    }
+}
+
+/// Eine Oberfläche in Arbeit, abseits des Hauptfadens.
+struct LookJob {
+    input: LookInput,
+    stage: LookStage,
+    task: Task<Option<Surface>>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Oberflächen der zuletzt gezeigten Welten und die, die gerade entsteht. Bleibt über
+/// die Besuche der Orbitansicht hinweg bestehen: Ein zweiter Besuch ist sofort fertig.
+#[derive(Resource, Default)]
+pub struct PlanetLooks {
+    ready: Vec<(LookInput, LookStage, LookImages)>,
+    job: Option<LookJob>,
+    staging: Option<Staging>,
+}
+
+impl PlanetLooks {
+    fn best(&self, input: &LookInput) -> Option<(LookStage, LookImages)> {
+        self.ready
+            .iter()
+            .filter(|entry| entry.0 == *input)
+            .max_by_key(|entry| entry.1)
+            .map(|entry| (entry.1, entry.2.clone()))
+    }
+
+    fn keep(&mut self, input: LookInput, stage: LookStage, images: LookImages) {
+        self.ready.retain(|entry| entry.0 != input);
+        self.ready.push((input, stage, images));
+        if self.ready.len() > KEPT_LOOKS {
+            self.ready.remove(0);
+        }
+    }
+
+    fn start(&mut self, input: LookInput, stage: LookStage) {
+        self.stop();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let size = if stage == LookStage::Full {
+            planet_look::FULL
+        } else {
+            planet_look::PREVIEW
+        };
+        let task = {
+            let (input, cancel) = (input.clone(), cancel.clone());
+            AsyncComputeTaskPool::get()
+                .spawn(async move { planet_look::generate(&input, size, &cancel) })
+        };
+        self.job = Some(LookJob {
+            input,
+            stage,
+            task,
+            cancel,
+        });
+    }
+
+    fn stop(&mut self) {
+        self.staging = None;
+        if let Some(job) = self.job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for PlanetLooks {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Bringt die Oberfläche der gezeigten Welt voran: erst ein schnelles Vorabbild, dann
+/// die volle Auflösung; beides entsteht abseits des Hauptfadens. Dreht die Wolken und
+/// dunkelt die Oberfläche nach den Kriegsschäden ab.
+fn update_look(
+    watched: Res<WatchedSiege>,
+    scene: Option<ResMut<OrbitScene>>,
+    mut looks: ResMut<PlanetLooks>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut clouds: Query<(&mut Transform, &mut Visibility), With<CloudLayer>>,
+) {
+    let Some(mut scene) = scene else {
+        return;
     };
-    let mut color = if barren {
-        land
-    } else {
-        // Flaches Wasser vor der Küste, dann ein weicher Übergang zum Land.
-        let sea = blend(
-            [0.02, 0.07, 0.2],
-            [0.05, 0.17, 0.31],
-            (height - sea_level + 0.6) * 1.6,
-        );
-        blend(sea, land, (height - sea_level) * 14.0 + 0.5)
-    };
-    // Eiskappen, größer auf kalten Welten.
-    let cap = 0.97 - (1.0 - warm) * 0.25;
-    let ice = (point.y.abs() + 0.06 * noise(point * 3.0, seed + 5.0) - cap) * 14.0;
-    color = blend(color, [0.78, 0.82, 0.86], ice);
-    let dark = 1.0 - 0.45 * scar.clamp(0.0, 1.0);
-    [color[0] * dark, color[1] * dark, color[2] * dark, 1.0]
+    for (mut transform, _) in &mut clouds {
+        transform.rotation = Quat::from_rotation_y(scene.time * CLOUD_DRIFT);
+    }
+    // Fertige Arbeit abholen.
+    let finished = looks.job.as_mut().is_some_and(|job| job.task.is_finished());
+    if finished
+        && let Some(job) = looks.job.take()
+        && let Some(Some(surface)) = block_on(poll_once(job.task))
+    {
+        looks.staging = Some(Staging::new(job.input, job.stage, surface));
+    }
+    if let Some(staging) = looks.staging.as_mut()
+        && let Some(ready) = staging.step(&mut images)
+        && let Some(staging) = looks.staging.take()
+    {
+        looks.keep(staging.input, staging.stage, ready);
+    }
+    let input = scene.look.clone();
+    let best = looks.best(&input);
+    let have = best.as_ref().map_or(LookStage::None, |best| best.0);
+    let working = looks.job.as_ref().is_some_and(|job| job.input == input)
+        || looks
+            .staging
+            .as_ref()
+            .is_some_and(|staging| staging.input == input);
+    if have < LookStage::Full && !working {
+        let next = if have == LookStage::None {
+            LookStage::Preview
+        } else {
+            LookStage::Full
+        };
+        looks.start(input, next);
+    }
+    let scar = scar_of(&watched);
+    if let Some((stage, images)) = best
+        && (stage > scene.shown_look || scar != scene.scar)
+    {
+        scene.shown_look = stage;
+        scene.scar = scar;
+        let dark = 1.0 - 0.45 * scar;
+        if let Some(mut material) = materials.get_mut(&scene.planet_material) {
+            material.base_color = Color::linear_rgb(dark, dark, dark);
+            material.base_color_texture = Some(images.albedo.clone());
+            material.normal_map_texture = images.normal.clone();
+            material.metallic_roughness_texture = Some(images.roughness.clone());
+            material.perceptual_roughness = 1.0;
+            let glow = if scene.look.style == planet_look::Style::Lava {
+                LAVA_GLOW
+            } else {
+                CITY_GLOW
+            };
+            material.emissive = if images.emissive.is_some() {
+                LinearRgba::new(glow, glow, glow, 0.0)
+            } else {
+                LinearRgba::BLACK
+            };
+            material.emissive_texture = images.emissive.clone();
+        }
+        if let Some(texture) = images.clouds.clone() {
+            if let Some(mut material) = materials.get_mut(&scene.cloud_material) {
+                material.base_color_texture = Some(texture);
+            }
+            for (_, mut visibility) in &mut clouds {
+                *visibility = Visibility::Inherited;
+            }
+        }
+    }
 }
 
 fn linear(color: sim::data::Rgb) -> LinearRgba {
@@ -259,6 +492,14 @@ struct Prop;
 
 #[derive(Component)]
 struct PlanetBody;
+
+/// Wolkendecke über dem Planeten; dreht sich langsam mit der Szenenzeit.
+#[derive(Component)]
+struct CloudLayer;
+
+/// Saum der Atmosphäre.
+#[derive(Component)]
+struct HazeShell;
 
 #[derive(Component)]
 pub struct OrbitHull;
@@ -318,8 +559,15 @@ pub struct OrbitScene {
     station: Handle<Mesh>,
     gun: Handle<Mesh>,
     bunker: Handle<Mesh>,
-    disc: Handle<Mesh>,
     shell: Handle<Mesh>,
+    /// Aussehen der Welt, Material ihrer Oberfläche und ihrer Wolken.
+    look: LookInput,
+    planet_material: Handle<StandardMaterial>,
+    cloud_material: Handle<StandardMaterial>,
+    /// Gezeigte Stufe der Oberfläche: keine, Vorabbild, fertig.
+    shown_look: LookStage,
+    /// Kriegsschäden, wie sie die Oberfläche gerade abdunkeln.
+    scar: f32,
     /// Zonen in der Hand der Verteidiger und des Belagerers.
     zone_materials: [Handle<StandardMaterial>; 2],
     shield_material: Handle<StandardMaterial>,
@@ -356,6 +604,18 @@ impl OrbitScene {
         (0.0..1.0)
             .contains(&progress)
             .then(|| from.lerp(to, 1.0 - (1.0 - progress) * (1.0 - progress)))
+    }
+
+    /// Zeigt die Welt ihre fertige Oberfläche (volle Auflösung)?
+    #[cfg(test)]
+    pub fn surface_ready(&self) -> bool {
+        self.shown_look == LookStage::Full
+    }
+
+    /// Material der Oberfläche.
+    #[cfg(test)]
+    pub fn planet_material(&self) -> &Handle<StandardMaterial> {
+        &self.planet_material
     }
 
     /// Mitte der Flotte des Belagerers.
@@ -438,6 +698,7 @@ pub(super) fn enter(
     assets: Res<BattleAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut atmospheres: ResMut<Assets<AtmosphereMaterial>>,
     mut camera: Single<(&mut Transform, &mut FreeCameraState), With<BattleCamera>>,
 ) {
     let Some(watched) = watched else {
@@ -445,21 +706,56 @@ pub(super) fn enter(
     };
     let layout = &watched.layout;
     let planet = galaxy.planet(watched.planet);
-    let scar = watched.card.view.defense.scar as f32;
-    let body = meshes::globe(96, 192, |point| surface_color(planet, scar, point));
+    let look = LookInput::of(planet, &data);
+    let scar = scar_of(&watched);
+    // Bis die Oberfläche fertig ist, steht die Kugel in der Farbe ihrer Art da.
+    let globe = meshes.add(meshes::uv_globe(128, 256));
+    let tint = look.tint;
+    let planet_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(tint[0], tint[1], tint[2]),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        reflectance: 0.35,
+        ..default()
+    });
     commands.spawn((
         OrbitVisual,
         PlanetBody,
-        Mesh3d(meshes.add(body.to_mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.92,
-            metallic: 0.0,
-            reflectance: 0.2,
-            ..default()
-        })),
+        Mesh3d(globe.clone()),
+        MeshMaterial3d(planet_material.clone()),
         Transform::from_scale(Vec3::splat(PLANET_RADIUS)),
     ));
+    let cloud_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 1.0,
+        reflectance: 0.05,
+        ..default()
+    });
+    commands.spawn((
+        OrbitVisual,
+        CloudLayer,
+        Mesh3d(globe.clone()),
+        MeshMaterial3d(cloud_material.clone()),
+        Transform::from_scale(Vec3::splat(PLANET_RADIUS * CLOUD_LIFT)),
+        Visibility::Hidden,
+    ));
+    if let Some(haze) = look.haze() {
+        let scale = PLANET_RADIUS * haze.thickness;
+        let outer = PLANET_RADIUS + scale * 5.0;
+        commands.spawn((
+            OrbitVisual,
+            HazeShell,
+            Mesh3d(globe),
+            MeshMaterial3d(atmospheres.add(AtmosphereMaterial {
+                haze: Vec4::new(haze.color[0], haze.color[1], haze.color[2], haze.strength),
+                sun: sun_direction().extend(0.0),
+                body: Vec4::new(0.0, 0.0, 0.0, PLANET_RADIUS),
+                shape: Vec4::new(outer, scale, 0.0, 0.0),
+            })),
+            Transform::from_scale(Vec3::splat(outer)),
+        ));
+    }
     let attacker = SideKit::build(layout.attacker, &assets, &mut meshes, &mut materials);
     let defender = SideKit::build(layout.defender, &assets, &mut meshes, &mut materials);
     let own = side_tint(layout.defender);
@@ -476,8 +772,12 @@ pub(super) fn enter(
         station: meshes.add(meshes::station().tinted(own).to_mesh()),
         gun: meshes.add(meshes::surface_gun().tinted(own).to_mesh()),
         bunker: meshes.add(meshes::bunker().tinted(own).to_mesh()),
-        disc: meshes.add(meshes::zone_disc().to_mesh()),
         shell: meshes.add(meshes::globe(24, 48, |_| [1.0; 4]).to_mesh()),
+        look,
+        planet_material,
+        cloud_material,
+        shown_look: LookStage::None,
+        scar,
         zone_materials: [
             materials.add(zone_material(layout.defender)),
             materials.add(zone_material(layout.attacker)),
@@ -518,6 +818,7 @@ fn sync_layout(
     watched: Res<WatchedSiege>,
     scene: Option<ResMut<OrbitScene>>,
     assets: Res<BattleAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(mut scene) = scene else {
         return;
@@ -586,8 +887,8 @@ fn sync_layout(
         ));
     }
 
-    // Zonen: Scheiben in der Farbe dessen, der sie hält. Gezeigt, sobald am Boden
-    // gekämpft wird oder eine Zone genommen ist.
+    // Zonen: Kappen auf der Oberfläche in der Farbe dessen, der sie hält. Gezeigt, sobald
+    // am Boden gekämpft wird oder eine Zone genommen ist.
     let count = layout.zones.len();
     scene.zones = layout
         .zones
@@ -598,15 +899,16 @@ fn sync_layout(
     let ground_war = layout.landed || layout.zones.iter().any(|zone| zone.2);
     if ground_war {
         for (zone, (direction, radius)) in layout.zones.iter().zip(scene.zones.clone()) {
+            let cap = meshes::zone_cap(radius / PLANET_RADIUS);
             commands.spawn((
                 OrbitVisual,
                 Prop,
-                Mesh3d(scene.disc.clone()),
+                Mesh3d(meshes.add(cap.to_mesh())),
                 MeshMaterial3d(scene.zone_materials[usize::from(zone.2)].clone()),
                 Transform {
-                    translation: direction * (PLANET_RADIUS * 1.004),
+                    translation: Vec3::ZERO,
                     rotation: Quat::from_rotation_arc(Vec3::Y, direction),
-                    scale: Vec3::splat(radius),
+                    scale: Vec3::splat(PLANET_RADIUS * ZONE_LIFT),
                 },
             ));
         }
@@ -1102,28 +1404,24 @@ fn draw_lines(
     let ground_war = layout.landed || layout.zones.iter().any(|zone| zone.2);
     for (index, (zone, (direction, radius))) in layout.zones.iter().zip(&scene.zones).enumerate() {
         let color = if zone.2 { attacker } else { defender };
-        let place = |lift: f32| {
-            Isometry3d::new(
-                *direction * (PLANET_RADIUS * lift),
-                Quat::from_rotation_arc(Vec3::Z, *direction),
-            )
+        // Ringe auf der Oberfläche: Sie folgen der Krümmung wie die Kappen.
+        let ring = |lift: f32, radius: f32| {
+            (0..=64).map(move |step| {
+                offset_direction(*direction, radius / PLANET_RADIUS, TAU * step as f32 / 64.0)
+                    * (PLANET_RADIUS * lift)
+            })
         };
         // Vor der Landung liegt das Landegebiet noch ungeteilt da.
         if !ground_war {
             continue;
         }
-        gizmos
-            .circle(place(1.006), *radius, color.with_alpha(0.95))
-            .resolution(48);
+        gizmos.linestrip(ring(ZONE_LIFT + 0.002, *radius), color.with_alpha(0.95));
         // Wo heute gekämpft wird, pulsiert ein zweiter Ring: die Front.
         if !watched.ended() && report.zone == Some(index as u8) {
-            gizmos
-                .circle(
-                    place(1.012),
-                    *radius * (0.72 + 0.2 * pulse),
-                    Color::srgb(1.0, 0.85, 0.4).with_alpha(0.9),
-                )
-                .resolution(48);
+            gizmos.linestrip(
+                ring(ZONE_LIFT + 0.006, *radius * (0.72 + 0.2 * pulse)),
+                Color::srgb(1.0, 0.85, 0.4).with_alpha(0.9),
+            );
         }
     }
     if layout.shielded {
@@ -1196,6 +1494,7 @@ fn apply_overview(
 }
 
 pub(super) fn plugin(app: &mut App) {
+    app.init_resource::<PlanetLooks>();
     app.add_message::<OverviewRequest>().add_systems(
         Update,
         (
@@ -1204,6 +1503,7 @@ pub(super) fn plugin(app: &mut App) {
             apply_overview,
             sync_layout,
             stage,
+            update_look,
             animate,
             draw_lines,
         )

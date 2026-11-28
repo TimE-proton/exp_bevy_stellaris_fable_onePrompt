@@ -1364,24 +1364,91 @@ pub fn bunker() -> MeshData {
     along(&dome(0.6, 0.3, 8, HULL), Vec3::Y, Vec3::ZERO)
 }
 
-/// Scheibe mit Radius 1 in der x-z-Ebene, Vorderseite nach +y: Fläche einer Zone auf der
-/// Oberfläche. In der Mitte schwächer als am Rand, damit der Boden zu sehen bleibt.
-pub fn zone_disc() -> MeshData {
-    let sides = 40;
-    let circle = |radius: f32| -> Vec<Vec3> {
+/// Kugelkappe auf der Einheitskugel um +y mit dem Winkelhalbmesser `angle`: Fläche einer
+/// Zone auf der Oberfläche. Sie folgt der Krümmung; in der Mitte ist sie schwächer als am
+/// Rand, damit der Boden zu sehen bleibt.
+pub fn zone_cap(angle: f32) -> MeshData {
+    let sides = 48;
+    let ring = |share: f32| -> Vec<Vec3> {
+        let polar = angle * share;
         (0..sides)
             .map(|index| {
-                let angle = -TAU * index as f32 / sides as f32;
-                Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin())
+                let around = -TAU * index as f32 / sides as f32;
+                Vec3::new(
+                    polar.sin() * around.cos(),
+                    polar.cos(),
+                    polar.sin() * around.sin(),
+                )
             })
             .collect()
     };
     band(&[
-        (circle(0.0), 0.35),
-        (circle(0.8), 0.45),
-        (circle(0.93), 1.0),
-        (circle(1.0), 1.0),
+        (ring(0.0), 0.35),
+        (ring(0.3), 0.37),
+        (ring(0.55), 0.4),
+        (ring(0.8), 0.45),
+        (ring(0.93), 1.0),
+        (ring(1.0), 1.0),
     ])
+}
+
+/// Glatte Kugel mit Radius 1 für Texturen (äquirektangular): y zeigt zum Pol, die
+/// Texturkoordinate u läuft mit dem Längengrad von x über z, v vom Nord- zum Südpol.
+/// Dieselbe Abbildung wie `planet_look::direction`. An der Datumsgrenze liegen die Ecken
+/// doppelt (u = 0 und u = 1); an den Polen hat jede Spalte ihre eigene Polecke in der
+/// Mitte der Spalte, damit sich die Textur dort nicht verdreht. Die Tangenten zeigen nach
+/// Osten, die Bitangenten nach Süden.
+pub fn uv_globe(rows: usize, columns: usize) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut tangents = Vec::new();
+    for row in 0..=rows {
+        let v = row as f32 / rows as f32;
+        let polar = std::f32::consts::PI * v;
+        let pole = row == 0 || row == rows;
+        for column in 0..=columns {
+            let u = if pole {
+                (column as f32 + 0.5) / columns as f32
+            } else {
+                column as f32 / columns as f32
+            };
+            let around = TAU * u;
+            let normal = Vec3::new(
+                polar.sin() * around.cos(),
+                polar.cos(),
+                polar.sin() * around.sin(),
+            );
+            positions.push(normal.to_array());
+            normals.push(normal.to_array());
+            uvs.push([u, v]);
+            tangents.push([-around.sin(), 0.0, around.cos(), 1.0]);
+        }
+    }
+    let stride = (columns + 1) as u32;
+    let mut indices = Vec::new();
+    for row in 0..rows as u32 {
+        for column in 0..columns as u32 {
+            let a = row * stride + column;
+            let b = (row + 1) * stride + column;
+            // Von außen gesehen gegen den Uhrzeigersinn.
+            if row != 0 {
+                indices.extend([a, a + 1, b]);
+            }
+            if row + 1 != rows as u32 {
+                indices.extend([a + 1, b + 1, b]);
+            }
+        }
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, tangents)
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 #[cfg(test)]

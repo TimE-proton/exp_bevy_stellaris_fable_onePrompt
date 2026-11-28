@@ -317,6 +317,48 @@ fn the_orbit_view_opens_from_the_siege_window_and_leads_back() {
 }
 
 #[test]
+fn the_world_gets_its_surface_off_the_main_thread_and_keeps_it_for_the_next_visit() {
+    let mut game = at_the_siege_window(conquest::BOMBARDMENT, "orbit_oberflaeche");
+    game.click_on(WATCH);
+    game.frames(2);
+    assert_eq!(view(&game), ViewState::Siege);
+    // Die Oberfläche entsteht abseits des Hauptfadens: erst ein Vorabbild, dann die volle
+    // Auflösung. Solange laufen die Frames weiter.
+    let start = std::time::Instant::now();
+    while !game.resource::<OrbitScene>().surface_ready() {
+        assert!(
+            start.elapsed().as_secs() < 120,
+            "die Oberfläche wird nicht fertig"
+        );
+        game.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let material = |game: &TestGame| {
+        let handle = game.resource::<OrbitScene>().planet_material().clone();
+        game.resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .expect("Material der Oberfläche")
+            .clone()
+    };
+    let surface = material(&game);
+    assert!(surface.base_color_texture.is_some());
+    assert!(surface.metallic_roughness_texture.is_some());
+    // Zurück zum Fenster „Belagerung“ und wieder hinein: Die Oberfläche ist sofort da.
+    game.click_on(TO_WINDOW);
+    game.frames(4);
+    assert_eq!(game.count::<OrbitVisual>(), 0);
+    game.click_on(WATCH);
+    game.frames(3);
+    assert_eq!(view(&game), ViewState::Siege);
+    assert!(game.resource::<OrbitScene>().surface_ready());
+    assert_eq!(
+        material(&game).base_color_texture,
+        surface.base_color_texture,
+        "dieselbe Textur aus dem Zwischenspeicher"
+    );
+}
+
+#[test]
 fn the_fall_of_the_world_ends_the_view_with_a_result_and_a_pause() {
     let mut game = at_the_siege_window(conquest::GROUND, "orbit_fall");
     game.click_on(WATCH);
@@ -427,7 +469,10 @@ fn a_resting_siege_says_so_and_the_way_into_the_battle_leads_over_the_map() {
 /// Schreibt Spielstände für Bildschirmfotos der Orbitansicht in das Verzeichnis aus
 /// `KONFLUENZ_FOTOSTAENDE`: Beschuss, der Tag vor der Landung, Bodenkrieg kurz vor dem Fall, die letzte Welt einer
 /// Gemeinschaft aus beiden Sichten und Welten mit Schild und mit Stationen (dafür sind
-/// die Anlagen von Hand gesetzt). Aufruf:
+/// die Anlagen von Hand gesetzt). Dazu je Planetenart ein Stand `art_<art>.ron`: die
+/// belagerte Welt im Beschuss, mit Art, Temperatur, Wasser und Atmosphäre der ersten Welt
+/// dieser Art in der Galaxie; `zonen.ron` zeigt die Zonen der Oberfläche (eine von Hand
+/// genommen). Aufruf:
 /// `KONFLUENZ_FOTOSTAENDE=/pfad cargo test -p game -- --ignored fotostaende`.
 #[test]
 #[ignore = "schreibt Spielstände für Bildschirmfotos"]
@@ -463,6 +508,51 @@ fn fotostaende() {
         .expect("Spielstand schreiben");
     };
     let defender = card(conquest::LAST_WORLD).defender;
+    let (data, state) = conquest::state(conquest::BOMBARDMENT);
+    for (kind, def) in data.planet_kinds.iter().enumerate() {
+        let mut state = state.clone();
+        state.config = SimConfig {
+            player: Some(ME),
+            ..state.config
+        };
+        let planet = *state.sieges.active.keys().next().expect("Belagerung");
+        let model = state
+            .galaxy
+            .planets
+            .iter()
+            .find(|planet| planet.kind as usize == kind)
+            .cloned()
+            .expect("eine Welt jeder Art");
+        let world = &mut state.galaxy.planets[planet.index()];
+        world.kind = model.kind;
+        world.temperature = model.temperature;
+        world.water = model.water;
+        world.atmosphere = model.atmosphere;
+        SaveGame {
+            format: SAVE_FORMAT,
+            data_hash: data.hash,
+            state,
+        }
+        .write(&dir.join(format!("art_{}.ron", def.key)))
+        .expect("Spielstand schreiben");
+    }
+    // Zonen auf der Oberfläche: im Beschuss, die erste Zone von Hand genommen.
+    {
+        let mut state = state.clone();
+        state.config = SimConfig {
+            player: Some(ME),
+            ..state.config
+        };
+        let siege = state.sieges.active.values_mut().next().expect("Belagerung");
+        siege.zones[0].taken = true;
+        SaveGame {
+            format: SAVE_FORMAT,
+            data_hash: data.hash,
+            state,
+        }
+        .write(&dir.join("zonen.ron"))
+        .expect("Spielstand schreiben");
+    }
     write("beschuss", conquest::BOMBARDMENT, Some(ME), None);
     write("schild", conquest::BOMBARDMENT, Some(ME), Some((2, 0.0)));
     write("stationen", conquest::BOMBARDMENT, Some(ME), Some((1, 3.0)));

@@ -500,43 +500,99 @@ fn setup_assets(
     commands.insert_resource(BattleAssets::build(&mut meshes, &mut materials));
 }
 
+/// Licht einer Ansicht mit der Schlachtkamera: Hauptlicht, Gegenlicht und Umgebungslicht.
+#[derive(Clone, Copy, Debug)]
+pub struct Lighting {
+    /// Richtung, aus der das Hauptlicht kommt, und seine Stärke in Lux.
+    pub key: (Vec3, f32),
+    /// Farbe des Hauptlichts.
+    pub key_color: Color,
+    /// Dasselbe für das kühle Gegenlicht.
+    pub fill: (Vec3, f32),
+    /// Helligkeit des bläulichen Umgebungslichts.
+    pub ambient: f32,
+}
+
+impl Lighting {
+    /// Schlachtansicht: Hauptlicht von schräg oben, dazu ein schwaches, kühles Gegenlicht
+    /// und reichlich Umgebungslicht. So bleiben auch abgewandte Flächen lesbar, und die
+    /// Rümpfe wirken plastisch.
+    pub const BATTLE: Lighting = Lighting {
+        key: (Vec3::new(-0.55, 1.0, 0.65), 2_700.0),
+        key_color: Color::srgb(1.0, 0.96, 0.9),
+        fill: (Vec3::new(0.7, -0.5, -0.8), 650.0),
+        ambient: 260.0,
+    };
+}
+
 /// Schlachtansicht einschalten: Schlachtkamera an, Kartenkamera aus, Licht und Himmel.
 pub(super) fn show_view(
+    commands: Commands,
+    shown: ResMut<BattleViewShown>,
+    assets: Res<BattleAssets>,
+    battle_camera: Single<
+        (
+            &mut Camera,
+            &mut FreeCameraState,
+            &mut Transform,
+            &mut AmbientLight,
+        ),
+        (With<BattleCamera>, Without<MapCamera>),
+    >,
+    map_camera: Single<&mut Camera, (With<MapCamera>, Without<BattleCamera>)>,
+) {
+    show_lit(
+        Lighting::BATTLE,
+        commands,
+        shown,
+        assets,
+        battle_camera,
+        map_camera,
+    );
+}
+
+/// Wie [`show_view`], mit eigenem Licht.
+pub(super) fn show_lit(
+    lighting: Lighting,
     mut commands: Commands,
     mut shown: ResMut<BattleViewShown>,
     assets: Res<BattleAssets>,
     mut battle_camera: Single<
-        (&mut Camera, &mut FreeCameraState, &mut Transform),
+        (
+            &mut Camera,
+            &mut FreeCameraState,
+            &mut Transform,
+            &mut AmbientLight,
+        ),
         (With<BattleCamera>, Without<MapCamera>),
     >,
     mut map_camera: Single<&mut Camera, (With<MapCamera>, Without<BattleCamera>)>,
 ) {
     shown.0 = true;
-    let (camera, flight, transform) = &mut *battle_camera;
+    let (camera, flight, transform, ambient) = &mut *battle_camera;
     camera::set_active(true, camera, flight, transform);
+    ambient.brightness = lighting.ambient;
     map_camera.is_active = false;
 
-    // Hauptlicht von schräg oben, dazu ein schwaches, kühles Gegenlicht: So bleiben auch
-    // abgewandte Flächen lesbar, und die Rümpfe wirken plastisch.
     commands.spawn((
         SceneProp,
         DirectionalLight {
-            color: Color::srgb(1.0, 0.96, 0.9),
-            illuminance: 2_700.0,
+            color: lighting.key_color,
+            illuminance: lighting.key.1,
             shadow_maps_enabled: false,
             ..default()
         },
-        Transform::from_xyz(-0.55, 1.0, 0.65).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(lighting.key.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
         SceneProp,
         DirectionalLight {
             color: Color::srgb(0.55, 0.7, 1.0),
-            illuminance: 650.0,
+            illuminance: lighting.fill.1,
             shadow_maps_enabled: false,
             ..default()
         },
-        Transform::from_xyz(0.7, -0.5, -0.8).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(lighting.fill.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
         SceneProp,

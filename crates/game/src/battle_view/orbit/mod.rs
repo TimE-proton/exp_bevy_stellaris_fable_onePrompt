@@ -7,9 +7,13 @@
 //! Bewegung zeigt (Geschosse, Landungsboote), ist Schaustellung dessen, was der Kern für
 //! den Tag meldet: Wo er keinen Beschuss meldet, fällt kein Schuss.
 //!
-//! Kamera, Licht, Himmel und Schiffsmodelle sind die der Schlachtansicht.
+//! Kamera, Himmel und Schiffsmodelle sind die der Schlachtansicht; das Licht ist eigenes
+//! (eine kräftige Sonne, dunkle Nachtseite). Die Oberfläche der Welt entsteht prozedural
+//! (`planet_look`) abseits des Hauptfadens.
 
+mod atmosphere;
 pub mod hud;
+pub mod planet_look;
 mod scene;
 
 pub use scene::OrbitCensus;
@@ -520,7 +524,7 @@ pub(super) fn plugin(app: &mut App) {
         )
         .add_systems(
             OnEnter(ViewState::Siege),
-            (super::scene::show_view, scene::enter).chain(),
+            (scene::show_view, scene::enter).chain(),
         )
         .add_systems(
             OnExit(ViewState::Siege),
@@ -531,6 +535,7 @@ pub(super) fn plugin(app: &mut App) {
             hud::draw_hud.run_if(in_state(ViewState::Siege)),
         );
     scene::plugin(app);
+    atmosphere::plugin(app);
 }
 
 #[cfg(test)]
