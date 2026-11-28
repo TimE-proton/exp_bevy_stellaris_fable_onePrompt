@@ -375,6 +375,15 @@ fn open_toward(
     let day = ground.day;
     let picture = ground.picture(Perspective::Own, me, other);
     let probs = choice_probs(profile, &Occasion::Opening(picture), levers);
+    if std::env::var("DBG_OPEN").is_ok() && year >= 120 {
+        eprintln!(
+            "OPEN y{year} {}->{} us{:.2} ub{:.2} win{:.2} want{:.2} ratio{:.2} rungs{} truce{} dep{:.2} p{:?}",
+            me.index(), other.index(),
+            crate::diplomacy::occasion::u_strike(&picture, profile, levers),
+            crate::diplomacy::occasion::u_bind(&picture, profile),
+            win_chance(&picture, profile, levers), picture.want, picture.ratio, picture.rungs, picture.truce, picture.dep, probs
+        );
+    }
     let key = ((me.index() as u64) << 16) | other.index() as u64;
     let mut rng = Rng::stream(config.seed, Domain::Ai, key, year);
     let until_day = day + levers.plan_years * DAYS_PER_YEAR;

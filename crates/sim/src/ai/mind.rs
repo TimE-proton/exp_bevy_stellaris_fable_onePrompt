@@ -3,8 +3,9 @@
 //! Jede Gemeinschaft hat eine Haltung: eine Mischung der vier Grundhaltungen aus
 //! `diplomacy.ron` (kooperativ, opportunistisch, misstrauisch, expansionistisch). Sie
 //! beginnt mit einem Anker (eine Grundhaltung mit `anchor_main`, die übrigen mit
-//! `anchor_rest`; welche, entscheidet ein Mischen der vier aus dem Seed, Gemeinschaft k
-//! erhält die (k mod 4)-te) und treibt monatlich unter öffentlichem Druck davon weg:
+//! `anchor_rest`; welche, zieht jede Gemeinschaft für sich aus dem Seed nach den Gewichten
+//! `anchor_draw`, so dass manche Galaxie von Kooperativen, manche von Expansionistischen
+//! geprägt ist) und treibt monatlich unter öffentlichem Druck davon weg:
 //! Verflechtung nährt das Kooperative, Gelegenheit das Opportunistische, Bedrohung das
 //! Misstrauische, Not das Expansionistische. Erschütterungen (ein erlittener
 //! Vertragsbruch) stoßen sie unmittelbar an.
@@ -83,15 +84,20 @@ fn normalize(weights: [f32; 4]) -> [f32; 4] {
     }
 }
 
-/// Reihenfolge, in der die Grundhaltungen an die Gemeinschaften gehen.
-fn deck(seed: u64) -> [usize; 4] {
-    let mut order = [0, 1, 2, 3];
-    let mut rng = Rng::stream(seed, Domain::Ai, 0, 0);
-    for index in (1..4).rev() {
-        let pick = ((rng.f64() * (index + 1) as f64) as usize).min(index);
-        order.swap(index, pick);
+/// Grundhaltung, mit der die `k`-te Gemeinschaft beginnt: für jede Gemeinschaft für sich
+/// gezogen, nach den Gewichten `anchor_draw`.
+fn draw_anchor(data: &GameData, seed: u64, k: usize) -> usize {
+    let weights = data.diplomacy.levers.anchor_draw.map(|w| w.max(0.0) as f64);
+    let total: f64 = weights.iter().sum();
+    let mut rng = Rng::stream(seed, Domain::Ai, 0, k as u64);
+    let mut roll = rng.f64() * total;
+    for (index, weight) in weights.iter().enumerate() {
+        if roll < *weight {
+            return index;
+        }
+        roll -= weight;
     }
-    order
+    3
 }
 
 impl Minds {
@@ -106,11 +112,10 @@ impl Minds {
     /// ein Spielstand ohne Haltungen). Wer schon eine hat, behält sie.
     pub fn ensure(&mut self, data: &GameData, seed: u64, count: usize) {
         let levers = &data.diplomacy.levers;
-        let order = deck(seed);
         while self.list.len() < count {
             let k = self.list.len();
             let mut anchor = [levers.anchor_rest; 4];
-            anchor[order[k % 4]] = levers.anchor_main;
+            anchor[draw_anchor(data, seed, k)] = levers.anchor_main;
             let anchor = normalize(anchor);
             self.list.push(Mind {
                 anchor,

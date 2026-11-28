@@ -191,7 +191,10 @@ pub fn u_strike(picture: &Picture, profile: &ArchetypeDef, levers: &DiplomacyLev
         + profile.prevent * window(picture, profile);
     lure * win_chance(picture, profile, levers)
         - picture.dep
-        - profile.honor * (picture.rungs / 5.0 + if picture.truce { 1.0 } else { 0.0 })
+        // Not kennt kein Gebot: Wer nicht mehr wachsen kann, wiegt Verträge leichter.
+        - profile.honor
+            * (picture.rungs / 5.0 * (1.0 - 0.5 * picture.want)
+                + if picture.truce { 1.0 } else { 0.0 })
         - picture.weariness / 100.0
 }
 
@@ -212,8 +215,19 @@ pub fn u_accept(
 ) -> f32 {
     match answering {
         Answering::Treaty(kind) => {
-            u_bind(picture, profile) + picture.trust
-                - levers.rung_cost[kind.index()] * (1.0 - profile.open)
+            let treaty = u_bind(picture, profile) + picture.trust
+                - levers.rung_cost[kind.index()] * (1.0 - profile.open);
+            if kind == TreatyKind::Union {
+                // Die Union führt in die Vereinigung: Sie schließt nur, wer diese auch
+                // annähme, als führende oder als geführte Seite. Führen will nur, wem die
+                // Vereinigung etwas gilt (`merge_lead_min`); wer das nicht will, muss bereit
+                // sein, zu folgen.
+                let i_lead = picture.share_me >= picture.share_other
+                    && profile.merge >= levers.merge_lead_min;
+                treaty.min(u_accept(Answering::Merge { i_lead }, picture, profile, levers) + picture.trust)
+            } else {
+                treaty
+            }
         }
         Answering::Peace { cost, gain } => {
             let weary = picture.weariness / levers.exhaustion.max(1.0) as f32;
@@ -231,13 +245,15 @@ pub fn u_accept(
         Answering::Merge { i_lead } => {
             let follow = if i_lead { 0.0 } else { 1.0 };
             let weight = picture.share_me / (picture.share_me + picture.share_other).max(1e-6);
-            // Der Preis der Eigenständigkeit schwindet mit der Not, bis auf die Hälfte.
+            // Der Preis der Eigenständigkeit schwindet mit der Not, bis auf die Hälfte, aber
+            // nur für die, denen Verbindung etwas gilt: Wer wenig auf sie gibt, sucht in
+            // der Not eher Beute als einen Herrn.
             u_bind(picture, profile)
                 - levers.lead_cost
                     * follow
                     * weight
                     * (1.0 - window(picture, profile).min(1.0))
-                    * (1.0 - 0.5 * picture.want)
+                    * (1.0 - 0.5 * picture.want * profile.merge.clamp(0.0, 1.0))
         }
     }
 }

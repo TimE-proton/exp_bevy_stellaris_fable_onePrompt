@@ -89,6 +89,9 @@ pub struct DiplomacyLevers {
     /// Gewicht der Grundhaltung, mit der eine Gemeinschaft beginnt, und das der übrigen.
     pub anchor_main: f32,
     pub anchor_rest: f32,
+    /// Gewichte, mit denen jede Gemeinschaft ihre Grundhaltung zieht (kooperativ,
+    /// opportunistisch, misstrauisch, expansionistisch).
+    pub anchor_draw: [f32; 4],
     /// Zug der Grundhaltung gegen den öffentlichen Druck.
     pub anchor_weight: f32,
     /// Anteil, um den die Gewichte monatlich ihrem Ziel folgen.
@@ -302,6 +305,13 @@ impl DiplomacyData {
             if !(0.0..=1.0).contains(&value) {
                 return Err(invalid(format!("{name} muss zwischen 0 und 1 liegen")));
             }
+        }
+        if levers.anchor_draw.iter().any(|w| !w.is_finite() || *w < 0.0)
+            || levers.anchor_draw.iter().sum::<f32>() <= 0.0
+        {
+            return Err(invalid(
+                "anchor_draw: Gewichte nicht negativ, zusammen positiv".into(),
+            ));
         }
         if (levers.anchor_main + 3.0 * levers.anchor_rest - 1.0).abs() > 1e-4 {
             return Err(invalid(
